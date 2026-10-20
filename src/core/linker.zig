@@ -107,8 +107,10 @@ pub const Linker = struct {
                     if (isUnderKeg(target, keg_path)) continue; // our own link
                     // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>.
                     const root = std.mem.trimEnd(u8, self.prefix, "/");
-                    const ours = std.mem.startsWith(u8, target, root) and
-                        std.mem.startsWith(u8, target[root.len..], "/Cellar/");
+                    // Skip repeated slashes: a "/opt/malt/" prefix yields "//Cellar".
+                    const rest = if (std.mem.startsWith(u8, target, root)) target[root.len..] else "";
+                    const ours = rest.len > 0 and rest[0] == '/' and
+                        std.mem.startsWith(u8, std.mem.trimStart(u8, rest, "/"), "Cellar/");
                     break :blk .{ extractKegFromPath(target) orelse target, true, ours };
                 };
 

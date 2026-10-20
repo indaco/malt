@@ -1115,6 +1115,18 @@ test "checkConflicts keeps malt's own link in_cellar under a trailing-slash pref
     try testing.expect((try conflictFor(slashed, own)).in_cellar);
 }
 
+test "checkConflicts keeps a link written under a trailing-slash prefix in_cellar" {
+    // `link` joins "<prefix>/" and "/Cellar", so the target holds a "//".
+    const base = try uniquePrefix("in_cellar_dslash");
+    defer testing.allocator.free(base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    const own = try std.fmt.allocPrint(testing.allocator, "{s}//Cellar/bar/1/bin/tool", .{base});
+    defer testing.allocator.free(own);
+    const slashed = try std.fmt.allocPrint(testing.allocator, "{s}/", .{base});
+    defer testing.allocator.free(slashed);
+    try testing.expect((try conflictFor(slashed, own)).in_cellar);
+}
+
 fn linkExists(prefix: []const u8, rel: []const u8) bool {
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, rel }) catch return false;
