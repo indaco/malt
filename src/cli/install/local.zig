@@ -1321,6 +1321,20 @@ pub fn materializeRubyFormula(
         swept_prior_links = true;
     }
 
+    // After the sweep, so the keg's own prior links do not count.
+    const found = linker.checkConflicts(cellar_path, false) catch &.{};
+    defer {
+        for (found) |c| {
+            allocator.free(c.link_path);
+            allocator.free(c.existing_keg);
+        }
+        if (found.len > 0) allocator.free(found);
+    }
+    if (found.len > 0) {
+        install_mod.reportConflicts(sink, found, resolved.name);
+        return InstallError.LinkFailed;
+    }
+
     var keg_id: i64 = 0;
     {
         // Route through the canonical seam inside the caller-owned txn.

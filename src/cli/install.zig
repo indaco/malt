@@ -1353,6 +1353,15 @@ fn runInstall(
     }
 }
 
+/// One report for every install path, so the wording cannot drift.
+pub fn reportConflicts(sink: OutputSink, conflicts: []const linker_mod.Conflict, name: []const u8) void {
+    sink.err("{s}: {d} symlink conflict(s) detected:", .{ name, conflicts.len });
+    for (conflicts) |conflict| {
+        sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
+    }
+    sink.err("{s}", .{conflictHint(conflicts, name)});
+}
+
 /// `--force` only sweeps links a keg of the same name left behind; another
 /// package's links need an uninstall, and a stray file or directory in the
 /// slot has to be removed by hand.
@@ -1664,11 +1673,7 @@ pub fn linkAndRecord(
             };
         }
         if (conflicts.len > 0) {
-            sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
-            for (conflicts) |conflict| {
-                sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
-            }
-            sink.err("{s}", .{conflictHint(conflicts, job.name)});
+            reportConflicts(sink, conflicts, job.name);
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
