@@ -91,8 +91,9 @@ for spec in "${CANDIDATES[@]}"; do
   bin="${spec##*:}"
   token="${slug##*/}"
   LOG="$PREFIX/install_${token}.log"
-  printf '▸ malt install %s (logs → %s)\n' "$slug" "$LOG"
-  "$BIN" install "$slug" >"$LOG" 2>&1 || true
+  printf '▸ malt install --cask %s (logs → %s)\n' "$slug" "$LOG"
+  # The longbridge tap also ships a same-named formula, which wins without --cask.
+  "$BIN" install --cask "$slug" >"$LOG" 2>&1 || true
 
   if grep -q "$BLANKET" "$LOG"; then
     tail -30 "$LOG" >&2
