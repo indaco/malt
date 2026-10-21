@@ -58,7 +58,7 @@ SOURCE="$KEG/share/ca-certificates/cacert.pem"
 [[ -f "$SCRIPT" && -f "$SOURCE" ]] || fail "keg is missing the post-install script or its source bundle"
 
 # ── the recognition digest still matches the shipped script ───────────
-want=$(grep -oE '"[0-9a-f]{64}"' "$ROOT/src/core/ca_bundle.zig" | head -1 | tr -d '"')
+want=$(grep -E '^pub const known_script_sha256 = ' "$ROOT/src/core/ca_bundle.zig" | grep -oE '[0-9a-f]{64}')
 got=$(shasum -a 256 "$SCRIPT" | cut -d' ' -f1)
 if [[ "$want" != "$got" ]]; then
   echo "  upstream script digest: $got" >&2

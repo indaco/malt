@@ -160,6 +160,8 @@ pub fn buildFrom(
                 }
             }
 
+            if (excludedByUpstream(der_bytes, parsed)) continue;
+
             var fp: Fingerprint = undefined;
             Sha256.hash(der_bytes, &fp, .{});
             if ((try seen.getOrPut(gpa, fp)).found_existing) continue;
@@ -173,6 +175,25 @@ pub fn buildFrom(
         verifier.call(verifier.ctx, canary[0..canary_len], canary_purpose) != .trusted)
         return error.TrustEvaluationFailed;
     return out.toOwnedSlice(gpa);
+}
+
+/// SPKI SHA-256 of the roots upstream drops from every source: AAA
+/// Certificate Services and the emSign G3 roots.
+const excluded_spki_sha256 = [_]*const [64]u8{
+    "bd153ed7b0434f6886b17bce8bbe84ed340c7132d702a8f4fa318f756ecbd6f3",
+    "c619e4780ed8e0abeda24ad732567de4383a7ea941338f6d1a7d1b49ac792fe9",
+    "8d417db2dd8bf5e3084d1e3f196d583849d81bdd4c00c70b9d39369e96b8c782",
+};
+
+/// The script skips a certificate whose key it cannot hash, so this drops it too.
+fn excludedByUpstream(der_bytes: []const u8, parsed: Certificate.Parsed) bool {
+    const start = parsed.subject_slice.end;
+    const spki = der.Element.parse(der_bytes, start) catch return true;
+    var digest: Fingerprint = undefined;
+    Sha256.hash(der_bytes[start..spki.slice.end], &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    for (excluded_spki_sha256) |h| if (std.mem.eql(u8, h, &hex)) return true;
+    return false;
 }
 
 /// Whether this builder would treat `pem_block` as a CA fit for the trust
@@ -238,7 +259,7 @@ pub fn build(
 /// verified against. Recognising the script by content, not by formula name,
 /// means any upstream edit falls back to running it — correct, just slower —
 /// until the equivalence test is re-run and this digest updated.
-pub const known_script_sha256 = "0d382c7231f5f0378947729c5815f7fb8f6c12c16396172513109b13bd59b900";
+pub const known_script_sha256 = "da9391b40cabf30802bab7f27cfbdd4292bbc79155a4731e671526351ee24825";
 
 /// OpenSSL kegs that read `<prefix>/etc/<keg>/cert.pem`, newest first.
 /// Homebrew moves dependents to a new major over time, so a prefix can
@@ -1434,6 +1455,46 @@ test "one source's certificates are emitted in upstream's glob order" {
         leaf_pem ++ "\n\n" ++ nosign_pem ++ "\n\n" ++ ca_pem ++ "\n",
         out,
     );
+}
+
+// AAA Certificate Services, the real root: its SPKI is on upstream's exclusion list.
+const aaa_pem =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIEMjCCAxqgAwIBAgIBATANBgkqhkiG9w0BAQUFADB7MQswCQYDVQQGEwJHQjEb
+    \\MBkGA1UECAwSR3JlYXRlciBNYW5jaGVzdGVyMRAwDgYDVQQHDAdTYWxmb3JkMRow
+    \\GAYDVQQKDBFDb21vZG8gQ0EgTGltaXRlZDEhMB8GA1UEAwwYQUFBIENlcnRpZmlj
+    \\YXRlIFNlcnZpY2VzMB4XDTA0MDEwMTAwMDAwMFoXDTI4MTIzMTIzNTk1OVowezEL
+    \\MAkGA1UEBhMCR0IxGzAZBgNVBAgMEkdyZWF0ZXIgTWFuY2hlc3RlcjEQMA4GA1UE
+    \\BwwHU2FsZm9yZDEaMBgGA1UECgwRQ29tb2RvIENBIExpbWl0ZWQxITAfBgNVBAMM
+    \\GEFBQSBDZXJ0aWZpY2F0ZSBTZXJ2aWNlczCCASIwDQYJKoZIhvcNAQEBBQADggEP
+    \\ADCCAQoCggEBAL5AnfRu4ep2hxxNRUSOvkbIgwadwSr+GB+O5AL686tdUIoWMQua
+    \\BtDFcCLNSS1UY8y2bmhGC1Pqy0wkwLxyTurxFa70VJoSCsN6sjNg4tqJVfMiWPPe
+    \\3M/vg4aijJRPn2jymJBGhCfHdr/jzDUsi14HZGWCwEiwqJH5YZ92IFCokcdmtet4
+    \\YgNW8IoaE+oxox6gmf049vYnMlhvB/VruPsUK6+3qszWY19zjNoFmag4qMsXeDZR
+    \\rOme9Hg6jc8P2ULimAyrL58OAd7vn5lJ8S3frHRNG5i1R8XlKdH5kBjHYpy+g8cm
+    \\ez6KJcfA3Z3mNWgQIJ2P2N7Sw4ScDV7oL8kCAwEAAaOBwDCBvTAdBgNVHQ4EFgQU
+    \\oBEKIz6W8Qfs4q8p74Klf9AwpLQwDgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB/wQF
+    \\MAMBAf8wewYDVR0fBHQwcjA4oDagNIYyaHR0cDovL2NybC5jb21vZG9jYS5jb20v
+    \\QUFBQ2VydGlmaWNhdGVTZXJ2aWNlcy5jcmwwNqA0oDKGMGh0dHA6Ly9jcmwuY29t
+    \\b2RvLm5ldC9BQUFDZXJ0aWZpY2F0ZVNlcnZpY2VzLmNybDANBgkqhkiG9w0BAQUF
+    \\AAOCAQEACFb8AvCb6P+k+tZ7xkSAzk/ExfYAWMymtrwUSWgEdujm7l3sAg9g1o1Q
+    \\GE8mTgHj5rCl7r+8dFRBv/38ErjHT1r0iWAFf2C3BUrz9vHCv8S5dIa2LX1rzNLz
+    \\Rt0vxuBqw8M0Ayx9lt1awg6nCpnBBYurDC/zXDrPbDdVCYfeU0BsWO/8tqtlbgT2
+    \\G9w84FoVxp7Z8VlIMCFlA2zs6SFz7JsDoeA3raAVGI/6ugLOpyypEBMs1OUIJqsi
+    \\l2D4kF501KKaU73yqWjgom7C12yxow+ev+to51byrvLjKzg6CYG1a4XXvi3tPxq3
+    \\smPi9WIsgtRqAEFQ8TmDn5XpNpaYbg==
+    \\-----END CERTIFICATE-----
+;
+
+test "a root upstream excludes by public key is dropped from every source" {
+    const out = try buildFrom(
+        testing.allocator,
+        &.{ .{ .pem = aaa_pem, .purpose = .basic }, .{ .pem = aaa_pem }, .{ .pem = ca_pem } },
+        .{ .call = allowAll },
+        now_valid,
+    );
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(ca_pem ++ "\n", out);
 }
 
 test "a trust store that cannot be asked aborts, rather than dropping the root" {
