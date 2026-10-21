@@ -136,7 +136,7 @@ pub fn patchPathsCollecting(
         // distinct prefixes onto one target. Keep the first occurrence of
         // each final value; queue any later collider for `-delete_rpath`.
         // Scoped to LC_RPATH — duplicate LC_LOAD_DYLIB is legal.
-        if (lcp.cmd == @intFromEnum(std.macho.LC.RPATH)) {
+        if (lcp.cmd == @backingInt(std.macho.LC.RPATH)) {
             var final_buf: [1024]u8 = undefined;
             if (rpathFinalValue(&final_buf, lcp.path, r_opt)) |final| {
                 var seen = false;
@@ -471,8 +471,8 @@ const InstallNameToolForm = enum { change, rpath, id };
 fn installNameToolForm(cmd: u32) InstallNameToolForm {
     const lc = std.macho.LC;
     return switch (cmd) {
-        @intFromEnum(lc.ID_DYLIB) => .id,
-        @intFromEnum(lc.RPATH) => .rpath,
+        @backingInt(lc.ID_DYLIB) => .id,
+        @backingInt(lc.RPATH) => .rpath,
         // LOAD_DYLIB / LOAD_WEAK_DYLIB / LAZY_LOAD_DYLIB / REEXPORT_DYLIB
         // all use `-change`. Default to `-change` for any other dylib-ish
         // load command rather than refusing the flush.
@@ -619,7 +619,7 @@ test "buildInstallNameToolArgv emits one -id for a fat binary" {
     // yields one LC_ID_DYLIB per slice. install_name_tool refuses a second
     // -id, and one covers all slices anyway.
     const a = std.testing.allocator;
-    const id_cmd = @intFromEnum(std.macho.LC.ID_DYLIB);
+    const id_cmd = @backingInt(std.macho.LC.ID_DYLIB);
     const entries = [_]OverflowEntry{
         .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
         .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
@@ -696,10 +696,10 @@ test "buildInstallNameToolArgv renders each load-command form" {
     const a = std.testing.allocator;
     const lc = std.macho.LC;
     const entries = [_]OverflowEntry{
-        .{ .cmd = @intFromEnum(lc.LOAD_DYLIB), .old_path = "/old/dep", .new_path = "/new/dep" },
-        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/old/rp", .new_path = "/new/rp" },
-        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/dup/rp", .new_path = "", .delete = true },
-        .{ .cmd = @intFromEnum(lc.ID_DYLIB), .old_path = "/old/id", .new_path = "/new/id" },
+        .{ .cmd = @backingInt(lc.LOAD_DYLIB), .old_path = "/old/dep", .new_path = "/new/dep" },
+        .{ .cmd = @backingInt(lc.RPATH), .old_path = "/old/rp", .new_path = "/new/rp" },
+        .{ .cmd = @backingInt(lc.RPATH), .old_path = "/dup/rp", .new_path = "", .delete = true },
+        .{ .cmd = @backingInt(lc.ID_DYLIB), .old_path = "/old/id", .new_path = "/new/id" },
     };
     const argv = try buildInstallNameToolArgv(a, "/keg/thing.dylib", &entries);
     defer a.free(argv);
@@ -723,9 +723,10 @@ test "buildInstallNameToolArgv renders each load-command form" {
 }
 
 test "buildInstallNameToolArgv reports allocation failure rather than a partial argv" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    // Also fail the in-place shrink, so `toOwnedSlice` must allocate.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
     const entries = [_]OverflowEntry{
-        .{ .cmd = @intFromEnum(std.macho.LC.ID_DYLIB), .old_path = "/o", .new_path = "/n" },
+        .{ .cmd = @backingInt(std.macho.LC.ID_DYLIB), .old_path = "/o", .new_path = "/n" },
     };
     try std.testing.expectError(
         error.OutOfMemory,
@@ -858,7 +859,7 @@ test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
     defer threaded.deinit();
 
     const entries_to_flush = [_]OverflowEntry{.{
-        .cmd = @intFromEnum(std.macho.LC.LOAD_DYLIB),
+        .cmd = @backingInt(std.macho.LC.LOAD_DYLIB),
         .old_path = "/usr/local/lib/libx.dylib",
         .new_path = "/opt/malt/lib/libx.dylib",
     }};
@@ -1039,9 +1040,9 @@ pub fn fileLinksPath(io: std.Io, allocator: std.mem.Allocator, file_path: []cons
 
     for (macho.paths) |p| {
         switch (p.cmd) {
-            @intFromEnum(std.macho.LC.LOAD_DYLIB),
-            @intFromEnum(std.macho.LC.LOAD_WEAK_DYLIB),
-            @intFromEnum(std.macho.LC.REEXPORT_DYLIB),
+            @backingInt(std.macho.LC.LOAD_DYLIB),
+            @backingInt(std.macho.LC.LOAD_WEAK_DYLIB),
+            @backingInt(std.macho.LC.REEXPORT_DYLIB),
             => if (std.mem.indexOf(u8, p.path, needle) != null) return true,
             else => {},
         }
@@ -1099,7 +1100,7 @@ pub fn verifyFile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u
     var macho = parser.parse(allocator, data) catch return;
     defer macho.deinit();
 
-    const rpath_cmd = @intFromEnum(std.macho.LC.RPATH);
+    const rpath_cmd = @backingInt(std.macho.LC.RPATH);
     for (macho.paths, 0..) |p, i| {
         for (relocation_placeholders) |token| {
             if (std.mem.indexOf(u8, p.path, token) != null)
@@ -1163,7 +1164,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -1252,7 +1253,7 @@ test "patchPathsCollecting dedups an LC_RPATH that relocation collapses onto a k
     try testing.expectEqual(@as(u32, 1), outcome.patched_count);
     try testing.expectEqual(@as(usize, 1), outcome.overflow.len);
     try testing.expect(outcome.overflow[0].delete);
-    try testing.expectEqual(@intFromEnum(std.macho.LC.RPATH), outcome.overflow[0].cmd);
+    try testing.expectEqual(@backingInt(std.macho.LC.RPATH), outcome.overflow[0].cmd);
     try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[0].old_path);
 }
 

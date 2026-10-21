@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.18.0/.schema/devbox.schema.json",
   "packages": [
-    "zig@0.16",
+    "zig@0.17",
     "git@latest",
     "curl@latest",
     "just@latest",

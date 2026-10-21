@@ -13,7 +13,7 @@ const cellar_mod = @import("malt").cellar;
 
 const c = test_io.c;
 
-const sha_receipt_lists = "a1" ** 32;
+const sha_receipt_lists = std.mem.asBytes(&@as([32][2]u8, @splat("a1".*)));
 
 fn setMaltPrefix(prefix: [:0]const u8) [:0]const u8 {
     const old = test_io.getenv("MALT_PREFIX") orelse "";

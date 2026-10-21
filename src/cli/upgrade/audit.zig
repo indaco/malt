@@ -164,7 +164,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -213,30 +213,33 @@ const TempDb = struct {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', 0);",
         .{ name, name, version, name, version },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertPinnedKeg(db: *sqlite.Database, name: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', 1);",
         .{ name, name, version, name, version },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', '{s}');",
         .{ name, name, version, name, version, tap },
+        0,
     );
     try db.exec(sql);
 }
@@ -245,20 +248,22 @@ fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap
 /// these still resolve from the bulk dump.
 fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.com');",
         .{ token, token, version },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertCaskTap(db: *sqlite.Database, token: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '{s}', 'https://example.com', '{s}');",
         .{ token, token, version, tap },
+        0,
     );
     try db.exec(sql);
 }
@@ -549,7 +554,7 @@ test "an unparseable upstream version reaches the plan as unknown" {
     try insertKeg(&t.db, "alpha", "1.0");
 
     var body_buf: [512]u8 = undefined;
-    const body = try std.fmt.bufPrint(&body_buf, "alpha\t1.{s}\t0\n", .{"9" ** 300});
+    const body = try std.fmt.bufPrint(&body_buf, "alpha\t1.{s}\t0\n", .{&@as([300]u8, @splat('9'))});
     try writeVersionsIndex(t.dir(), .formula, body);
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);

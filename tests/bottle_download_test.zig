@@ -186,7 +186,7 @@ test "download rejects a SHA mismatch: populates MismatchInfo, wipes temp + dest
     // Any bytes will do — the bottle is never extracted on a mismatch.
     const blob = "these-identity-encoded-bytes-are-not-a-real-bottle-0123456789";
     const real = hexSha(blob);
-    const wrong = "0" ** 64;
+    const wrong = &@as([64]u8, @splat('0'));
 
     var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try addr.listen(io, .{ .reuse_address = true });
@@ -315,7 +315,7 @@ test "the tee hashes the transport-decoded bottle, not the wire bytes (SHA domai
     const dest_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dest", .{base});
     defer testing.allocator.free(dest_dir);
 
-    const wrong = "0" ** 64;
+    const wrong = &@as([64]u8, @splat('0'));
     var mismatch: bottle.MismatchInfo = undefined;
     const result = bottle.download(io, testing.allocator, &g, &http, "homebrew/core/pkg", "sha256:abc", wrong, dest_dir, null, &mismatch);
 
@@ -361,7 +361,7 @@ test "a mid-stream transport failure leaves no temp file and no dest dir" {
     defer testing.allocator.free(dest_dir);
 
     var mismatch: bottle.MismatchInfo = undefined;
-    const result = bottle.download(io, testing.allocator, &g, &http, "homebrew/core/pkg", "sha256:abc", "0" ** 64, dest_dir, null, &mismatch);
+    const result = bottle.download(io, testing.allocator, &g, &http, "homebrew/core/pkg", "sha256:abc", &@as([64]u8, @splat('0')), dest_dir, null, &mismatch);
 
     http.deinit();
     server_thread.join();

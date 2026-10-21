@@ -780,7 +780,7 @@ test "execute under a max-length prefix takes the lock and fails loud instead of
     @memcpy(buf[0..base.len], base);
     var i = base.len;
     while (i < buf.len) : (i += 1) buf[i] = if ((i - base.len) % 100 == 0) '/' else 'a';
-    const long = try testing.allocator.dupeZ(u8, &buf);
+    const long = try testing.allocator.dupeSentinel(u8, &buf, 0);
     defer testing.allocator.free(long);
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{long});
@@ -1314,7 +1314,7 @@ test "execute --dry-run on a name that is both kinds previews the formula and wa
     defer prefix.deinit(testing.allocator);
     try seedKeg(testing.allocator, prefix.path, "box", "1.0");
     // A long version still has to read back, or the collision would abort.
-    try sabotage(prefix.path, "INSERT INTO casks (token, name, version, url) VALUES ('box', 'box', '" ++ "9" ** 200 ++ "', 'https://example.invalid/c.zip');");
+    try sabotage(prefix.path, "INSERT INTO casks (token, name, version, url) VALUES ('box', 'box', '" ++ &@as([200]u8, @splat('9')) ++ "', 'https://example.invalid/c.zip');");
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);

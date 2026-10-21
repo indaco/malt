@@ -218,7 +218,7 @@ pub fn corruptTable(db_path: [:0]const u8, table: []const u8) !void {
     }
     const f = try std.Io.Dir.openFileAbsolute(std.Options.debug_io, db_path, .{ .mode = .read_write });
     defer f.close(std.Options.debug_io);
-    const junk = [_]u8{0xff} ** 65536;
+    const junk = @as([65536]u8, @splat(0xff));
     for (pages[0..n]) |p| {
         const len: usize = @intCast(page_size);
         try f.writePositionalAll(std.Options.debug_io, junk[0..len], @intCast((p - 1) * page_size));
@@ -265,7 +265,7 @@ pub const LongPrefix = struct {
         try buf.append(allocator, '/');
         try buf.appendNTimes(allocator, 'b', len - buf.items.len);
 
-        const prefix = try allocator.dupeZ(u8, buf.items);
+        const prefix = try allocator.dupeSentinel(u8, buf.items, 0);
         errdefer allocator.free(prefix);
         deleteTreeAbsolute(std.Options.debug_io, root) catch {};
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix});

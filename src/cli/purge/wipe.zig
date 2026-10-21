@@ -447,7 +447,7 @@ const PrefixEnv = struct {
     prev: ?[:0]u8,
 
     fn set(base: [:0]const u8) !PrefixEnv {
-        const prev: ?[:0]u8 = if (c.getenv("MALT_PREFIX")) |v| try std.testing.allocator.dupeZ(u8, std.mem.span(v)) else null;
+        const prev: ?[:0]u8 = if (c.getenv("MALT_PREFIX")) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
         _ = c.setenv("MALT_PREFIX", base.ptr, 1);
         return .{ .prev = prev };
     }

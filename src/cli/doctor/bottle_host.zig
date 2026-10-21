@@ -264,8 +264,8 @@ pub fn detail(buf: []u8, report: Report) ?[]const u8 {
 
 const testing = std.testing;
 const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
-const sha_a = "a" ** 64;
-const sha_b = "b" ** 64;
+const sha_a = &@as([64]u8, @splat('a'));
+const sha_b = &@as([64]u8, @splat('b'));
 
 // Comptime literal: parseFormula may borrow from its input.
 fn parseDoc(comptime files_json: []const u8) !formula_mod.Formula {
@@ -284,11 +284,11 @@ test "a digest only a newer macOS's bottle carries is flagged" {
 }
 
 test "a digest from the host's own, an older, or the all bottle is fine" {
-    var f = try parseDoc(comptime bottle(arch ++ "tahoe", sha_a) ++ "," ++ bottle(arch ++ "sonoma", sha_b) ++ "," ++ bottle("all", "c" ** 64));
+    var f = try parseDoc(comptime bottle(arch ++ "tahoe", sha_a) ++ "," ++ bottle(arch ++ "sonoma", sha_b) ++ "," ++ bottle("all", &@as([64]u8, @splat('c'))));
     defer f.deinit();
     try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, 26));
     try testing.expect(!pouredTooNew(f.bottle_files.?, sha_b, 26));
-    try testing.expect(!pouredTooNew(f.bottle_files.?, "c" ** 64, 26));
+    try testing.expect(!pouredTooNew(f.bottle_files.?, &@as([64]u8, @splat('c')), 26));
 }
 
 test "a digest on a tag this build cannot place is never flagged" {

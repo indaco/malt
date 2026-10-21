@@ -122,11 +122,11 @@ pub fn minMacosMajor(data: []const u8) ?u32 {
         const body = data[offset..][0..cmdsize];
         offset += cmdsize;
         // The packed version is xxxx.yy.zz; only the major matters here.
-        if (cmd == @intFromEnum(macho.LC.BUILD_VERSION) and cmdsize >= 16) {
-            if (std.mem.readInt(u32, body[8..12], .little) != @intFromEnum(macho.PLATFORM.MACOS)) return null;
+        if (cmd == @backingInt(macho.LC.BUILD_VERSION) and cmdsize >= 16) {
+            if (std.mem.readInt(u32, body[8..12], .little) != @backingInt(macho.PLATFORM.MACOS)) return null;
             return std.mem.readInt(u32, body[12..16], .little) >> 16;
         }
-        if (cmd == @intFromEnum(macho.LC.VERSION_MIN_MACOSX) and cmdsize >= 12) {
+        if (cmd == @backingInt(macho.LC.VERSION_MIN_MACOSX) and cmdsize >= 12) {
             return std.mem.readInt(u32, body[8..12], .little) >> 16;
         }
     }
@@ -301,7 +301,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
         if (cmd_end[1] != 0 or cmd_end[0] > data.len)
             return ParseError.InvalidLoadCommand;
 
-        const cmd_int = @intFromEnum(lc.cmd);
+        const cmd_int = @backingInt(lc.cmd);
 
         switch (lc.cmd) {
             .ID_DYLIB, .LOAD_DYLIB, .LOAD_WEAK_DYLIB, .REEXPORT_DYLIB => {
@@ -494,7 +494,7 @@ test "readFatArch decodes the 32-bit layout big-endian" {
 }
 
 test "readFatArch widens 32-bit fields instead of mangling them" {
-    var entry: [20]u8 = [_]u8{0} ** 20;
+    var entry: [20]u8 = @as([20]u8, @splat(0));
     std.mem.writeInt(u32, entry[8..12], 0xFFFF_FFFF, .big);
     std.mem.writeInt(u32, entry[12..16], 0xFFFF_FFFE, .big);
 

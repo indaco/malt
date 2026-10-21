@@ -940,7 +940,7 @@ test "drawDeterminate emits main's exact happy-path frame" {
     bar.drawDeterminate();
     endStderrCapture();
 
-    const expected = "\r  * dl " ++ ("=" ** 30) ++ " 100% (0/0 KB | --)\x1b[K";
+    const expected = "\r  * dl " ++ (&@as([30]u8, @splat('='))) ++ " 100% (0/0 KB | --)\x1b[K";
     try std.testing.expectEqualStrings(expected, buf.items);
 }
 
@@ -1090,7 +1090,7 @@ test "ProgressBar quiet trumps plain mode" {
 // future rename can't silently break the CI-friendly default.
 test "resolveModeFromEnviron flips to plain when CI=true is set" {
     var buf: [64:0]u8 = undefined;
-    const env_value = std.fmt.bufPrintZ(&buf, "CI=true", .{}) catch unreachable;
+    const env_value = std.fmt.bufPrintSentinel(&buf, "CI=true", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{env_value.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1100,8 +1100,8 @@ test "resolveModeFromEnviron flips to plain when CI=true is set" {
 test "resolveModeFromEnviron honours an explicit MALT_PROGRESS=none even with CI=true" {
     var ci_buf: [64:0]u8 = undefined;
     var prog_buf: [64:0]u8 = undefined;
-    const ci_value = std.fmt.bufPrintZ(&ci_buf, "CI=true", .{}) catch unreachable;
-    const prog_value = std.fmt.bufPrintZ(&prog_buf, "MALT_PROGRESS=none", .{}) catch unreachable;
+    const ci_value = std.fmt.bufPrintSentinel(&ci_buf, "CI=true", .{}, 0) catch unreachable;
+    const prog_value = std.fmt.bufPrintSentinel(&prog_buf, "MALT_PROGRESS=none", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ ci_value.ptr, prog_value.ptr };
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1110,7 +1110,7 @@ test "resolveModeFromEnviron honours an explicit MALT_PROGRESS=none even with CI
 
 test "resolveModeFromEnviron flips to plain on GITHUB_ACTIONS=true" {
     var buf: [64:0]u8 = undefined;
-    const v = std.fmt.bufPrintZ(&buf, "GITHUB_ACTIONS=true", .{}) catch unreachable;
+    const v = std.fmt.bufPrintSentinel(&buf, "GITHUB_ACTIONS=true", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{v.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1127,7 +1127,7 @@ test "resolveModeFromEnviron returns tty on an empty environ" {
 // users into the plain bar.
 test "resolveModeFromEnviron treats empty CI value as unset" {
     var buf: [16:0]u8 = undefined;
-    const v = std.fmt.bufPrintZ(&buf, "CI=", .{}) catch unreachable;
+    const v = std.fmt.bufPrintSentinel(&buf, "CI=", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{v.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 

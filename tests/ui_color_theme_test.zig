@@ -236,7 +236,7 @@ test "resolveThemeFromEnv: unknown value falls back to default" {
     try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("")); // the len==0 guard
     // A value longer than the 32-byte lowercase buffer must not overflow it — it
     // falls back to default (the raw.len > buf.len guard).
-    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("d" ** 64));
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv(&@as([64]u8, @splat('d'))));
 }
 
 test "resolveThemeFromEnv: reserved background values resolve to default theme" {

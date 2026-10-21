@@ -15,7 +15,7 @@ const schema = malt.schema;
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "installkfb", suffix);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     // Mandatory layout subdirs — Cellar / store live here.
@@ -87,7 +87,7 @@ test "installKegFromBottle skips the download branch when the store already hold
     // expects clonefile-copied into Cellar. The bottle declares
     // `cellar = ":any"` so the Mach-O patcher + codesign step both skip,
     // letting a plain text file through without faking a real binary.
-    const sha = "ba5e" ** 16; // 64 hex chars
+    const sha = std.mem.asBytes(&@as([16][4]u8, @splat("ba5e".*))); // 64 hex chars
     const inner_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/warmpkg/1.0", .{ prefix, sha });
     defer testing.allocator.free(inner_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, inner_dir);
@@ -172,7 +172,7 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
 
     // Pre-seed `store/<sha>/` so `installKegFromBottle` skips the
     // download branch and goes straight to `materializeWithCellar`.
-    const sha = "feed" ** 16;
+    const sha = std.mem.asBytes(&@as([16][4]u8, @splat("feed".*)));
     const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
@@ -181,8 +181,8 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
     // stack buffer in `materializeWithCellar`, which surfaces as
     // `CellarError.PathTooLong`. We pin that specific variant to prove
     // `cellar_diag` carries the real cause, not a generic catch-all.
-    const long_name = "a" ** 230;
-    const long_ver = "1" ** 230;
+    const long_name = &@as([230]u8, @splat('a'));
+    const long_ver = &@as([230]u8, @splat('1'));
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -13,7 +13,9 @@ builds:
       - aarch64-macos
       - x86_64-macos
     flags:
-      - -Doptimize=ReleaseSafe
+      - -Doptimize=safe
+      - --sysroot
+      - "{{ .Env.SDKROOT }}"
 
 universal_binaries:
   - replace: true

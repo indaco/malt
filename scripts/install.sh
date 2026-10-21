@@ -144,7 +144,7 @@ if [ -z "$LATEST" ]; then
   if [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/build.zig" ] && [ -f "${REPO_ROOT}/src/main.zig" ]; then
     info "Building from local source (${REPO_ROOT})..."
     cd "$REPO_ROOT"
-    zig build -Doptimize=ReleaseSafe
+    zig build -Doptimize=safe
     BUILD_BIN_DIR="${REPO_ROOT}/zig-out/bin"
     MAN_SRC="${REPO_ROOT}/man/malt.1"
   else
@@ -173,7 +173,7 @@ if [ -z "$LATEST" ]; then
 
     info "Building (this may take a minute)..."
     cd "$TMPDIR/malt"
-    zig build -Doptimize=ReleaseSafe
+    zig build -Doptimize=safe
     BUILD_BIN_DIR="$TMPDIR/malt/zig-out/bin"
     MAN_SRC="$TMPDIR/malt/man/malt.1"
   fi

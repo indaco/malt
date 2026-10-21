@@ -22,7 +22,7 @@ const TempDb = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "list", tag);
-        const dir = try arena.allocator().dupeZ(u8, base);
+        const dir = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var buf: [256]u8 = undefined;
@@ -42,40 +42,44 @@ const TempDb = struct {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', {d});",
         .{ name, name, version, name, version, @intFromBool(pinned) },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', '{s}');",
         .{ name, name, version, name, version, tap },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.com');",
         .{ token, token, version },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertCaskTap(db: *sqlite.Database, token: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '{s}', 'https://example.com', '{s}');",
         .{ token, token, version, tap },
+        0,
     );
     try db.exec(sql);
 }
@@ -684,10 +688,11 @@ test "buildListJson --size sums size_bytes from the keg cellar dir" {
     try writeTreeFile(cellar, "lib/b", "678"); // 3 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('treesize','treesize','1.0','deadbeef','{s}');",
         .{cellar},
+        0,
     );
     try t.db.exec(sql);
 
@@ -726,10 +731,11 @@ test "buildListJson --size emits size_bytes:0 for an empty cellar dir" {
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cellar);
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('empty','empty','1.0','deadbeef','{s}');",
         .{cellar},
+        0,
     );
     try t.db.exec(sql);
 
@@ -752,10 +758,11 @@ test "buildListJson --size sums a cask's Caskroom dir and app_path bundle" {
     try writeTreeFile(app, "Contents/MacOS/widget", "binary"); // 6 bytes app payload
 
     var sb: [700]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO casks (token, name, version, url, app_path) VALUES ('widget','Widget','1.0','https://example.invalid','{s}');",
         .{app},
+        0,
     );
     try t.db.exec(sql);
 
@@ -814,10 +821,11 @@ test "buildListJson --size does not double-count a cask app_path symlinked into 
     var appb: [256]u8 = undefined;
     const app = try std.fmt.bufPrint(&appb, "{s}/tool", .{bindir});
     var sb: [700]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO casks (token, name, version, url, app_path) VALUES ('tool','tool','2.0','https://example.invalid','{s}');",
         .{app},
+        0,
     );
     try t.db.exec(sql);
 
@@ -890,10 +898,11 @@ test "buildListJson --size --linked emits size_bytes before linked" {
     try writeTreeFile(cellar, "bin/x", "ab"); // 2 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path) VALUES (1,'combo','combo','1.0','aa','{s}');",
         .{cellar},
+        0,
     );
     try t.db.exec(sql);
     try t.db.exec(
@@ -921,10 +930,11 @@ test "buildListJson --tap --size --linked keeps column alignment in the tap SQL"
     try writeTreeFile(cellar, "bin/y", "abc"); // 3 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, tap) VALUES (1,'tapped','tapped','1.0','aa','{s}','user/repo');",
         .{cellar},
+        0,
     );
     try t.db.exec(sql);
     try t.db.exec(
@@ -958,10 +968,11 @@ test "buildListJson --pinned --size --linked enriches the pinned installed rows"
     try writeTreeFile(cellar, "bin/h", "abcd"); // 4 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sb,
         "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, pinned) VALUES (1,'held','held','1.0','aa','{s}',1);",
         .{cellar},
+        0,
     );
     try t.db.exec(sql);
     try t.db.exec(

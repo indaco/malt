@@ -318,7 +318,7 @@ test "rgb array rejects rgba and every non-3-integer shape" {
 
 test "an over-long hex string is rejected on length alone (no scan, no DoS)" {
     // 4096 'f's after '#': neither arity, so it fails before any digit is read.
-    try expectRejects("\"#" ++ ("f" ** 4096) ++ "\"");
+    try expectRejects("\"#" ++ (&@as([4096]u8, @splat('f'))) ++ "\"");
 }
 
 test "rgb array rejects an out-of-i64-range element (number_string)" {

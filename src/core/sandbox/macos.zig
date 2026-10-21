@@ -425,7 +425,7 @@ pub fn buildArgv(
         list.deinit(allocator);
     }
     for (argv) |a| {
-        const s = allocator.dupeZ(u8, a) catch return SandboxError.EnvBuildFailed;
+        const s = allocator.dupeSentinel(u8, a, 0) catch return SandboxError.EnvBuildFailed;
         list.append(allocator, s) catch {
             allocator.free(s);
             return SandboxError.EnvBuildFailed;

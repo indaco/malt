@@ -17,7 +17,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     // Process-unique: a bare timestamp collides between overlapping runs.
     const raw = try test_io.uniqueTempPath(testing.allocator, "cli_tap", suffix);
     defer testing.allocator.free(raw);
-    const path = try testing.allocator.dupeZ(u8, raw);
+    const path = try testing.allocator.dupeSentinel(u8, raw, 0);
     errdefer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -46,7 +46,7 @@ test "execute with --json on a prefix with no db/ directory still emits `[]`" {
     // not silently-empty stdout.
     const raw = try test_io.uniqueTempPath(testing.allocator, "cli_tap", "fresh_no_db");
     defer testing.allocator.free(raw);
-    const path = try testing.allocator.dupeZ(u8, raw);
+    const path = try testing.allocator.dupeSentinel(u8, raw, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -265,9 +265,9 @@ test "validateTapName: rejects invalid characters" {
 }
 
 test "validateTapName: rejects over-long components" {
-    const long_user = "a" ** 65 ++ "/repo";
+    const long_user = &@as([65]u8, @splat('a')) ++ "/repo";
     try testing.expectError(bad, tap_cli.validateTapName(long_user));
-    const long_repo = "user/" ++ "b" ** 65;
+    const long_repo = "user/" ++ &@as([65]u8, @splat('b'));
     try testing.expectError(bad, tap_cli.validateTapName(long_repo));
 }
 

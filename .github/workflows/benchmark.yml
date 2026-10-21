@@ -34,7 +34,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
           # A restored cache once returned a malt binary built from an older
           # release tree. The build is ~75 s of a ~55 min run, so build cold.
           use-cache: false

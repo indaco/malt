@@ -208,7 +208,7 @@ test "checkPrefixSane accepts a short prefix" {
 }
 
 test "checkPrefixSane rejects an absurdly long prefix" {
-    const huge = "/" ++ "a" ** 300;
+    const huge = "/" ++ &@as([300]u8, @splat('a'));
     try testing.expectError(install_args.PrefixError.PrefixAbsurd, install_args.checkPrefixSane(huge));
 }
 
@@ -910,7 +910,7 @@ fn formulaJsonWithThreeDeps(
 /// chain: without it the concat lands in a stack temporary and the fixture
 /// hands back a dangling slice.
 fn storeKey(comptime seed: []const u8) *const [64]u8 {
-    const padded = seed ++ "0" ** 64;
+    const padded = seed ++ &@as([64]u8, @splat('0'));
     return padded[0..64];
 }
 
@@ -1158,7 +1158,7 @@ fn insertKegRow(
         try stmt.bindText(2, name);
         try stmt.bindText(3, version);
         try stmt.bindInt(4, revision);
-        try stmt.bindText(5, "0" ** 64);
+        try stmt.bindText(5, &@as([64]u8, @splat('0')));
         try stmt.bindText(6, cellar_path);
         _ = try stmt.step();
     }
@@ -1519,7 +1519,7 @@ test "two-phase sweep preserves a pin set on the stale revision through INSERT O
         try insert.bindText(2, "foo");
         try insert.bindText(3, "2.0");
         try insert.bindInt(4, 0);
-        try insert.bindText(5, "0" ** 64);
+        try insert.bindText(5, &@as([64]u8, @splat('0')));
         try insert.bindText(6, keep_keg);
         _ = try insert.step();
     }

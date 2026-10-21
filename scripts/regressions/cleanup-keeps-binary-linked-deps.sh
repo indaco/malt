@@ -28,7 +28,7 @@ fi
 
 BIN="$ROOT/zig-out/test-bin/lib_tests"
 if [[ ! -x "$BIN" ]]; then
-  (cd "$ROOT" && zig build test-bin -Doptimize=ReleaseSafe >/dev/null 2>&1) || {
+  (cd "$ROOT" && zig build test-bin -Doptimize=safe >/dev/null 2>&1) || {
     echo "FAIL: could not build the test binary (zig build test-bin)" >&2
     exit 1
   }

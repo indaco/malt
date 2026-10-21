@@ -351,7 +351,7 @@ build_malt() {
   # Wipe the dedicated bench prefix so we never pick up a stale debug binary
   # left behind by `zig build` / `just build` / IDE builds in ./zig-out.
   rm -rf "$BENCH_BUILD_PREFIX"
-  (cd "$src" && zig build -Doptimize=ReleaseSafe --prefix "$BENCH_BUILD_PREFIX")
+  (cd "$src" && zig build -Doptimize=safe --prefix "$BENCH_BUILD_PREFIX")
   if [ ! -x "$MALT_BIN" ]; then
     err "build did not produce $MALT_BIN"
   fi

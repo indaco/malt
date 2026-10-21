@@ -59,7 +59,7 @@ test "parse rejects truncated file" {
 }
 
 test "parse rejects invalid magic" {
-    var buf: [32]u8 = .{0} ** 32;
+    var buf: [32]u8 = @splat(0);
     buf[0] = 0xFF;
     try testing.expectError(parser.ParseError.InvalidMagic, parser.parse(testing.allocator, &buf));
 }
@@ -149,7 +149,7 @@ test "parse a Mach-O 64 with an LC_LOAD_DYLIB load command extracts the path" {
     try testing.expectEqual(@as(usize, 1), m.paths.len);
     try testing.expectEqualStrings("/opt/homebrew/lib/libfoo.dylib", m.paths[0].path);
     try testing.expectEqual(
-        @as(u32, @intFromEnum(macho.LC.LOAD_DYLIB)),
+        @as(u32, @backingInt(macho.LC.LOAD_DYLIB)),
         m.paths[0].cmd,
     );
 }
@@ -666,7 +666,7 @@ fn buildSegmentFixture(
     seg.* = .{
         .cmd = .SEGMENT_64,
         .cmdsize = cmdsize,
-        .segname = [_]u8{0} ** 16,
+        .segname = @as([16]u8, @splat(0)),
         .nsects = @intCast(sections.len),
     };
     @memcpy(seg.segname[0.."__TEXT".len], "__TEXT");
@@ -687,8 +687,8 @@ test "parse a Mach-O 64 with __TEXT,__cstring captures the section region" {
     const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + @sizeOf(macho.section_64);
 
     var sect: macho.section_64 = .{
-        .sectname = [_]u8{0} ** 16,
-        .segname = [_]u8{0} ** 16,
+        .sectname = @as([16]u8, @splat(0)),
+        .segname = @as([16]u8, @splat(0)),
         .offset = @intCast(cstring_offset),
         .size = blob.len,
         .flags = macho.S_CSTRING_LITERALS,
@@ -717,8 +717,8 @@ fn patchCstringFixture(
 ) !patcher.PatchOutcome {
     const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + @sizeOf(macho.section_64);
     var sect: macho.section_64 = .{
-        .sectname = [_]u8{0} ** 16,
-        .segname = [_]u8{0} ** 16,
+        .sectname = @as([16]u8, @splat(0)),
+        .segname = @as([16]u8, @splat(0)),
         .offset = @intCast(cstring_offset),
         .size = blob.len,
         .flags = macho.S_CSTRING_LITERALS,
@@ -782,8 +782,8 @@ test "parse a Mach-O 64 ignores non-cstring sections in the same segment" {
     const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + 2 * @sizeOf(macho.section_64);
 
     var text_sect: macho.section_64 = .{
-        .sectname = [_]u8{0} ** 16,
-        .segname = [_]u8{0} ** 16,
+        .sectname = @as([16]u8, @splat(0)),
+        .segname = @as([16]u8, @splat(0)),
         .offset = @intCast(cstring_offset),
         .size = blob.len,
         .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS,
@@ -792,8 +792,8 @@ test "parse a Mach-O 64 ignores non-cstring sections in the same segment" {
     @memcpy(text_sect.segname[0.."__TEXT".len], "__TEXT");
 
     var cstring_sect: macho.section_64 = .{
-        .sectname = [_]u8{0} ** 16,
-        .segname = [_]u8{0} ** 16,
+        .sectname = @as([16]u8, @splat(0)),
+        .segname = @as([16]u8, @splat(0)),
         .offset = @intCast(cstring_offset),
         .size = blob.len,
         .flags = macho.S_CSTRING_LITERALS,
@@ -818,8 +818,8 @@ test "parse a Mach-O 64 drops cstring sections pointing outside the slice" {
     const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + @sizeOf(macho.section_64);
 
     var sect: macho.section_64 = .{
-        .sectname = [_]u8{0} ** 16,
-        .segname = [_]u8{0} ** 16,
+        .sectname = @as([16]u8, @splat(0)),
+        .segname = @as([16]u8, @splat(0)),
         .offset = 0xFFFFFFFF, // far past EOF
         .size = blob.len,
         .flags = macho.S_CSTRING_LITERALS,

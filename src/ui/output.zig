@@ -533,6 +533,27 @@ fn writeShellQuoted(s: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeByte('\'');
 }
 
+/// `{f}` writes each byte outside printable ASCII as `\xNN`. This includes a UTF-8 C1
+/// control, which `std.zig.fmtString` passes through.
+pub fn escaped(s: []const u8) std.fmt.Alt([]const u8, writeEscaped) {
+    return .{ .data = s };
+}
+
+fn writeEscaped(s: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    for (s) |c| switch (c) {
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        '\\' => try w.writeAll("\\\\"),
+        '"' => try w.writeAll("\\\""),
+        ' '...'!', '#'...'[', ']'...'~' => try w.writeByte(c),
+        else => {
+            try w.writeAll("\\x");
+            try w.printInt(c, 16, .lower, .{ .width = 2, .fill = '0' });
+        },
+    };
+}
+
 /// Version stamped on every read command's `--json` root (`list`, `info`,
 /// `outdated`, `services`, `doctor`). Bump when a documented field shape
 /// changes so consumers can refuse a shape they don't understand —
@@ -631,6 +652,12 @@ pub fn emitNdjsonEvent(
 // Sister tests for the other prefix-line helpers live alongside the public
 // API surface in tests/output_test.zig; these are kept inline because the
 // helper is a thin wrapper over the shared `emitPrefixLine`.
+test "escaped writes a UTF-8 C1 control and ESC as hex, so no terminal acts on them" {
+    var buf: [64]u8 = undefined;
+    const got = try std.fmt.bufPrint(&buf, "{f}", .{escaped("a\xc2\x9b2J\x1b\"\\ caf\xc3\xa9")});
+    try std.testing.expectEqualStrings("a\\xc2\\x9b2J\\x1b\\\"\\\\ caf\\xc3\\xa9", got);
+}
+
 test "shellQuoted keeps a path with spaces and quotes one argument" {
     var buf: [64]u8 = undefined;
     const got = try std.fmt.bufPrint(&buf, "{f}", .{shellQuoted("/src/my dir/l'x.rb")});

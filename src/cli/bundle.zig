@@ -524,7 +524,7 @@ fn resolveBundleName(
     db: *sqlite.Database,
     typed: []const u8,
 ) ![:0]const u8 {
-    if (try isRegistered(db, typed)) return allocator.dupeZ(u8, typed);
+    if (try isRegistered(db, typed)) return allocator.dupeSentinel(u8, typed, 0);
     if (try canonicalPath(ctx.io, allocator, typed)) |real| {
         errdefer allocator.free(real);
         if (try isRegistered(db, real)) return real;
@@ -934,7 +934,7 @@ fn populateFromInstalled(
             if (install_args.localRecipePrintable(name, path))
                 output.warnAlways("{s} is a local formula; bundle skips it - rebuild with `mt install --local {f}`", .{ name, output.shellQuoted(path) })
             else
-                output.warnAlways(install_args.unprintable_local_fmt ++ "; bundle skips it", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
+                output.warnAlways(install_args.unprintable_local_fmt ++ "; bundle skips it", .{ output.escaped(name), output.escaped(path) });
             continue;
         }
         const name = try qualifiedName(a, f.columnText(1), n);

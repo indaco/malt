@@ -54,7 +54,7 @@ fn seedKegRow(db: *sqlite.Database, name: []const u8, version: []const u8, cella
     try insert.bindText(1, name);
     try insert.bindText(2, name);
     try insert.bindText(3, version);
-    try insert.bindText(4, "0" ** 64);
+    try insert.bindText(4, &@as([64]u8, @splat('0')));
     try insert.bindText(5, cellar_path);
     _ = try insert.step();
 

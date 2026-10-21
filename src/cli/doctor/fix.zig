@@ -39,8 +39,8 @@ pub const Conditions = struct {
 };
 
 pub const Plan = struct {
-    safe: std.EnumSet(FixKind) = .initEmpty(),
-    manual: std.EnumSet(ManualKind) = .initEmpty(),
+    safe: std.EnumSet(FixKind) = .empty,
+    manual: std.EnumSet(ManualKind) = .empty,
 
     pub fn isEmpty(self: Plan) bool {
         return self.safe.count() == 0 and self.manual.count() == 0;
@@ -91,7 +91,7 @@ pub fn pidAlive(pid: std.posix.pid_t) bool {
     // kill(2) reads <= 0 as a process group, which would signal ourselves and
     // report a corrupt "0" lock file as live forever.
     if (pid <= 0) return false;
-    std.posix.kill(pid, @enumFromInt(0)) catch |e| return e != error.ProcessNotFound;
+    std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |e| return e != error.ProcessNotFound;
     return true;
 }
 
@@ -553,7 +553,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -724,15 +724,13 @@ test "renderPlan: manual-only plan still emits the empty-safe header" {
 }
 
 test "renderPlan: every safe-fix kind has a label" {
-    inline for (std.meta.fields(FixKind)) |f| {
-        const kind: FixKind = @field(FixKind, f.name);
+    inline for (std.meta.tags(FixKind)) |kind| {
         try std.testing.expect(safeLabel(kind).len > 0);
     }
 }
 
 test "renderPlan: every manual kind has a hint" {
-    inline for (std.meta.fields(ManualKind)) |f| {
-        const kind: ManualKind = @field(ManualKind, f.name);
+    inline for (std.meta.tags(ManualKind)) |kind| {
         try std.testing.expect(manualHint(kind).len > 0);
     }
 }

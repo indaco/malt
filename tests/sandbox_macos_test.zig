@@ -106,11 +106,11 @@ test "ScrubbedEnv type smoke — only allowlisted keys" {
     // slots and nothing else. If someone ever adds a field here without
     // also thinking through the trust implications, this test fails.
     const info = @typeInfo(sandbox.ScrubbedEnv).@"struct";
-    try testing.expectEqual(@as(usize, 4), info.fields.len);
-    try testing.expectEqualStrings("home", info.fields[0].name);
-    try testing.expectEqualStrings("path", info.fields[1].name);
-    try testing.expectEqualStrings("malt_prefix", info.fields[2].name);
-    try testing.expectEqualStrings("tmpdir", info.fields[3].name);
+    try testing.expectEqual(@as(usize, 4), info.field_names.len);
+    try testing.expectEqualStrings("home", info.field_names[0]);
+    try testing.expectEqualStrings("path", info.field_names[1]);
+    try testing.expectEqualStrings("malt_prefix", info.field_names[2]);
+    try testing.expectEqualStrings("tmpdir", info.field_names[3]);
 }
 
 test "sandbox_path restricts to system directories only" {

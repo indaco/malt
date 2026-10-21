@@ -264,7 +264,7 @@ test "execute --dry-run on a fresh prefix without db dir exits silently" {
     // exit branch instead of surfacing it as contention.
     const unique = try test_io.uniqueTempPath(testing.allocator, "upgrade", "no_db_dir_dry");
     defer testing.allocator.free(unique);
-    const path = try testing.allocator.dupeZ(u8, unique);
+    const path = try testing.allocator.dupeSentinel(u8, unique, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -489,7 +489,7 @@ test "execute --cask names the cask of an over-long casks row instead of a meani
         defer db.close();
         try schema.initSchema(&db);
         // Written by a malt from before the version cap, or by hand.
-        try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '" ++ "9" ** 300 ++ "', 'https://e/x.dmg');");
+        try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '" ++ &@as([300]u8, @splat('9')) ++ "', 'https://e/x.dmg');");
     }
 
     const prior_quiet = output.isQuiet();

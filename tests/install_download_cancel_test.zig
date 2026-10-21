@@ -116,7 +116,7 @@ const formula_json =
 fn setupPrefix(tag: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "install_dl_cancel", tag);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     inline for (.{ "store", "tmp", "db" }) |sub| {
         const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ path, sub });
         defer testing.allocator.free(dir);

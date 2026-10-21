@@ -22,7 +22,7 @@ const c = test_io.c;
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "upgrade_exec", suffix);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -65,10 +65,11 @@ fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertPinnedKeg(db: *sqlite.Database, name: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', 1);",
         .{ name, name, name },
+        0,
     );
     try db.exec(sql);
 }
@@ -152,10 +153,11 @@ test "mt upgrade --pinned without --dry-run or --force errors with usage" {
 
 fn insertPinnedCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '{s}', 'https://example.invalid', 1);",
         .{ token, token, version },
+        0,
     );
     try db.exec(sql);
 }
@@ -636,7 +638,7 @@ fn seedCurlUpgrade(path: [:0]const u8, comptime files_json: []const u8) !void {
 
 /// A golden_gate-only bottle map is newer than every host the suite runs on.
 const newer_only_bottles = "{\"" ++ (if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "") ++
-    "golden_gate\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ "a" ** 64 ++ "\"}}";
+    "golden_gate\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat('a')) ++ "\"}}";
 
 /// These tests need a host the fixture's bottles are too new for.
 fn skipOnGoldenGate() !void {
@@ -786,10 +788,11 @@ fn seedInstalledKeg(
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_root);
 
     var insert_buf: [512]u8 = undefined;
-    const insert = try std.fmt.bufPrintZ(
+    const insert = try std.fmt.bufPrintSentinel(
         &insert_buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '{s}', 'sha-{s}', '{s}');",
         .{ name, name, version, name, cellar_root },
+        0,
     );
     try db.exec(insert);
 
@@ -971,10 +974,10 @@ fn seedSharedPins(prefix: [:0]const u8, keg_pinned: bool, cask_pinned: bool) !vo
     var db = try openSeededDb(prefix);
     defer db.close();
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&buf,
+    const sql = try std.fmt.bufPrintSentinel(&buf,
         \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
         \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
-    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) });
+    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }, 0);
     try db.exec(sql);
 }
 

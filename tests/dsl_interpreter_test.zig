@@ -824,7 +824,7 @@ test "interpreter: inreplace fallback warning is recorded as a note" {
 
     // Strip write on the parent so writeAtomic's tmp-file create returns
     // EACCES, which trips the warn+fallback branch under test.
-    const target_dir_z = try testing.allocator.dupeZ(u8, target_dir);
+    const target_dir_z = try testing.allocator.dupeSentinel(u8, target_dir, 0);
     defer testing.allocator.free(target_dir_z);
     const c = struct {
         extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;

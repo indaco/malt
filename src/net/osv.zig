@@ -243,12 +243,12 @@ fn cvssBaseScore(vector: []const u8) ?f64 {
         const colon = std.mem.indexOfScalar(u8, part, ':') orelse return null;
         const m = metric_keys.get(part[0..colon]) orelse continue;
         if (part.len != colon + 2) return null;
-        letters[@intFromEnum(m)] = part[colon + 1];
+        letters[@backingInt(m)] = part[colon + 1];
     }
     for (letters) |l| if (l == null) return null;
     const get = struct {
         fn at(l: [8]?u8, m: Metric) u8 {
-            return l[@intFromEnum(m)].?;
+            return l[@backingInt(m)].?;
         }
     }.at;
 

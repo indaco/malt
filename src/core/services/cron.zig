@@ -85,7 +85,7 @@ fn parseField(field: []const u8, spec: FieldSpec, is_weekday: bool) CronError!?S
     if (field.len == 0) return CronError.CronMalformed;
     if (field.len == 1 and field[0] == '*') return null;
 
-    var set = Set.initEmpty();
+    var set = Set.empty;
     var it = std.mem.splitScalar(u8, field, ',');
     while (it.next()) |part| try parsePart(part, spec, is_weekday, &set);
     if (set.count() == 0) return CronError.CronMalformed;
@@ -165,7 +165,7 @@ fn fillEntries(sets: [5]?Set, out: []CalendarInterval) void {
         }
     }
 
-    var idx = [_]usize{0} ** 5;
+    var idx = @as([5]usize, @splat(0));
     var oi: usize = 0;
     while (oi < out.len) : (oi += 1) {
         var v: [5]?u8 = undefined;

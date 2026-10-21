@@ -37,10 +37,11 @@ const TempDb = struct {
 
 fn tableExists(db: *sqlite.Database, name: [:0]const u8) !bool {
     var buf: [256]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{s}';",
         .{name},
+        0,
     );
     var stmt = try db.prepare(sql);
     defer stmt.finalize();

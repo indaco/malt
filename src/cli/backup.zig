@@ -167,7 +167,7 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
                     w.print(local_note_prefix ++ "{s} {s}\n", .{ name, path }) catch return RowsError.WriteFailed;
                     warnLocal(name, path);
                 } else {
-                    output.warnAlways(install_args.unprintable_local_fmt ++ "; it is left out of the backup", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
+                    output.warnAlways(install_args.unprintable_local_fmt ++ "; it is left out of the backup", .{ output.escaped(name), output.escaped(path) });
                 }
                 continue;
             }
@@ -306,7 +306,7 @@ fn executeJson(
                 if (install_args.localRecipePrintable(name, path))
                     warnLocal(name, path)
                 else
-                    output.warn(install_args.unprintable_local_fmt ++ "; the backup keeps it without a rebuild command", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
+                    output.warn(install_args.unprintable_local_fmt ++ "; the backup keeps it without a rebuild command", .{ output.escaped(name), output.escaped(path) });
                 continue;
             }
             const tap = a.dupe(u8, install_args.thirdPartyTap(tap_label)) catch
@@ -590,23 +590,23 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) !Parsed {
         // Restore prints every entry and install refuses these names, so a
         // shared or hand-edited line is named, escaped, and left out.
         if (path_component.hasControlByte(entry.name) or path_component.hasControlByte(entry.version)) {
-            output.warnAlways("Skipping `{f}`: it holds a control character", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: it holds a control character", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
         if (!isEntryName(entry.kind, entry.name)) {
-            output.warnAlways("Skipping `{f}`: it does not name a package", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: it does not name a package", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
         if (entry.kind == .service and entry.version.len > 0) {
-            output.warnAlways("Skipping `{f}`: a service line takes no version", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: a service line takes no version", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
         // One such name makes install refuse the whole restore batch.
         if (install_args.isSelfInstall(entry.name)) {
-            output.warnAlways("Skipping `{f}`: restore never installs malt itself", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: restore never installs malt itself", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
@@ -1045,7 +1045,7 @@ test "writeRows refuses a tap label the qualified slug cannot hold" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    const long_tap = "x" ** 300;
+    const long_tap = &@as([300]u8, @splat('x'));
     try db.exec("INSERT INTO casks(token, name, version, url, tap) VALUES ('foo', 'Foo', '1.0', 'https://x/foo.dmg', '" ++ long_tap ++ "');");
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -1057,7 +1057,7 @@ test "writeRows refuses a formula tap label the qualified slug cannot hold" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    const long_tap = "x" ** 300;
+    const long_tap = &@as([300]u8, @splat('x'));
     try db.exec("INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES ('foo', 'foo', '1.0', 'a', '/c/foo', '" ++ long_tap ++ "');");
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();

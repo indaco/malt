@@ -55,7 +55,7 @@ test "every consumer of a parsed .rb revision is accounted for" {
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    var seen = [_]usize{0} ** allowed.len;
+    var seen = @as([allowed.len]usize, @splat(0));
 
     while (try walker.next(std.Options.debug_io)) |ent| {
         if (ent.kind != .file) continue;

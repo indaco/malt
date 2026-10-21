@@ -71,7 +71,7 @@ pub fn footerHint() []const u8 {
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
-    return filter.len == 0 or std.ascii.indexOfIgnoreCase(name, filter) != null;
+    return filter.len == 0 or std.ascii.findIgnoreCase(name, filter) != null;
 }
 
 fn filteredCount(items: []const Row, filter: []const u8) usize {
@@ -607,7 +607,7 @@ test "matches is a case-insensitive substring; empty filter matches all" {
 }
 
 test "space toggles the cursor row's checkbox" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.view.selected = 0; // wget
     _ = stepKey(&s, .space);
@@ -617,7 +617,7 @@ test "space toggles the cursor row's checkbox" {
 }
 
 test "space on a pinned cursor row never checks it" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.view.selected = 1; // curl (pinned)
     _ = stepKey(&s, .space);
@@ -625,7 +625,7 @@ test "space on a pinned cursor row never checks it" {
 }
 
 test "a checks every non-pinned row and leaves pinned rows unchecked" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     _ = stepKey(&s, ch('a'));
     try testing.expect(checked[0]); // wget
@@ -642,7 +642,7 @@ test "n clears every checkbox" {
 }
 
 test "a with an active filter checks only the visible rows" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.filter.push("fire"); // firefox only
     _ = stepKey(&s, ch('a'));
@@ -660,7 +660,7 @@ test "a with an active filter leaves an already-checked hidden row checked" {
 }
 
 test "a with a filter that shows only a pinned row arms nothing" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.filter.push("curl"); // pinned, and the only visible row
     _ = stepKey(&s, ch('a'));
@@ -676,7 +676,7 @@ test "n with an active filter clears hidden rows too" {
 }
 
 test "u returns the upgrade mutation only when something is selected" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     try testing.expect(stepKey(&s, ch('u')) == .none); // empty selection → no-op
     checked[0] = true; // wget (formula)
@@ -726,7 +726,7 @@ test "selectedNames yields checked non-pinned names in item order, pinned never 
 }
 
 test "selectedIndex maps the cursor through the filter and clamps out-of-range" {
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.view.selected = 0;
     try testing.expectEqual(@as(?usize, 0), selectedIndex(&s)); // wget
@@ -743,13 +743,13 @@ test "selectedIndex maps the cursor through the filter and clamps out-of-range" 
 test "render heads the columns in bold, indented past the checkbox" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
     // The 4-col checkbox indent plus exact padding aligns the labels over values.
-    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ " " ** 19 ++ "CURRENT" ++ " " ** 6 ++ "AVAILABLE" ++ " " ** 4 ++ "KIND") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ &@as([19]u8, @splat(' ')) ++ "CURRENT" ++ &@as([6]u8, @splat(' ')) ++ "AVAILABLE" ++ &@as([4]u8, @splat(' ')) ++ "KIND") != null);
     try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still renders below
 }
 
@@ -833,7 +833,7 @@ test "a pinned row that also moved backward carries both tags, space-separated" 
 test "render greys a pinned row, shows the blocked box, and marks it pinned" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
@@ -845,7 +845,7 @@ test "render greys a pinned row, shows the blocked box, and marks it pinned" {
 test "render narrows to the filter" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.filter.push("firefox");
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
@@ -857,7 +857,7 @@ test "render narrows to the filter" {
 test "render highlights the selected row" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
@@ -875,7 +875,7 @@ test "render reflows: the same state at two widths differs" {
     var b: [8192]u8 = undefined;
     var fa: tab.Frame = .{ .buf = &a };
     var fb: tab.Frame = .{ .buf = &b };
-    var checked = [_]bool{false} ** 4;
+    var checked = @as([4]bool, @splat(false));
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &fa, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     render(&s, &fb, .{ .row = 1, .col = 1, .width = 30, .height = 6 });

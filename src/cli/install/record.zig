@@ -81,8 +81,8 @@ pub const InstallError = error{
 /// (and, in debug, a return trace) on top of the message the command
 /// already showed. Comptime-derived so a new tag is covered automatically.
 pub fn isReportedInstallError(e: anyerror) bool {
-    inline for (@typeInfo(InstallError).error_set.?) |variant| {
-        if (e == @field(InstallError, variant.name)) return true;
+    inline for (@typeInfo(InstallError).error_set.error_names.?) |variant| {
+        if (e == @field(InstallError, variant)) return true;
     }
     return false;
 }

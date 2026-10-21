@@ -676,7 +676,7 @@ pub fn parseSeverityFlag(arg: []const u8) ?Severity {
 /// True when `v` is at least `min` severe; no `min` keeps everything.
 pub fn keeps(min: ?Severity, v: formula_mod.Vuln) bool {
     const floor = min orelse return true;
-    return @intFromEnum(severityOf(v.severity)) >= @intFromEnum(floor);
+    return @backingInt(severityOf(v.severity)) >= @backingInt(floor);
 }
 
 /// One reported advisory. `name` is the installed formula; `vuln` borrows
@@ -688,8 +688,8 @@ pub const Row = struct {
 
 /// Most severe first, then name, then id - a stable order for scripts to diff.
 pub fn rowLessThan(_: void, a: Row, b: Row) bool {
-    const sa = @intFromEnum(severityOf(a.vuln.severity));
-    const sb = @intFromEnum(severityOf(b.vuln.severity));
+    const sa = @backingInt(severityOf(a.vuln.severity));
+    const sb = @backingInt(severityOf(b.vuln.severity));
     if (sa != sb) return sa > sb;
     return switch (std.mem.order(u8, a.name, b.name)) {
         .lt => true,

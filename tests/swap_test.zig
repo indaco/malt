@@ -215,7 +215,7 @@ test "atomicReplace returns PermissionDenied when target dir is read-only" {
     // Drop write access on the parent directory; staging the new binary
     // next to the target must fail with EACCES, which the swap surfaces
     // as PermissionDenied for the updater's sudo-fallback path.
-    const dir_z = try testing.allocator.dupeZ(u8, p.dir);
+    const dir_z = try testing.allocator.dupeSentinel(u8, p.dir, 0);
     defer testing.allocator.free(dir_z);
     if (std.c.chmod(dir_z.ptr, 0o555) != 0) return error.SkipZigTest;
     defer _ = std.c.chmod(dir_z.ptr, 0o755);

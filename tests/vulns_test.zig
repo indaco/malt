@@ -236,7 +236,7 @@ const Harness = struct {
 
         const base = try test_io.uniqueTempPath(allocator, "vulns_cli", tag);
         defer allocator.free(base);
-        h.prefix = try allocator.dupeZ(u8, base);
+        h.prefix = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(io, h.prefix) catch {};
         for ([_][]const u8{ "db", "cache" }) |sub| {
             const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ h.prefix, sub });

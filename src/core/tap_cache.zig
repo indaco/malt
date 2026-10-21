@@ -147,9 +147,9 @@ test "cachePath: composes <cache_dir>/Tap/<sha>.<ext>" {
     // `{prefix}/cache`); composing `/cache` here again would split the
     // tier from the pruner the moment the override is set.
     var buf: [256]u8 = undefined;
-    const got = try cachePath(&buf, "/alt", "ab" ** 32, ".tar.gz");
+    const got = try cachePath(&buf, "/alt", std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))), ".tar.gz");
     try std.testing.expectEqualStrings(
-        "/alt/Tap/" ++ ("ab" ** 32) ++ ".tar.gz",
+        "/alt/Tap/" ++ (std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)))) ++ ".tar.gz",
         got,
     );
 }
@@ -160,7 +160,7 @@ test "cachePath: surfaces NoSpaceLeft on buffer overflow" {
     var buf: [4]u8 = undefined;
     try std.testing.expectError(
         error.NoSpaceLeft,
-        cachePath(&buf, "/opt/h", "ab" ** 32, ".tar.gz"),
+        cachePath(&buf, "/opt/h", std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))), ".tar.gz"),
     );
 }
 
@@ -169,8 +169,8 @@ test "cachePath: distinct SHAs produce distinct paths" {
     // typo in the formatter that dropped it would fail this.
     var a: [256]u8 = undefined;
     var b: [256]u8 = undefined;
-    const p1 = try cachePath(&a, "/opt/h", "ab" ** 32, ".zip");
-    const p2 = try cachePath(&b, "/opt/h", "cd" ** 32, ".zip");
+    const p1 = try cachePath(&a, "/opt/h", std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))), ".zip");
+    const p2 = try cachePath(&b, "/opt/h", std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))), ".zip");
     try std.testing.expect(!std.mem.eql(u8, p1, p2));
 }
 
@@ -180,7 +180,7 @@ test "exists: returns false when cache dir absent" {
     const io = threaded.io();
     var s = try Scratch.init("tap_cache_exists_absent");
     defer s.deinit();
-    try std.testing.expect(!exists(io, s.p("/cache"), "ab" ** 32, ".tar.gz"));
+    try std.testing.expect(!exists(io, s.p("/cache"), std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))), ".tar.gz"));
 }
 
 test "exists: returns true when SHA-keyed entry is on disk" {
@@ -195,12 +195,12 @@ test "exists: returns true when SHA-keyed entry is on disk" {
     try ensureCacheDir(io, cache_dir);
 
     var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const entry = try cachePath(&entry_buf, cache_dir, "cd" ** 32, ".zip");
+    const entry = try cachePath(&entry_buf, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))), ".zip");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     f.close(io);
 
-    try std.testing.expect(exists(io, cache_dir, "cd" ** 32, ".zip"));
-    try std.testing.expect(!exists(io, cache_dir, "ee" ** 32, ".zip"));
+    try std.testing.expect(exists(io, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))), ".zip"));
+    try std.testing.expect(!exists(io, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("ee".*))), ".zip"));
 }
 
 test "ensureCacheDir: creates the Tap dir even when the cache root does not exist yet" {
@@ -237,10 +237,10 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
     }
 
     var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try promoteStagingToCache(io, cache_dir, "aa" ** 32, ".tar.gz", staging, &cache_buf);
+    const cache_path = try promoteStagingToCache(io, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("aa".*))), ".tar.gz", staging, &cache_buf);
 
     var want_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const want = try cachePath(&want_buf, cache_dir, "aa" ** 32, ".tar.gz");
+    const want = try cachePath(&want_buf, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("aa".*))), ".tar.gz");
     try std.testing.expectEqualStrings(want, cache_path);
 
     // The rename moved the staging file; the source path must be gone.
@@ -284,7 +284,7 @@ fn seedEntry(io: std.Io, s: *Scratch, comptime sha: []const u8, comptime size: u
     const entry = try cachePath(&entry_buf, s.p("/cache"), sha, ".tar.gz");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     defer f.close(io);
-    try f.writeStreamingAll(io, "x" ** size);
+    try f.writeStreamingAll(io, &@as([size]u8, @splat('x')));
 }
 
 test "usageUnder: a fresh entry counts toward total but not reclaimable" {
@@ -299,7 +299,7 @@ test "usageUnder: a fresh entry counts toward total but not reclaimable" {
     // that here so the test pins the production invariant.
     try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
     try ensureCacheDir(io, s.p("/cache"));
-    try seedEntry(io, &s, "00" ** 32, 256);
+    try seedEntry(io, &s, std.mem.asBytes(&@as([32][2]u8, @splat("00".*))), 256);
 
     const now = std.Io.Clock.real.now(io).toSeconds();
     const u = usageUnder(io, std.testing.allocator, s.p("/cache"), now, 30);
@@ -317,8 +317,8 @@ test "usageUnder: total is stable while reclaimable swings with the window" {
     const cache_dir = s.p("/cache");
     try std.Io.Dir.cwd().createDirPath(io, cache_dir);
     try ensureCacheDir(io, cache_dir);
-    try seedEntry(io, &s, "00" ** 32, 100);
-    try seedEntry(io, &s, "11" ** 32, 300);
+    try seedEntry(io, &s, std.mem.asBytes(&@as([32][2]u8, @splat("00".*))), 100);
+    try seedEntry(io, &s, std.mem.asBytes(&@as([32][2]u8, @splat("11".*))), 300);
 
     // Both entries were just written. Move the clock instead of
     // back-dating files: the default window reclaims nothing now and
@@ -343,9 +343,9 @@ test "tap tier works when the cache dir pushes the archive path past 512 bytes" 
     var s = try Scratch.init("tap_cache_long");
     defer s.deinit();
 
-    const seg = "c" ** 200;
+    const seg = &@as([200]u8, @splat('c'));
     const cache_dir = s.p("/" ++ seg ++ "/" ++ seg ++ "/" ++ seg);
-    const sha = "ab" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
     try std.testing.expect(cache_dir.len + "/Tap/".len + sha.len + ".tar.gz".len > 512);
 
     try std.Io.Dir.cwd().createDirPath(io, cache_dir);
@@ -355,7 +355,7 @@ test "tap tier works when the cache dir pushes the archive path past 512 bytes" 
     const entry = try cachePath(&path_buf, cache_dir, sha, ".tar.gz");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     defer f.close(io);
-    try f.writeStreamingAll(io, "x" ** 128);
+    try f.writeStreamingAll(io, &@as([128]u8, @splat('x')));
 
     try std.testing.expect(exists(io, cache_dir, sha, ".tar.gz"));
     const now = std.Io.Clock.real.now(io).toSeconds();

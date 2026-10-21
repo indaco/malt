@@ -83,7 +83,7 @@ test "--housekeeping expands to the safe scopes and no destructive one" {
     // classified here as safe or opt-in rather than silently inheriting its
     // default: this test previously said "four" while five were set.
     comptime {
-        std.debug.assert(@typeInfo(purge.Scope).@"struct".fields.len == 8);
+        std.debug.assert(@typeInfo(purge.Scope).@"struct".field_names.len == 8);
     }
 }
 

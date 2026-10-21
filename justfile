@@ -16,12 +16,12 @@ build:
 # Build with ReleaseSafe optimization
 [group('build')]
 build-release:
-    zig build -Doptimize=ReleaseSafe
+    zig build -Doptimize=safe
 
 # Build universal binary (macOS arm64 + x86_64)
 [group('build')]
 build-universal:
-    zig build universal -Doptimize=ReleaseSafe
+    zig build universal -Doptimize=safe --sysroot "$(xcrun --show-sdk-path)"
 
 # Install malt globally (builds from source, installs to /usr/local/bin)
 [group('build')]

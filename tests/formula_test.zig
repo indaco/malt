@@ -156,9 +156,9 @@ test "resolveBottleFor takes the host's tag on current arch, never a newer one" 
 
     const arm = builtin.cpu.arch == .aarch64;
     const tahoe = try formula_mod.resolveBottleFor(&formula, 26);
-    try testing.expectEqualStrings(if (arm) "a" ** 64 else "c" ** 64, tahoe.sha256);
+    try testing.expectEqualStrings(if (arm) &@as([64]u8, @splat('a')) else &@as([64]u8, @splat('c')), tahoe.sha256);
     const sequoia = try formula_mod.resolveBottleFor(&formula, 15);
-    try testing.expectEqualStrings(if (arm) "b" ** 64 else "d" ** 64, sequoia.sha256);
+    try testing.expectEqualStrings(if (arm) &@as([64]u8, @splat('b')) else &@as([64]u8, @splat('d')), sequoia.sha256);
     try testing.expectError(formula_mod.FormulaError.NoBottleAvailable, formula_mod.resolveBottleFor(&formula, 14));
 }
 

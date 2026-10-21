@@ -185,7 +185,7 @@ fn loadKegRows(
 test "KegFilter exposes every audit scope" {
     // Compile-time guard so adding another variant has to acknowledge
     // the SQL switches above explicitly.
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(KegFilter).@"union".fields.len);
+    try std.testing.expectEqual(@as(usize, 3), @typeInfo(KegFilter).@"union".field_names.len);
     _ = KegFilter.all;
     _ = KegFilter.pinned_only;
     _ = KegFilter{ .by_tap = "user/repo" };

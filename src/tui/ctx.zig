@@ -132,13 +132,13 @@ pub const Fetches = std.EnumArray(Tab, ?TabFetch);
 pub const SharedModel = struct {
     installed_count: ?usize = null,
     outdated_count: ?usize = null,
-    dirty: std.EnumSet(Tab) = .initEmpty(),
+    dirty: std.EnumSet(Tab) = .empty,
     /// Tabs whose payload is fetching in the background, so the header/footer show
     /// a spinner instead of a frozen or done-looking blank. Shared read-model state
     /// (the renderer reads it) the interpreter owns the lifecycle of: set on a
     /// background kickoff, cleared when the fetch lands or is quiesced. Mirrors the
     /// `Fetches` slots exactly — a tab is loading iff its fetch is in flight.
-    tab_loading: std.EnumSet(Tab) = .initEmpty(),
+    tab_loading: std.EnumSet(Tab) = .empty,
     banner: Banner = .{},
 
     /// After a delegated mutation the active tab was just re-read inline, so it is
@@ -147,7 +147,7 @@ pub const SharedModel = struct {
     /// tab's effect calls this on the shared model, never touching another tab's
     /// storage — the cross-tab staleness channel that keeps tabs decoupled.
     pub fn markStaleAfter(self: *SharedModel, active: Tab) void {
-        self.dirty = std.EnumSet(Tab).initFull();
+        self.dirty = std.EnumSet(Tab).full;
         self.dirty.remove(active);
     }
 

@@ -671,7 +671,7 @@ test "headResolved does not follow Location on a non-redirect status" {
     // The port each one points at is never bound, so a follow is unmistakable.
     try resolveAgainstNonRedirect(.not_modified);
     try resolveAgainstNonRedirect(.use_proxy);
-    try resolveAgainstNonRedirect(@enumFromInt(306));
+    try resolveAgainstNonRedirect(@fromBackingInt(@intCast(306)));
 }
 
 test "headResolved reports an unreachable origin instead of the untouched url" {

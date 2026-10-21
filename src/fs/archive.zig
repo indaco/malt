@@ -806,7 +806,7 @@ const Scratch = struct {
         // code under test returns compare equal to `base`.
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const n = try std.Io.Dir.realPath(dir, test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = dir };
     }
 
@@ -1044,8 +1044,8 @@ test "extractTarXzFile refuses an archive whose payload exceeds the byte budget"
 
     var raw: [8192]u8 = undefined;
     var t = TestTar.init(&raw);
-    t.file("a", "x" ** 1024);
-    t.file("b", "y" ** 1024);
+    t.file("a", &@as([1024]u8, @splat('x')));
+    t.file("b", &@as([1024]u8, @splat('y')));
     try std.testing.expectError(error.ExtractionFailed, testExtractXzLimited(io, &s, t.bytes(), .{ .bytes = 1500 }));
     // Refused before extraction, so nothing reached the destination.
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{}));

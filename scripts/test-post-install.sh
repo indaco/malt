@@ -62,7 +62,7 @@ info() { printf "  %s>%s %s\n" "$CYAN" "$RESET" "$*"; }
 # --- build -------------------------------------------------------------------
 if [ "$SKIP_BUILD" != "1" ]; then
   info "Building malt (ReleaseSafe) -> $BUILD_PREFIX"
-  (cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe --prefix "$BUILD_PREFIX" 2>&1) || {
+  (cd "$REPO_ROOT" && zig build -Doptimize=safe --prefix "$BUILD_PREFIX" 2>&1) || {
     fail "Build failed"
     exit 1
   }

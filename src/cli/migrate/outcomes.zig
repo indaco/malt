@@ -91,6 +91,6 @@ test "record routes each KegResult variant to its category" {
 test "maxNameLen: empty is 0, mixed is the longest, over-long clamps to 255" {
     try std.testing.expectEqual(@as(u8, 0), maxNameLen(&.{}));
     try std.testing.expectEqual(@as(u8, 5), maxNameLen(&.{ "a", "abcde", "abc" }));
-    const long = "x" ** 300;
+    const long = &@as([300]u8, @splat('x'));
     try std.testing.expectEqual(@as(u8, 255), maxNameLen(&.{long}));
 }

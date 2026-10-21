@@ -476,7 +476,7 @@ test "collectOutdated fetch fallback detects an upstream revision-only bump" {
 fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "outdated_pinned", suffix);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
@@ -497,50 +497,55 @@ fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', {d});",
         .{ name, name, name, @intFromBool(pinned) },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', {d});",
         .{ token, token, @intFromBool(pinned) },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertKegWithTap(db: *sqlite.Database, name: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', '{s}');",
         .{ name, name, name, tap },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertCaskWithTap(db: *sqlite.Database, token: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', '{s}');",
         .{ token, token, tap },
+        0,
     );
     try db.exec(sql);
 }
 
 fn insertTap(db: *sqlite.Database, name: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO taps (name, url) VALUES ('{s}', 'https://github.com/{s}.git');",
         .{ name, name },
+        0,
     );
     try db.exec(sql);
 }
@@ -1092,7 +1097,7 @@ const UpdateEnv = struct {
     fn init(suffix: []const u8) !UpdateEnv {
         const prefix_base = try test_io.uniqueTempPath(testing.allocator, "update_test", suffix);
         defer testing.allocator.free(prefix_base);
-        const prefix = try testing.allocator.dupeZ(u8, prefix_base);
+        const prefix = try testing.allocator.dupeSentinel(u8, prefix_base, 0);
         const cache = try std.fmt.allocPrintSentinel(
             testing.allocator,
             "{s}/cache",
@@ -1149,10 +1154,11 @@ fn openUpdateDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertKegV1(db: *sqlite.Database, name: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', 0);",
         .{ name, name, name },
+        0,
     );
     try db.exec(sql);
 }
@@ -1354,7 +1360,7 @@ test "update --check under --dry-run still refuses a database from a newer malt"
         var db = try openUpdateDb(env.prefix_path);
         defer db.close();
         var sql_buf: [96]u8 = undefined;
-        try db.exec(try std.fmt.bufPrintZ(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{schema.known_schema_version + 1}));
+        try db.exec(try std.fmt.bufPrintSentinel(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{schema.known_schema_version + 1}, 0));
     }
 
     malt.output.setDryRun(true);

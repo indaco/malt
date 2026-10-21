@@ -88,7 +88,7 @@ test "isolated dep install: bin_isolated=1, no bin symlink, opt link still prese
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         keg,
         "dependency",
         true,
@@ -146,7 +146,7 @@ test "direct keg under --isolate-deps still links bins and stays bin_isolated=0"
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         keg,
         "direct",
         false,
@@ -197,7 +197,7 @@ test "upgradeDbAtomic preserves bin_isolated across an upgrade" {
     const old_id = try install_record.recordKeg(
         &db,
         &f_old,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         old_keg,
         "dependency",
         true,
@@ -229,7 +229,7 @@ test "upgradeDbAtomic preserves bin_isolated across an upgrade" {
     const new_id = try install_record.recordKeg(
         &db,
         &f_new,
-        "1" ** 64,
+        &@as([64]u8, @splat('1')),
         new_keg,
         "dependency",
         replay,
@@ -276,7 +276,7 @@ test "promotion: isolated dep becomes direct with bin link on user install" {
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         keg,
         "dependency",
         true,
@@ -341,7 +341,7 @@ test "isolate_deps is a no-op on direct kegs (named pkg stays linked)" {
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         keg,
         "direct",
         computed_bin_isolated,
@@ -383,7 +383,7 @@ test "execute accepts --isolate-deps without erroring during dry-run" {
 fn runFlagAcceptanceProbe(suffix: []const u8, flag: []const u8) !void {
     const base = try test_io.uniqueTempPath(testing.allocator, "iso_probe", suffix);
     defer testing.allocator.free(base);
-    const prefix = try testing.allocator.dupeZ(u8, base);
+    const prefix = try testing.allocator.dupeSentinel(u8, base, 0);
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);

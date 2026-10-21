@@ -182,7 +182,7 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     orig_buf[orig_raw.len] = 0;
 
     var new_path_buf: [8192]u8 = undefined;
-    const new_path = try std.fmt.bufPrintZ(&new_path_buf, "{s}:{s}", .{ dir, orig_raw });
+    const new_path = try std.fmt.bufPrintSentinel(&new_path_buf, "{s}:{s}", .{ dir, orig_raw }, 0);
     if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
     defer _ = if (orig_raw.len == 0) unsetenv("PATH") else setenv("PATH", @ptrCast(&orig_buf), 1);
 
@@ -504,7 +504,7 @@ test "the spawned cosign is the one the guard resolved" {
     orig_buf[orig_raw.len] = 0;
 
     var path_buf: [8192]u8 = undefined;
-    const new_path = try std.fmt.bufPrintZ(&path_buf, "{s}:{s}", .{ decoy_dir, prefix_bin });
+    const new_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}:{s}", .{ decoy_dir, prefix_bin }, 0);
     if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
     defer _ = if (orig_raw.len == 0) unsetenv("PATH") else setenv("PATH", @ptrCast(&orig_buf), 1);
 

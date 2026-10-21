@@ -27,7 +27,7 @@ const libc_env = struct {
 /// replaced for `restorePrefixEnv`. Tests must restore rather than unset:
 /// later tests need the harness value, not the shared test fallback.
 pub fn overridePrefixEnv(prefix: [:0]const u8) !?[:0]u8 {
-    const prev: ?[:0]u8 = if (getenvLocal("MALT_PREFIX")) |v| try std.heap.c_allocator.dupeZ(u8, v) else null;
+    const prev: ?[:0]u8 = if (getenvLocal("MALT_PREFIX")) |v| try std.heap.c_allocator.dupeSentinel(u8, v, 0) else null;
     _ = libc_env.setenv("MALT_PREFIX", prefix.ptr, 1);
     return prev;
 }
@@ -368,12 +368,12 @@ test "an exact-mode atomic write survives a restrictive umask" {
     defer _ = std.c.umask(prev);
 
     const path = s.p("/bundle.pem");
-    try atomicWriteFileMode(io, path, "data", @enumFromInt(0o644));
+    try atomicWriteFileMode(io, path, "data", @fromBackingInt(@intCast(0o644)));
 
     const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer f.close(io);
     const st = try f.stat(io);
-    try std.testing.expectEqual(@as(u32, 0o644), @intFromEnum(st.permissions) & 0o777);
+    try std.testing.expectEqual(@as(u32, 0o644), @backingInt(st.permissions) & 0o777);
 }
 
 test "a default-mode atomic write still honours the umask" {
@@ -391,7 +391,7 @@ test "a default-mode atomic write still honours the umask" {
     defer f.close(io);
     const st = try f.stat(io);
     // Widening this for every caller would be a security change, not a fix.
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(st.permissions) & 0o077);
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(st.permissions) & 0o077);
 }
 
 test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {

@@ -24,7 +24,7 @@ const Scratch = struct {
         // Process-unique: a bare timestamp collides between overlapping runs.
         const raw = try test_io.uniqueTempPath(allocator, "backup_exec", tag);
         defer allocator.free(raw);
-        const path = try allocator.dupeZ(u8, raw);
+        const path = try allocator.dupeSentinel(u8, raw, 0);
         errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -123,7 +123,7 @@ test "execute fails fast when the database is unopenable" {
     // the file (no parent). That's the DatabaseError branch.
     const raw = try test_io.uniqueTempPath(testing.allocator, "backup_cli", "no_db_dir");
     defer testing.allocator.free(raw);
-    const path = try testing.allocator.dupeZ(u8, raw);
+    const path = try testing.allocator.dupeSentinel(u8, raw, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);

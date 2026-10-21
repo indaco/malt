@@ -538,12 +538,12 @@ test "external_tool_name is install_name_tool on macOS" {
 test "buildInstallNameToolArgv batches -change pairs into a single invocation" {
     const entries = [_]patcher.OverflowEntry{
         .{
-            .cmd = @intFromEnum(macho.LC.LOAD_DYLIB),
+            .cmd = @backingInt(macho.LC.LOAD_DYLIB),
             .old_path = "@@HOMEBREW_CELLAR@@/openssl/3.0/lib/libssl.dylib",
             .new_path = "/tmp/mt_tahoe/Cellar/openssl/3.0/lib/libssl.dylib",
         },
         .{
-            .cmd = @intFromEnum(macho.LC.LOAD_DYLIB),
+            .cmd = @backingInt(macho.LC.LOAD_DYLIB),
             .old_path = "@@HOMEBREW_CELLAR@@/openssl/3.0/lib/libcrypto.dylib",
             .new_path = "/tmp/mt_tahoe/Cellar/openssl/3.0/lib/libcrypto.dylib",
         },
@@ -565,7 +565,7 @@ test "buildInstallNameToolArgv batches -change pairs into a single invocation" {
 test "buildInstallNameToolArgv routes LC_RPATH through -rpath" {
     const entries = [_]patcher.OverflowEntry{
         .{
-            .cmd = @intFromEnum(macho.LC.RPATH),
+            .cmd = @backingInt(macho.LC.RPATH),
             .old_path = "@@HOMEBREW_PREFIX@@/lib",
             .new_path = "/tmp/mt_tahoe/lib",
         },
@@ -581,7 +581,7 @@ test "buildInstallNameToolArgv routes LC_RPATH through -rpath" {
 test "buildInstallNameToolArgv routes a delete entry through -delete_rpath" {
     const entries = [_]patcher.OverflowEntry{
         .{
-            .cmd = @intFromEnum(macho.LC.RPATH),
+            .cmd = @backingInt(macho.LC.RPATH),
             .old_path = "/usr/local/lib",
             .new_path = "",
             .delete = true,
@@ -600,7 +600,7 @@ test "buildInstallNameToolArgv routes a delete entry through -delete_rpath" {
 test "buildInstallNameToolArgv routes LC_ID_DYLIB through -id (no old arg)" {
     const entries = [_]patcher.OverflowEntry{
         .{
-            .cmd = @intFromEnum(macho.LC.ID_DYLIB),
+            .cmd = @backingInt(macho.LC.ID_DYLIB),
             .old_path = "@@HOMEBREW_CELLAR@@/foo.dylib",
             .new_path = "/tmp/mt_tahoe/foo.dylib",
         },
@@ -829,15 +829,15 @@ fn buildCstringFixture(
     seg.* = .{
         .cmd = .SEGMENT_64,
         .cmdsize = cmdsize,
-        .segname = [_]u8{0} ** 16,
+        .segname = @as([16]u8, @splat(0)),
         .nsects = 1,
     };
     @memcpy(seg.segname[0.."__TEXT".len], "__TEXT");
 
     const sect = std.mem.bytesAsValue(macho.section_64, buf[header_size + seg_size ..][0..sect_size]);
     sect.* = .{
-        .sectname = [_]u8{0} ** 16,
-        .segname = [_]u8{0} ** 16,
+        .sectname = @as([16]u8, @splat(0)),
+        .segname = @as([16]u8, @splat(0)),
         .offset = @intCast(cstring_offset),
         .size = blob.len,
         .flags = macho.S_CSTRING_LITERALS,

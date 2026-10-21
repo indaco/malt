@@ -396,7 +396,7 @@ pub fn lookupCaskVersion(
 
     // Stage every dup in a slot tracked by `cleanup`; the cleanup runs
     // on every error path so a mid-row OOM doesn't leak the earlier dups.
-    var slots: [6]?[]u8 = .{null} ** 6;
+    var slots: [6]?[]u8 = @splat(null);
     errdefer for (slots) |s| if (s) |buf| allocator.free(buf);
 
     inline for (.{ 0, 1, 2, 3, 4, 5 }) |idx| {
@@ -3151,7 +3151,7 @@ test "parseCask caps a version at the filename limit it has to fit" {
     // The version names Caskroom/<token>/<version>; a longer one could be
     // recorded but never read back or removed.
     inline for (.{ std.Io.Dir.max_name_bytes, std.Io.Dir.max_name_bytes + 1 }) |len| {
-        const json = "{\"token\":\"box\",\"version\":\"" ++ "9" ** len ++ "\",\"url\":\"https://e/x.dmg\"}";
+        const json = "{\"token\":\"box\",\"version\":\"" ++ &@as([len]u8, @splat('9')) ++ "\",\"url\":\"https://e/x.dmg\"}";
         if (len <= std.Io.Dir.max_name_bytes) {
             var cask = try parseCask(a, json);
             cask.deinit();
@@ -3327,7 +3327,7 @@ test "downloadToCache reuses a cached artifact only when its digest pins the byt
     {
         // Same filename, different digest — the cached bytes are the wrong
         // artifact and must not be handed back.
-        var c = try parseCask(a, try std.fmt.bufPrint(&json_buf, json_fmt, .{ "1.0", "a" ** 64 }));
+        var c = try parseCask(a, try std.fmt.bufPrint(&json_buf, json_fmt, .{ "1.0", &@as([64]u8, @splat('a')) }));
         defer c.deinit();
         try std.testing.expectError(error.OfflineRequired, installer.downloadToCache(&c, cache_dir, null));
     }
@@ -3419,7 +3419,7 @@ test "specPath composes the sidecar under the resolved cache dir, not the prefix
 /// A cache dir nested past 512 bytes but under `max_path_bytes`, with its
 /// `Cask` subdir created. The caller frees it and removes `root`.
 fn longCacheDir(a: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
-    const seg = "d" ** 200;
+    const seg = &@as([200]u8, @splat('d'));
     const dir = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
     errdefer a.free(dir);
     const cask_dir = try std.fmt.allocPrint(a, "{s}/Cask", .{dir});
@@ -3458,7 +3458,7 @@ test "deletePerVersionCacheFile removes an artefact whose path exceeds 512 bytes
 
 test "deletePerVersionCacheFile skips a path no filesystem could hold" {
     // Past max_path_bytes nothing can exist, so skipping is correct, not a leak.
-    const cache = "/tmp/" ++ "x" ** std.Io.Dir.max_path_bytes;
+    const cache = "/tmp/" ++ &@as([std.Io.Dir.max_path_bytes]u8, @splat('x'));
     try std.testing.expect(deletePerVersionCacheFile(std.Options.debug_io, cache, "tok", "1.0", null));
 }
 
@@ -3498,7 +3498,7 @@ test "applicationsDir keeps a near-limit sandbox prefix out of /Applications" {
     const root = try std.fmt.allocPrint(a, "/tmp/malt_appdir_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const prefix = try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ root, "p" ** 240, "p" ** 240 });
+    const prefix = try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ root, &@as([240]u8, @splat('p')), &@as([240]u8, @splat('p')) });
     defer a.free(prefix);
     try std.testing.expect(prefix.len + "/Applications".len > 512);
     try std.Io.Dir.cwd().createDirPath(io, prefix);
@@ -3749,7 +3749,7 @@ test "lookupInstalledChecked keeps a long version any install could have recorde
     defer db.close();
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
     // parseCask caps a version at a filename; the longest must read back.
-    const ver = "9" ** std.Io.Dir.max_name_bytes;
+    const ver = &@as([std.Io.Dir.max_name_bytes]u8, @splat('9'));
     try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
     const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(ver, row.version());
@@ -3759,7 +3759,7 @@ test "lookupInstalledChecked reports a version no install could record, not a mi
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
-    const ver = "9" ** (std.Io.Dir.max_name_bytes + 1);
+    const ver = &@as([(std.Io.Dir.max_name_bytes + 1)]u8, @splat('9'));
     try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
     try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "box"));
 }
@@ -3770,8 +3770,8 @@ test "lookupInstalledChecked keeps the longest tap slug and app path malt can re
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
     // Dropping either would route an upgrade off its tap or skip the
     // running-app check, so both must survive at their real limits.
-    const tap = "a" ** tap_slug.max_slug_len;
-    const app = "/" ++ "b" ** (std.Io.Dir.max_path_bytes - 1);
+    const tap = &@as([tap_slug.max_slug_len]u8, @splat('a'));
+    const app = "/" ++ &@as([(std.Io.Dir.max_path_bytes - 1)]u8, @splat('b'));
     try db.exec("INSERT INTO casks(token,version,app_path,tap) VALUES('box','1.0','" ++ app ++ "','" ++ tap ++ "');");
     const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(tap, row.tap().?);
@@ -3782,8 +3782,8 @@ test "lookupInstalledChecked reports a tap or app path past its limit, not a row
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
-    try db.exec("INSERT INTO casks(token,version,tap) VALUES('t','1.0','" ++ "a" ** (tap_slug.max_slug_len + 1) ++ "');");
-    try db.exec("INSERT INTO casks(token,version,app_path) VALUES('p','1.0','/" ++ "b" ** std.Io.Dir.max_path_bytes ++ "');");
+    try db.exec("INSERT INTO casks(token,version,tap) VALUES('t','1.0','" ++ &@as([(tap_slug.max_slug_len + 1)]u8, @splat('a')) ++ "');");
+    try db.exec("INSERT INTO casks(token,version,app_path) VALUES('p','1.0','/" ++ &@as([std.Io.Dir.max_path_bytes]u8, @splat('b')) ++ "');");
     try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "t"));
     try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "p"));
 }

@@ -35,7 +35,7 @@ pub fn tmpEntry(buf: []u8, prefix: []const u8, sha: []const u8) Error![]u8 {
     return std.fmt.bufPrint(buf, "{s}/tmp/{s}", .{ prefix, sha }) catch Error.PathTooLong;
 }
 
-const valid_sha = "a" ** 64;
+const valid_sha = &@as([64]u8, @splat('a'));
 
 test "formats both shapes for a valid key" {
     var buf: [entry_buf_len]u8 = undefined;
@@ -51,9 +51,9 @@ test "formats both shapes for a valid key" {
 
 test "rejects a key of the wrong length" {
     var buf: [entry_buf_len]u8 = undefined;
-    try std.testing.expectError(Error.InvalidSha256, entry(&buf, "/opt/malt", "a" ** 63));
-    try std.testing.expectError(Error.InvalidSha256, entry(&buf, "/opt/malt", "a" ** 65));
-    try std.testing.expectError(Error.InvalidSha256, tmpEntry(&buf, "/opt/malt", "a" ** 63));
+    try std.testing.expectError(Error.InvalidSha256, entry(&buf, "/opt/malt", &@as([63]u8, @splat('a'))));
+    try std.testing.expectError(Error.InvalidSha256, entry(&buf, "/opt/malt", &@as([65]u8, @splat('a'))));
+    try std.testing.expectError(Error.InvalidSha256, tmpEntry(&buf, "/opt/malt", &@as([63]u8, @splat('a'))));
 }
 
 test "rejects the empty key instead of yielding the store root" {
@@ -65,12 +65,12 @@ test "rejects the empty key instead of yielding the store root" {
 test "rejects out-of-charset keys, traversal included" {
     var buf: [entry_buf_len]u8 = undefined;
     const bad = [_][]const u8{
-        "../../../etc/passwd" ++ "a" ** 45, // 64 chars, still hops out
-        "/" ++ "a" ** 63,
-        "." ++ "a" ** 63,
-        "z" ++ "a" ** 63,
-        "A" ** 64,
-        "a" ** 63 ++ "\x00",
+        "../../../etc/passwd" ++ &@as([45]u8, @splat('a')), // 64 chars, still hops out
+        "/" ++ &@as([63]u8, @splat('a')),
+        "." ++ &@as([63]u8, @splat('a')),
+        "z" ++ &@as([63]u8, @splat('a')),
+        &@as([64]u8, @splat('A')),
+        &@as([63]u8, @splat('a')) ++ "\x00",
     };
     for (bad) |sha| {
         try std.testing.expectError(Error.InvalidSha256, entry(&buf, "/opt/malt", sha));
@@ -92,7 +92,7 @@ test "tmpEntry overflows into PathTooLong too" {
 
 test "entry_buf_len holds the longest prefix the tree accepts" {
     var buf: [entry_buf_len]u8 = undefined;
-    const prefix = "/" ++ "p" ** (prefix_path.max_prefix_len - 1);
+    const prefix = "/" ++ &@as([(prefix_path.max_prefix_len - 1)]u8, @splat('p'));
     const p = try entry(&buf, prefix, valid_sha);
     try std.testing.expectEqual(entry_buf_len, p.len);
 }

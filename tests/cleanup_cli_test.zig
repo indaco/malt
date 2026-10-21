@@ -22,7 +22,7 @@ const ScratchPrefix = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !ScratchPrefix {
         const base = try test_io.uniqueTempPath(allocator, "cleanup_cli", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -139,7 +139,7 @@ test "cleanup --help shows cleanup's help, not purge's" {
 
     const base = try test_io.uniqueTempPath(allocator, "cleanup_help", "out");
     defer allocator.free(base);
-    const path = try allocator.dupeZ(u8, base);
+    const path = try allocator.dupeSentinel(u8, base, 0);
     defer allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
 

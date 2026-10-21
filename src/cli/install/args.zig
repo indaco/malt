@@ -81,7 +81,7 @@ pub fn localRecipePrintable(name: []const u8, path: []const u8) bool {
     return !path_component.hasControlByte(name) and !path_component.hasControlByte(path);
 }
 
-/// Stands in for the rebuild hint. Both slots take `std.zig.fmtString`:
+/// Stands in for the rebuild hint. Both slots take `output.escaped`:
 /// the display scrubber passes a UTF-8 C1.
 pub const unprintable_local_fmt = "{f} ({f}) is a local formula whose name or recipe path holds a control character";
 

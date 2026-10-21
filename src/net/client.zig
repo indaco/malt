@@ -688,7 +688,7 @@ pub const HttpClient = struct {
         var head_buf: [32 * 1024]u8 = undefined;
         var response = self.receiveHeadDeadlined(&req, &head_buf, self.remainingHopBudget(hop_start_ns), &fired, sendable) catch |e|
             return self.headWalkError(&fired, e);
-        const status: u16 = @intFromEnum(response.head.status);
+        const status: u16 = @backingInt(response.head.status);
         if (isFollowableRedirect(status)) return error.RequestFailed;
         if (statusHasNoBody(status)) {
             const empty = try self.allocator.alloc(u8, 0);
@@ -746,7 +746,7 @@ pub const HttpClient = struct {
         const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
             return self.headWalkError(&fired, e);
 
-        return @intFromEnum(response.head.status);
+        return @backingInt(response.head.status);
     }
 
     pub const HeadResolved = struct {
@@ -884,7 +884,7 @@ pub const HttpClient = struct {
                 }
             }
 
-            const status: u16 = @intFromEnum(response.head.status);
+            const status: u16 = @backingInt(response.head.status);
             const next = (try self.nextRedirectHop(uri, status, response.head.location, hops)) orelse break;
             defer self.allocator.free(next);
             try resolved.replaceFinalUrl(next);
@@ -1269,8 +1269,8 @@ pub const HttpClient = struct {
     /// walks now hand up a closed `GetError`, so every tag reaching here is
     /// named on one side or the other.
     fn isRetriableWalkError(err: anyerror) bool {
-        inline for (@typeInfo(TerminalWalkError).error_set.?) |variant| {
-            if (err == @field(TerminalWalkError, variant.name)) return false;
+        inline for (@typeInfo(TerminalWalkError).error_set.error_names.?) |variant| {
+            if (err == @field(TerminalWalkError, variant)) return false;
         }
         return true;
     }
@@ -1557,7 +1557,7 @@ pub const HttpClient = struct {
             var redirect_buf: [32 * 1024]u8 = undefined;
             var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
                 return self.headWalkError(&fired, e);
-            const status: u16 = @intFromEnum(response.head.status);
+            const status: u16 = @backingInt(response.head.status);
 
             const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| return walkRedirectError(e);
             if (hop) |next| {
@@ -1729,7 +1729,7 @@ pub const HttpClient = struct {
             var redirect_buf: [32 * 1024]u8 = undefined;
             var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
                 return self.headWalkError(&fired, e);
-            const status: u16 = @intFromEnum(response.head.status);
+            const status: u16 = @backingInt(response.head.status);
 
             const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| return walkRedirectError(e);
             if (hop) |next| {
@@ -1812,8 +1812,8 @@ pub const HttpClient = struct {
     // The watchdog runs on its own thread; anything it borrows must be
     // synchronised or owned. Request and Connection are neither.
     comptime {
-        for (@typeInfo(@TypeOf(watchdogFn)).@"fn".params) |p| {
-            const T = p.type.?;
+        for (@typeInfo(@TypeOf(watchdogFn)).@"fn".param_types) |p| {
+            const T = p.?;
             if (T == *std.http.Client.Request) @compileError("watchdogFn must not borrow the request");
             if (T == *std.http.Client.Connection) @compileError("watchdogFn must not borrow the connection");
         }
@@ -2148,11 +2148,11 @@ fn assertErrorSetFitsIn(comptime f: anytype, comptime Allowed: type, comptime na
     // pair count grows with both and outran the default quota.
     @setEvalBranchQuota(10_000);
     const ret = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
-    const actual = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.?;
+    const actual = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.error_names.?;
     for (actual) |tag| {
-        for (@typeInfo(Allowed).error_set.?) |allowed| {
-            if (std.mem.eql(u8, tag.name, allowed.name)) break;
-        } else @compileError(name ++ " leaks an unnamed error tag: " ++ tag.name);
+        for (@typeInfo(Allowed).error_set.error_names.?) |allowed| {
+            if (std.mem.eql(u8, tag, allowed)) break;
+        } else @compileError(name ++ " leaks an unnamed error tag: " ++ tag);
     }
 }
 
@@ -2184,9 +2184,9 @@ test "collapsing a transport fault never makes a terminal tag retriable" {
     // see it, so the invariant is checked against the transport's own error
     // set: a Ctrl-C during DNS must abort, not get slept off as a hiccup.
     const ret = @typeInfo(@TypeOf(std.http.Client.request)).@"fn".return_type.?;
-    const raised = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.?;
+    const raised = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.error_names.?;
     inline for (raised) |tag| {
-        const e = @field(anyerror, tag.name);
+        const e = @field(anyerror, tag);
         if (!HttpClient.isRetriableWalkError(e)) {
             try std.testing.expect(!HttpClient.isRetriableWalkError(HttpClient.walkTransportError(e)));
         }
@@ -2295,16 +2295,16 @@ test "every url entry point refuses a cleartext origin before dialling out" {
         "getResolved",
     };
     comptime {
-        for (@typeInfo(HttpClient).@"struct".decls) |decl| {
-            const field = @field(HttpClient, decl.name);
+        for (@typeInfo(HttpClient).@"struct".decl_names) |decl_name| {
+            const field = @field(HttpClient, decl_name);
             const info = @typeInfo(@TypeOf(field));
             if (info != .@"fn") continue;
-            const params = info.@"fn".params;
+            const params = info.@"fn".param_types;
             if (params.len < 2) continue;
-            if (params[0].type != *HttpClient or params[1].type != []const u8) continue;
+            if (params[0] != *HttpClient or params[1] != []const u8) continue;
             for (entry_points) |name| {
-                if (std.mem.eql(u8, name, decl.name)) break;
-            } else @compileError("url entry point missing from the cleartext sweep: " ++ decl.name);
+                if (std.mem.eql(u8, name, decl_name)) break;
+            } else @compileError("url entry point missing from the cleartext sweep: " ++ decl_name);
         }
     }
     const a = std.testing.allocator;
@@ -2560,7 +2560,7 @@ test "githubApiToken: a non-empty value is taken verbatim, not trimmed (matches 
 test "authHeaderValue: a >256-byte token still yields a full, untruncated header" {
     // "token " + 400 chars overflows the old 256-byte buffer — the exact
     // input that used to drop the token to an anonymous request.
-    const token = "a" ** 400;
+    const token = &@as([400]u8, @splat('a'));
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ token};
     var http = HttpClient.init(std.Options.debug_io, environFrom(&entries), std.testing.allocator);
     defer http.deinit();
@@ -2882,8 +2882,8 @@ test "isRetriableWalkError: every redirect decision is terminal" {
     // The predicate derives its terminal side from these sets. Asserting the
     // derivation - rather than a hand-written list - is what stops a tag added
     // to RedirectError from becoming retriable by omission.
-    inline for (@typeInfo(RedirectError).error_set.?) |variant| {
-        try std.testing.expect(!HttpClient.isRetriableWalkError(@field(RedirectError, variant.name)));
+    inline for (@typeInfo(RedirectError).error_set.error_names.?) |variant| {
+        try std.testing.expect(!HttpClient.isRetriableWalkError(@field(RedirectError, variant)));
     }
 }
 

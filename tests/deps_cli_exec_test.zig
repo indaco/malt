@@ -23,7 +23,7 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "deps_cli", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -117,7 +117,7 @@ test "execute on a fresh prefix without --installed still completes" {
     // No db, no api hit either — must degrade cleanly without panic.
     const unique = try test_io.uniqueTempPath(testing.allocator, "deps_cli", "no_db");
     defer testing.allocator.free(unique);
-    const path = try testing.allocator.dupeZ(u8, unique);
+    const path = try testing.allocator.dupeSentinel(u8, unique, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -304,7 +304,7 @@ test "execute reports an install database it cannot open instead of not-found" {
     const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{s.path});
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
-    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
 
     try expectDepsAborts(&.{ "--installed", "wget" });
     try expectDepsAborts(&.{"leaf"});

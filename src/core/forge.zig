@@ -653,25 +653,25 @@ test "rawAuthHeader gitlab: null when MALT_GITLAB_TOKEN unset" {
 // `null` stays reserved for the unset/empty path (covered by the tests above).
 
 test "authHeader github: overflow is a loud error, not a silent anonymous drop" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "x" ** 300};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ &@as([300]u8, @splat('x'))};
     var small_buf: [64]u8 = undefined;
     try std.testing.expectError(error.AuthTokenTooLong, authHeader(.github, envWith(entries), &small_buf));
 }
 
 test "authHeader gitlab: overflow is a loud error" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "x" ** 300};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ &@as([300]u8, @splat('x'))};
     var small_buf: [64]u8 = undefined;
     try std.testing.expectError(error.AuthTokenTooLong, authHeader(.gitlab, envWith(entries), &small_buf));
 }
 
 test "authHeader gitea: overflow is a loud error" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=" ++ "x" ** 300};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=" ++ &@as([300]u8, @splat('x'))};
     var small_buf: [64]u8 = undefined;
     try std.testing.expectError(error.AuthTokenTooLong, authHeader(.gitea, envWith(entries), &small_buf));
 }
 
 test "rawAuthHeader gitlab: overflow is a loud error via the raw path too" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "x" ** 300};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ &@as([300]u8, @splat('x'))};
     var small_buf: [64]u8 = undefined;
     try std.testing.expectError(error.AuthTokenTooLong, rawAuthHeader(.gitlab, envWith(entries), &small_buf));
 }
@@ -679,31 +679,31 @@ test "rawAuthHeader gitlab: overflow is a loud error via the raw path too" {
 test "authHeader github: a realistic long token fits the widened buffer" {
     // A 600-byte token (GitHub-App / fine-grained PAT scale) must
     // authenticate in full, not error, against a buffer sized like tap.zig's.
-    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 600};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ &@as([600]u8, @splat('t'))};
     var buf: [8 * 1024]u8 = undefined;
     const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
-    try std.testing.expectEqualStrings("token " ++ "t" ** 600, h.value);
+    try std.testing.expectEqualStrings("token " ++ &@as([600]u8, @splat('t')), h.value);
 }
 
 test "authHeader gitlab: a realistic long bare PAT fits the widened buffer" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "t" ** 600};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ &@as([600]u8, @splat('t'))};
     var buf: [8 * 1024]u8 = undefined;
     const h = try authHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("PRIVATE-TOKEN", h.name);
-    try std.testing.expectEqualStrings("t" ** 600, h.value);
+    try std.testing.expectEqualStrings(&@as([600]u8, @splat('t')), h.value);
 }
 
 test "authHeader github: a value that exactly fills the buffer authenticates" {
     // Boundary: value length == buf.len is a fit, not an overflow.
-    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 58};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ &@as([58]u8, @splat('t'))};
     var buf: [64]u8 = undefined; // "token " (6) + 58 == 64
     const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings("token " ++ "t" ** 58, h.value);
+    try std.testing.expectEqualStrings("token " ++ &@as([58]u8, @splat('t')), h.value);
 }
 
 test "authHeader github: one byte past the buffer is a loud error" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 59};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ &@as([59]u8, @splat('t'))};
     var buf: [64]u8 = undefined; // "token " (6) + 59 == 65 > 64
     try std.testing.expectError(error.AuthTokenTooLong, authHeader(.github, envWith(entries), &buf));
 }

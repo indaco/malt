@@ -739,7 +739,7 @@ fn upgradeFormula(
             if (install_args_mod.localRecipePrintable(name, old.full_name))
                 output.skip("{s} was installed from a local formula; re-run `mt install --local {f}` to update it", .{ name, output.shellQuoted(old.full_name) })
             else
-                output.skip(install_args_mod.unprintable_local_fmt ++ "; move or rename the recipe, then re-run `mt install --local` on it", .{ std.zig.fmtString(name), std.zig.fmtString(old.full_name) });
+                output.skip(install_args_mod.unprintable_local_fmt ++ "; move or rename the recipe, then re-run `mt install --local` on it", .{ output.escaped(name), output.escaped(old.full_name) });
         }
         output.emitNdjsonEvent(.local, name, null);
         return .local;
@@ -2191,7 +2191,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -2977,7 +2977,7 @@ fn writeTestFormulaCache(cache_dir: []const u8, name: []const u8, stable: []cons
     defer f.close(io);
     var body_buf: [512]u8 = undefined;
     // An `all` bottle keeps the would-upgrade path open on any host.
-    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}},\"bottle\":{{\"stable\":{{\"files\":{{\"all\":{{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"{s}\"}}}}}}}}}}", .{ name, stable, "a" ** 64 });
+    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}},\"bottle\":{{\"stable\":{{\"files\":{{\"all\":{{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"{s}\"}}}}}}}}}}", .{ name, stable, &@as([64]u8, @splat('a')) });
     try f.writeStreamingAll(io, body);
 }
 
@@ -3704,10 +3704,10 @@ fn replayCaskUpgradePin(keg_pinned: bool, cask_pinned: bool) !struct { keg: bool
     defer db.close();
     try schema.initSchema(&db);
     var buf: [512]u8 = undefined;
-    try db.exec(try std.fmt.bufPrintZ(&buf,
+    try db.exec(try std.fmt.bufPrintSentinel(&buf,
         \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
         \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
-    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }));
+    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }, 0));
 
     const was_pinned = caskPinSnapshot(&db, "box");
     try cask_mod.removeRecord(&db, "box");

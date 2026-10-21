@@ -50,32 +50,32 @@ pub fn eqlHex256(computed: [64]u8, expected: []const u8) bool {
 }
 
 test "eqlHex256 matches a digest against its own hex string" {
-    const computed = "d".* ++ ("eadbeef" ** 9).*;
+    const computed = "d".* ++ (std.mem.asBytes(&@as([9][7]u8, @splat("eadbeef".*)))).*;
     try std.testing.expect(eqlHex256(computed, &computed));
 }
 
 test "eqlHex256 rejects a difference in the last byte" {
-    const computed = ("deadbeef" ** 8).*;
+    const computed = (std.mem.asBytes(&@as([8][8]u8, @splat("deadbeef".*)))).*;
     var expected = computed;
     expected[expected.len - 1] = '0';
     try std.testing.expect(!eqlHex256(computed, &expected));
 }
 
 test "eqlHex256 rejects a difference in the first byte" {
-    const computed = ("deadbeef" ** 8).*;
+    const computed = (std.mem.asBytes(&@as([8][8]u8, @splat("deadbeef".*)))).*;
     var expected = computed;
     expected[0] = '0';
     try std.testing.expect(!eqlHex256(computed, &expected));
 }
 
 test "eqlHex256 rejects an expected hash that is not 64 chars" {
-    const computed = ("deadbeef" ** 8).*;
+    const computed = (std.mem.asBytes(&@as([8][8]u8, @splat("deadbeef".*)))).*;
     try std.testing.expect(!eqlHex256(computed, computed[0..63]));
     try std.testing.expect(!eqlHex256(computed, computed ++ "0"));
     try std.testing.expect(!eqlHex256(computed, ""));
 }
 
 test "eqlHex256 is byte-exact, not case-insensitive" {
-    const computed = ("deadbeef" ** 8).*;
-    try std.testing.expect(!eqlHex256(computed, "DEADBEEF" ** 8));
+    const computed = (std.mem.asBytes(&@as([8][8]u8, @splat("deadbeef".*)))).*;
+    try std.testing.expect(!eqlHex256(computed, std.mem.asBytes(&@as([8][8]u8, @splat("DEADBEEF".*)))));
 }

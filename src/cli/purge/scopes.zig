@@ -539,7 +539,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 break :blk name;
             };
 
-            const stem_z = allocator.dupeZ(u8, stem) catch continue;
+            const stem_z = allocator.dupeSentinel(u8, stem, 0) catch continue;
             defer allocator.free(stem_z);
 
             cache_lookup.reset() catch {};
@@ -570,7 +570,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         while (cr_iter.next(io) catch null) |entry| {
             if (entry.kind != .directory) continue;
 
-            const token_z = allocator.dupeZ(u8, entry.name) catch continue;
+            const token_z = allocator.dupeSentinel(u8, entry.name, 0) catch continue;
             defer allocator.free(token_z);
 
             lookup.reset() catch {};
@@ -1046,7 +1046,7 @@ fn seedOrphanPrefix(
         }
     }
     try sql.append(allocator, ';');
-    const stmt = try allocator.dupeZ(u8, sql.items);
+    const stmt = try allocator.dupeSentinel(u8, sql.items, 0);
     defer allocator.free(stmt);
 
     const db_path = try joinZ(allocator, prefix, "/db/malt.db");
@@ -2096,7 +2096,7 @@ test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
         try db.exec(insert);
     }
 
-    const prefix_z = try allocator.dupeZ(u8, prefix);
+    const prefix_z = try allocator.dupeSentinel(u8, prefix, 0);
     defer allocator.free(prefix_z);
     const prev = try atomic.overridePrefixEnv(prefix_z);
     defer atomic.restorePrefixEnv(prev);
@@ -2181,7 +2181,7 @@ test "caskVersionFootprint counts a cached artefact whose path exceeds 512 bytes
     const root = try std.fmt.allocPrint(a, "/tmp/malt_footprint_long_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const seg = "d" ** 200;
+    const seg = &@as([200]u8, @splat('d'));
     const cask_dir = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}/Cask", .{ root, seg, seg, seg });
     defer a.free(cask_dir);
     try std.Io.Dir.cwd().createDirPath(io, cask_dir);
@@ -2202,7 +2202,7 @@ test "cache prune and downloads sweep reach files under a cache dir past 512 byt
     const root = try std.fmt.allocPrint(a, "/tmp/malt_sweep_long_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const seg = "d" ** 200;
+    const seg = &@as([200]u8, @splat('d'));
     const cache = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
     defer a.free(cache);
     try std.testing.expect(cache.len + "/downloads/stale.bin".len > 512);

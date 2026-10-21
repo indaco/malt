@@ -385,7 +385,7 @@ test "buildBlobUrl threads the override base into the blob path" {
 }
 
 test "buildBlobUrl fits a mirror base far past any fixed path buffer" {
-    const long_base = "https://" ++ ("mirror." ** 90) ++ "example.com";
+    const long_base = "https://" ++ (std.mem.asBytes(&@as([90][7]u8, @splat("mirror.".*)))) ++ "example.com";
     const url = try GhcrClient.buildBlobUrl(testing.allocator, long_base, "homebrew/core/wget", "sha256:abc");
     defer testing.allocator.free(url);
     try testing.expect(url.len > 512);

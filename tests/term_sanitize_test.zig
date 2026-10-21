@@ -46,7 +46,7 @@ test "Sink.write_fn declares a closed error set" {
     const FnType = @typeInfo(FuncPtr).pointer.child;
     const RetT = @typeInfo(FnType).@"fn".return_type.?;
     const ErrSet = @typeInfo(RetT).error_union.error_set;
-    try testing.expect(@typeInfo(ErrSet).error_set != null);
+    try testing.expect(@typeInfo(ErrSet).error_set.error_names != null);
 }
 
 test "plain ASCII passes through" {

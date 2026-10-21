@@ -21,7 +21,7 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "list_cli", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -91,7 +91,7 @@ test "execute on a fresh prefix with no db is a clean no-op" {
     // No db/ subdir → SQLite open fails → list takes the "empty dir" branch.
     const base = try test_io.uniqueTempPath(testing.allocator, "list_cli", "no_db");
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -247,7 +247,7 @@ test "execute reports a malt.db that is not a database instead of an empty list"
     var path_buf: [512]u8 = undefined;
     const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
     defer f.close(std.Options.debug_io);
-    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
     try expectListRefusesDb();
 }
 

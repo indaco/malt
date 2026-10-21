@@ -63,7 +63,7 @@ pub fn footerHint() []const u8 {
 /// Case-insensitive substring match of `filter` against a finding `title`. An
 /// empty filter matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
-    return filter.len == 0 or std.ascii.indexOfIgnoreCase(name, filter) != null;
+    return filter.len == 0 or std.ascii.findIgnoreCase(name, filter) != null;
 }
 
 /// Display order: errors first, then warnings, then ok — the scan-ability sort.

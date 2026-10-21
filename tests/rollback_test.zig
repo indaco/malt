@@ -25,7 +25,7 @@ fn unsetPrefix() void {
 /// `zig build test` (or the ReleaseSafe regression harness) and fails the
 /// WAL-mode open; keying on the pid keeps each runner isolated.
 fn rbPrefix(buf: []u8, comptime name: []const u8) [:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/malt_rb_{d}_" ++ name, .{std.c.getpid()}) catch unreachable;
+    return std.fmt.bufPrintSentinel(buf, "/tmp/malt_rb_{d}_" ++ name, .{std.c.getpid()}, 0) catch unreachable;
 }
 
 /// Create a sandboxed malt prefix with an initialized empty DB. Caller must
@@ -39,7 +39,7 @@ fn makeSandbox(path: [:0]const u8) !void {
     try test_io.makeDirAbsolute(std.Options.debug_io, db_sub);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{path});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -52,7 +52,7 @@ test "schema creates kegs table with expected columns" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [96]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_buf, "{s}/rb.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/rb.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -102,7 +102,7 @@ test "rollback returns error.Aborted when no previous version exists in store" {
     // Record an installed keg but deliberately omit the store/ directory so
     // the store-scan path fails with "Cannot read store directory".
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec("INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason) VALUES ('wget', 'wget', '1.24', 0, 'homebrew/core', 'deadbeef', '/tmp/none', 'direct');");
     db.close();
@@ -130,7 +130,7 @@ test "rollback distinguishes a cask token from a truly missing package" {
     // installed, just not as a formula. This test pins the corrected
     // diagnostic so the lie doesn't quietly come back.
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec(
         \\INSERT INTO casks (token, name, version, url, sha256)
@@ -167,7 +167,7 @@ test "schema version table exists" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [96]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_buf, "{s}/sv.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/sv.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -186,7 +186,7 @@ const output = malt.output;
 /// so `execute` clears its "package not installed" guard.
 fn insertCurrentKeg(prefix: [:0]const u8, name: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -202,11 +202,11 @@ fn insertCurrentKeg(prefix: [:0]const u8, name: []const u8, version: []const u8)
 
 // One distinct 64-hex key per store entry: the store names its entries with
 // the bottle sha, and the materialize path refuses anything else.
-const sha_older = "1a" ** 32;
-const sha_newer = "2b" ** 32;
-const sha_installed = "3c" ** 32;
-const sha_current = "4d" ** 32;
-const sha_previous = "5e" ** 32;
+const sha_older = std.mem.asBytes(&@as([32][2]u8, @splat("1a".*)));
+const sha_newer = std.mem.asBytes(&@as([32][2]u8, @splat("2b".*)));
+const sha_installed = std.mem.asBytes(&@as([32][2]u8, @splat("3c".*)));
+const sha_current = std.mem.asBytes(&@as([32][2]u8, @splat("4d".*)));
+const sha_previous = std.mem.asBytes(&@as([32][2]u8, @splat("5e".*)));
 
 /// Seed a store entry tree `<prefix>/store/<sha>/<name>/<pkg_version>/` and
 /// optionally sleep afterwards so two seeds get distinct mtimes on
@@ -391,7 +391,7 @@ test "rollback reports a casks table it cannot read instead of not installed" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try seedCask(prefix, "flux-markdown", "1.32.427");
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix}), "casks");
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -408,7 +408,7 @@ test "rollback reports a casks table it cannot read instead of not installed" {
 
 fn seedCask(prefix: [:0]const u8, token: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare(
@@ -423,7 +423,7 @@ fn seedCask(prefix: [:0]const u8, token: []const u8, version: []const u8) !void 
 
 fn seedCaskVersion(prefix: [:0]const u8, token: []const u8, version: []const u8, installed_at: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare(
@@ -649,7 +649,7 @@ fn installKegAs(
     const cellar_path = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -682,13 +682,13 @@ fn installKegAs(
 /// entry has to stay discoverable by `collectEntries`).
 fn denyAccess(prefix: [:0]const u8, sha: []const u8, name: []const u8, pkg_version: []const u8, mode: c_uint) void {
     var buf: [512]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version }) catch return;
+    const dir = std.fmt.bufPrintSentinel(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version }, 0) catch return;
     _ = std.c.chmod(dir.ptr, @intCast(mode));
 }
 
 fn installedVersion(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -749,12 +749,12 @@ test "a rollback that cannot materialize leaves the current version installed" {
 
 fn kegFlag(prefix: [:0]const u8, name: []const u8, column: []const u8) !bool {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
     var sql_buf: [128]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&sql_buf, "SELECT {s} FROM kegs WHERE name = ?1;", .{column});
+    const sql = try std.fmt.bufPrintSentinel(&sql_buf, "SELECT {s} FROM kegs WHERE name = ?1;", .{column}, 0);
     var stmt = try db.prepare(sql);
     defer stmt.finalize();
     try stmt.bindText(1, name);
@@ -773,7 +773,7 @@ test "a completed rollback preserves bin isolation and the hold" {
     try installKegIsolated(prefix, "wget", "1.22", true);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET pinned = 1 WHERE name = 'wget';");
@@ -817,7 +817,7 @@ test "a completed rollback preserves bin isolation and the hold" {
 
 fn kegInstallReason(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -861,7 +861,7 @@ test "rolling back a dependency keeps it marked as a dependency" {
 
 fn depNames(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -884,7 +884,7 @@ fn depNames(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8
 
 fn addDep(prefix: [:0]const u8, name: []const u8, dep: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -934,7 +934,7 @@ test "a completed rollback keeps the keg's dependency edges" {
 /// already torn the current version's symlinks down.
 fn seedColliding(prefix: [:0]const u8, name: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -984,7 +984,7 @@ test "a rollback that fails mid-swap restores the current version's links" {
     // ...and so is its DB row, courtesy of the transaction rollback.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var stmt = try db.prepare("SELECT COUNT(*) FROM links WHERE link_path = ?1;");
@@ -1043,7 +1043,7 @@ test "a rollback that cannot open its DB transaction says why and drops the mate
     var db_path_buf: [512]u8 = undefined;
     var lock_path_buf: [512]u8 = undefined;
     var squatter: WriteLockSquatter = .{
-        .db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix}),
+        .db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0),
         .lk = try lock.LockFile.acquire(std.Options.debug_io, try std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}), 1000),
     };
     const thread = try std.Thread.spawn(.{}, WriteLockSquatter.run, .{&squatter});
@@ -1098,10 +1098,10 @@ test "a rollback that cannot open its DB transaction says why and drops the mate
 /// affecting anything else in the prefix.
 fn freezeKegDir(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8, mode: c_uint) void {
     var buf: [512]u8 = undefined;
-    const bin = std.fmt.bufPrintZ(&buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version }) catch return;
+    const bin = std.fmt.bufPrintSentinel(&buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version }, 0) catch return;
     _ = std.c.chmod(bin.ptr, @intCast(mode));
     var buf2: [512]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&buf2, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
+    const dir = std.fmt.bufPrintSentinel(&buf2, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }, 0) catch return;
     _ = std.c.chmod(dir.ptr, @intCast(mode));
 }
 
@@ -1287,7 +1287,7 @@ test "a completed rollback of a tap keg ignores a same-named core formula and dr
     try installKeg(prefix, "wget", "1.22");
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET tap = 'user/repo' WHERE name = 'wget';");
@@ -1567,7 +1567,7 @@ test "a bare rollback still reaches the formula when the casks table cannot be r
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try seedSharedName(prefix);
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix}), "casks");
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
     setPrefix(prefix);
     defer unsetPrefix();
 

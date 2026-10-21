@@ -36,7 +36,7 @@ pub const Fixture = struct {
         }
         const nonblock: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
         try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, nonblock) != -1);
-        const chunk = [_]u8{0} ** 4096;
+        const chunk = @as([4096]u8, @splat(0));
         var filled: usize = 0;
         while (true) {
             const n = std.c.write(fds[1], &chunk, chunk.len);

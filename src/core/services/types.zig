@@ -84,7 +84,7 @@ fn appendCronField(w: *std.Io.Writer, entries: []const CalendarInterval, comptim
     // A field unset in the first entry is unset in all (cron fields enumerate
     // together), so `*` covers it.
     if (entries.len == 0 or @field(entries[0], field) == null) return w.writeByte('*');
-    var seen = [_]bool{false} ** 256;
+    var seen = @as([256]bool, @splat(false));
     for (entries) |e| if (@field(e, field)) |v| {
         seen[v] = true;
     };

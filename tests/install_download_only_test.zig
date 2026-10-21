@@ -24,7 +24,7 @@ const c = test_io.c;
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "install_dlonly", suffix);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     inline for (.{ "store", "Cellar", "cache", "db" }) |sub| {
@@ -184,7 +184,7 @@ test "--download-only --ndjson emits download_started + download_complete around
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "cd" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("cd".*)));
     try seedStoreBottle(prefix, sha, "ndpkg", "1.0");
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_json.deinit();
@@ -229,7 +229,7 @@ test "--download-only prints the resolved bottle path under the prefix store" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "ef" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
     try seedStoreBottle(prefix, sha, "pathpkg", "1.0");
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_json.deinit();
@@ -274,7 +274,7 @@ test "--download-only --dry-run prints the plan and never touches the store" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "aa" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("aa".*)));
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_json.deinit();
     const json = try warmFormulaJson(arena_json.allocator(), "dr", sha);
@@ -316,8 +316,8 @@ test "--download-only with multiple packages prints one resolved path per packag
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha_a = "11" ** 32;
-    const sha_b = "22" ** 32;
+    const sha_a = std.mem.asBytes(&@as([32][2]u8, @splat("11".*)));
+    const sha_b = std.mem.asBytes(&@as([32][2]u8, @splat("22".*)));
     try seedStoreBottle(prefix, sha_a, "alpha", "1.0");
     try seedStoreBottle(prefix, sha_b, "beta", "1.0");
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
@@ -363,7 +363,7 @@ test "--download-only with one cached + one 404 package exits PartialFailure" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha_a = "33" ** 32;
+    const sha_a = std.mem.asBytes(&@as([32][2]u8, @splat("33".*)));
     try seedStoreBottle(prefix, sha_a, "alpha", "1.0");
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_json.deinit();
@@ -405,7 +405,7 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
     // cache lookup for the cask JSON misses).
     const base = try test_io.uniqueTempPath(testing.allocator, "install_dlonly", "cask_bypass");
     defer testing.allocator.free(base);
-    const prefix_z = try testing.allocator.dupeZ(u8, base);
+    const prefix_z = try testing.allocator.dupeSentinel(u8, base, 0);
     defer testing.allocator.free(prefix_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
@@ -433,7 +433,7 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
         try stmt.bindText(2, "ghost-cask");
         try stmt.bindText(3, "1.0");
         try stmt.bindText(4, "https://example.test/ghost.dmg");
-        try stmt.bindText(5, "0" ** 64);
+        try stmt.bindText(5, &@as([64]u8, @splat('0')));
         try stmt.bindText(6, "/Applications/Ghost.app");
         _ = try stmt.step();
     }
@@ -481,7 +481,7 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "ee" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ee".*)));
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
@@ -579,7 +579,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "22" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("22".*)));
 
     var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
@@ -663,7 +663,7 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "11" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("11".*)));
 
     var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
@@ -756,7 +756,7 @@ test "--download-only populates the store and skips Cellar + kegs" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "ab" ** 32; // 64-char hex placeholder
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))); // 64-char hex placeholder
     try seedStoreBottle(prefix, sha, "warmpkg", "1.0");
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_json.deinit();
@@ -798,7 +798,7 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "cd" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("cd".*)));
 
     // Build a real source-tree tarball (a file NOT named after the
     // formula) and seed it at the sha-keyed cache path so materialise
@@ -893,7 +893,7 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "ef" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
 
     // Keg-shaped archive: a top-level lib/ with one file, no binary.
     const work = try std.fmt.allocPrint(testing.allocator, "{s}/libwork", .{prefix});
@@ -979,7 +979,7 @@ test "--download-only reports a Ctrl-C as an interruption" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "44" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("44".*)));
     try seedStoreBottle(prefix, sha, "intpkg", "1.0");
     var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_json.deinit();
@@ -1025,7 +1025,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "1a" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("1a".*)));
     const cache_path = try seedRawBinaryCache(prefix, sha, &macho_stub);
     defer testing.allocator.free(cache_path);
 
@@ -1101,7 +1101,7 @@ test "materializeRubyFormula honours binary_name when staging an uncompressed bi
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "2b" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("2b".*)));
     const cache_path = try seedRawBinaryCache(prefix, sha, &macho_stub);
     defer testing.allocator.free(cache_path);
 
@@ -1168,7 +1168,7 @@ test "materializeRubyFormula refuses a compressed body arriving on the raw-binar
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "3c" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("3c".*)));
     const cache_path = try seedRawBinaryCache(prefix, sha, "BZh91AY&SY");
     defer testing.allocator.free(cache_path);
 
@@ -1230,7 +1230,7 @@ test "materializeRubyFormula truncated body on the raw-binary path is refused" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "4d" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("4d".*)));
     const cache_path = try seedRawBinaryCache(prefix, sha, "\xcf");
     defer testing.allocator.free(cache_path);
 
@@ -1289,7 +1289,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "5e" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("5e".*)));
     const cache_path = try seedRawBinaryCache(prefix, sha, &macho_stub);
     defer testing.allocator.free(cache_path);
 
@@ -1324,7 +1324,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
             .version = "1.0",
             .revision = 0,
             .tap = "homebrew/core",
-            .store_sha256 = "00" ** 32,
+            .store_sha256 = std.mem.asBytes(&@as([32][2]u8, @splat("00".*))),
             .cellar_path = dep_cellar,
             .install_reason = "dependency",
             .bin_isolated = false,
@@ -1401,7 +1401,7 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
         .tap_label = "user/repo",
         .version = "1.0",
         .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/drypkg-darwin-arm64",
-        .sha256 = "6f" ** 32,
+        .sha256 = std.mem.asBytes(&@as([32][2]u8, @splat("6f".*))),
         .dependencies = &.{"libvorbis"},
     };
 
@@ -1445,7 +1445,7 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const sha = "7a" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("7a".*)));
 
     // Keg-shaped archive: top-level bin/ holding the formula's binary.
     const work = try std.fmt.allocPrint(testing.allocator, "{s}/tarwork", .{prefix});
@@ -1658,7 +1658,7 @@ test "--download-only on a tap app cask refuses a bin entry the cask cannot take
         .tap_label = "zed-industries/zed",
         .version = "0.1.0",
         .url = "https://malt-tap-test.invalid/Zed.zip",
-        .sha256 = "ee" ** 32,
+        .sha256 = std.mem.asBytes(&@as([32][2]u8, @splat("ee".*))),
         .app_name = "Zed.app",
         .binary_name = "$APPDIR/Zed.app/Contents/MacOS/cli",
         .binary_target = "zed",
@@ -1781,7 +1781,7 @@ test "--download-only refuses an opted-out tap formula whose cache no install wo
 /// payload is `payload_file`. Returns the materialise result; the prefix is
 /// left for the caller to inspect and delete.
 fn reinstallLatestOver(prefix: []const u8, payload_file: []const u8) !void {
-    const sha = "ab" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
     const work = try std.fmt.allocPrint(testing.allocator, "{s}/work", .{prefix});
     defer testing.allocator.free(work);
     {

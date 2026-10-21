@@ -936,7 +936,7 @@ test "isCurrent follows the tap in both directions" {
 test "isCurrent declines to prove currency on an overflowing version" {
     // pkgVersion overflows past 256 bytes; the safe answer is `unprovable`, which
     // callers route to a re-check, never to `current`.
-    const long = "1." ** 200;
+    const long = std.mem.asBytes(&@as([200][2]u8, @splat("1.".*)));
     try testing.expectEqual(Currency.unprovable, isCurrent(long, 3, "whatever"));
 }
 
@@ -1177,7 +1177,7 @@ test "parseFormula refuses a formula with no stable version" {
 }
 
 // A digest that is a usable store key; the tests below vary it.
-const store_key_sha = "0123456789abcdef" ** 4;
+const store_key_sha = std.mem.asBytes(&@as([4][16]u8, @splat("0123456789abcdef".*)));
 
 fn bottleFormulaJson(files_json: []const u8) ![]u8 {
     return std.fmt.allocPrint(
@@ -1207,10 +1207,10 @@ test "parseFormula drops a bottle entry whose sha256 is not a store key" {
         "null",
         "42",
         "\"\"",
-        "\"" ++ "a" ** 63 ++ "\"",
-        "\"" ++ "a" ** 65 ++ "\"",
-        "\"" ++ "g" ** 64 ++ "\"",
-        "\"" ++ "A" ** 64 ++ "\"",
+        "\"" ++ &@as([63]u8, @splat('a')) ++ "\"",
+        "\"" ++ &@as([65]u8, @splat('a')) ++ "\"",
+        "\"" ++ &@as([64]u8, @splat('g')) ++ "\"",
+        "\"" ++ &@as([64]u8, @splat('A')) ++ "\"",
     };
     for (bad) |sha_value| {
         const json = try oneBottleJson(sha_value);
@@ -1344,7 +1344,7 @@ inline fn hostBottle(comptime codename: []const u8, comptime sha_char: []const u
 }
 
 inline fn otherBottle(comptime key: []const u8, comptime sha_char: []const u8) []const u8 {
-    return "\"" ++ key ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ sha_char ** 64 ++ "\"}";
+    return "\"" ++ key ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat(sha_char[0])) ++ "\"}";
 }
 
 test "resolveBottleFor never picks a bottle built for a newer macOS than the host" {
@@ -1382,7 +1382,7 @@ test "resolveBottleFor never picks a bottle built for a newer macOS than the hos
         defer formula.deinit();
         const got = resolveBottleFor(&formula, c.host);
         if (c.want) |sha_char| {
-            try testing.expectEqualStrings(&([_]u8{sha_char} ** 64), (try got).sha256);
+            try testing.expectEqualStrings(&(@as([64]u8, @splat(sha_char))), (try got).sha256);
         } else {
             try testing.expectError(FormulaError.NoBottleAvailable, got);
         }
@@ -2030,7 +2030,7 @@ test "parseFormula reports allocation failure instead of dropping bottle platfor
     try w.writeAll("{\"name\":\"many\",\"versions\":{\"stable\":\"1.0\"},\"bottle\":{\"stable\":{\"files\":{");
     for (0..tags) |i| {
         if (i > 0) try w.writeByte(',');
-        try w.print("\"tag{d}\":{{\"cellar\":\":any\",\"url\":\"https://x/{d}\",\"sha256\":\"{s}\"}}", .{ i, i, "a" ** 64 });
+        try w.print("\"tag{d}\":{{\"cellar\":\":any\",\"url\":\"https://x/{d}\",\"sha256\":\"{s}\"}}", .{ i, i, &@as([64]u8, @splat('a')) });
     }
     try w.writeAll("}}}}");
     // One-shot: a sticky sweep fails the later vulns parse and hides the drop.

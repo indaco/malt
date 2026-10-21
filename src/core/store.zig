@@ -228,7 +228,7 @@ fn hasRow(db: *sqlite.Database, sha: []const u8) !bool {
 test "claim records the key once and is a no-op on repeat" {
     var db = try openSchemaDb();
     defer db.close();
-    const sha = "a" ** 64;
+    const sha = &@as([64]u8, @splat('a'));
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
     try store.claim(sha);
@@ -250,7 +250,7 @@ test "claim refuses a key a store path could never name" {
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
     try testing.expectError(StoreError.InvalidSha256, store.claim("not-hex"));
     try testing.expectError(StoreError.InvalidSha256, store.claim(""));
-    try testing.expectError(StoreError.InvalidSha256, store.claim("A" ** 64));
+    try testing.expectError(StoreError.InvalidSha256, store.claim(&@as([64]u8, @splat('A'))));
     // Refused at birth means no row was created either.
     try testing.expect(!try hasRow(&db, "not-hex"));
 }
@@ -261,5 +261,5 @@ test "claim surfaces a table it cannot write to instead of pretending" {
     try db.exec("DROP TABLE store_refs;");
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
-    try testing.expectError(StoreError.RefCountError, store.claim("b" ** 64));
+    try testing.expectError(StoreError.RefCountError, store.claim(&@as([64]u8, @splat('b'))));
 }

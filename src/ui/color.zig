@@ -980,8 +980,8 @@ fn queryOsc11Background() ?Background {
     var raw = saved;
     raw.lflag.ECHO = false;
     raw.lflag.ICANON = false;
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+    raw.cc[@backingInt(std.posix.V.MIN)] = 0;
+    raw.cc[@backingInt(std.posix.V.TIME)] = 0;
     std.posix.tcsetattr(stdin_fd, .FLUSH, raw) catch return null;
     // Restore cooked mode; if this fails the TTY is already broken and
     // there is no recovery we can sensibly do from inside defer.
@@ -1109,7 +1109,7 @@ pub const ColorDepth = enum(u8) {
 
     /// True when this terminal can render everything `min` needs.
     pub fn atLeast(self: ColorDepth, min: ColorDepth) bool {
-        return @intFromEnum(self) >= @intFromEnum(min);
+        return @backingInt(self) >= @backingInt(min);
     }
 };
 

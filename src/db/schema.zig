@@ -2444,7 +2444,7 @@ test "initSchema refuses exactly one version past the known max without writing"
 
     try db.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);");
     var buf: [64]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&buf, "INSERT INTO schema_version (version) VALUES ({d});", .{known_schema_version + 1});
+    const sql = try std.fmt.bufPrintSentinel(&buf, "INSERT INTO schema_version (version) VALUES ({d});", .{known_schema_version + 1}, 0);
     try db.exec(sql);
 
     try testing.expectError(error.SchemaTooNew, initSchema(&db));
@@ -2474,7 +2474,7 @@ fn refcountColumns(db: *sqlite.Database) !i64 {
 
 test "a preview must not commit a migration: the snapshot migrates, the file stays at v15" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-preview-v15-{d}.db", .{std.c.getpid()});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-preview-v15-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     const cwd = std.Io.Dir.cwd();
     defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {

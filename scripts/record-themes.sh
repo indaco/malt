@@ -41,7 +41,7 @@ fi
 
 if [[ ! -x zig-out/bin/malt ]]; then
   echo "==> Building release malt binary..."
-  zig build -Doptimize=ReleaseSafe
+  zig build -Doptimize=safe
 fi
 
 # Builtin themes grouped by polarity (src/ui/themes.zig). malt colours the

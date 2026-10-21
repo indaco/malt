@@ -25,7 +25,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "cask", tag);
-        const base_z = try arena.allocator().dupeZ(u8, base);
+        const base_z = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
         return .{ .arena = arena, .base = base_z };
@@ -745,7 +745,7 @@ test "verifyFileSha256 propagates FileNotFound rather than Sha256Mismatch" {
     // corrupt" when nothing was ever read.
     try testing.expectError(
         error.FileNotFound,
-        cask.verifyFileSha256(testIo(), "/tmp/malt_cask_verify_missing_xyzzy.bin", "0" ** 64),
+        cask.verifyFileSha256(testIo(), "/tmp/malt_cask_verify_missing_xyzzy.bin", &@as([64]u8, @splat('0'))),
     );
 }
 
@@ -1479,10 +1479,11 @@ fn seedCaskCache(fx: *Fixture, token: []const u8, json: []const u8) !void {
 
 fn insertInstalledCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.invalid');",
         .{ token, token, version },
+        0,
     );
     try db.exec(sql);
 }

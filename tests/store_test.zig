@@ -11,14 +11,14 @@ const store_mod = @import("malt").store;
 
 // One distinct 64-hex key per fixture: collapsing them onto a shared constant
 // would quietly void the idempotent-commit and claim assertions below.
-const sha_missing = "1" ** 64;
-const sha_commit_src = "2" ** 64;
-const sha_default_src = "3" ** 64;
-const sha_missing_src = "4" ** 64;
-const sha_dup = "5" ** 64;
-const sha_orphan = "6" ** 64;
-const sha_txn = "7" ** 64;
-const sha_ref = "8" ** 64;
+const sha_missing = &@as([64]u8, @splat('1'));
+const sha_commit_src = &@as([64]u8, @splat('2'));
+const sha_default_src = &@as([64]u8, @splat('3'));
+const sha_missing_src = &@as([64]u8, @splat('4'));
+const sha_dup = &@as([64]u8, @splat('5'));
+const sha_orphan = &@as([64]u8, @splat('6'));
+const sha_txn = &@as([64]u8, @splat('7'));
+const sha_ref = &@as([64]u8, @splat('8'));
 
 fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, store: store_mod.Store, prefix: []const u8 } {
     // Create temp directory as prefix
@@ -219,7 +219,7 @@ test "exists probes false for a key it cannot form a path from" {
     // "" used to probe the store root itself and answer "already warm".
     try testing.expect(!ctx.store.exists(""));
     try testing.expect(!ctx.store.exists("../.."));
-    try testing.expect(!ctx.store.exists("A" ** 64));
+    try testing.expect(!ctx.store.exists(&@as([64]u8, @splat('A'))));
 }
 
 test "terminal methods reject a malformed key loudly" {
@@ -232,9 +232,9 @@ test "terminal methods reject a malformed key loudly" {
     ctx.store.db = &ctx.db;
 
     try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("", null));
-    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("A" ** 64, null));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom(&@as([64]u8, @splat('A')), null));
     try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove("not-hex"));
-    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove("A" ** 64));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove(&@as([64]u8, @splat('A'))));
 }
 
 test "an explicit source path does not buy a caller past the key check" {

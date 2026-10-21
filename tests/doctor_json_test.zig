@@ -468,7 +468,7 @@ test "emitDoctorJson sizes tap_cache from the cache dir it is handed, not the pr
         defer allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
-    inline for (.{ .{ "{s}/alt/Tap/" ++ "ab" ** 32 ++ ".tar.gz", "xx" }, .{ "{s}/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz", "x" } }) |entry| {
+    inline for (comptime .{ .{ "{s}/alt/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz", "xx" }, .{ "{s}/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz", "x" } }) |entry| {
         const path = try std.fmt.allocPrint(allocator, entry[0], .{s.path});
         defer allocator.free(path);
         const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});

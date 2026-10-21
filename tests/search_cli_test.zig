@@ -22,7 +22,7 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "search", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const cache_api = try std.fmt.allocPrint(allocator, "{s}/cache/api", .{path});
@@ -117,7 +117,7 @@ fn captureExecuteWith(
 ) ![]u8 {
     const cap_base = try test_io.uniqueTempPath(allocator, "search_cap", tag);
     defer allocator.free(cap_base);
-    const cap_path = try allocator.dupeZ(u8, cap_base);
+    const cap_path = try allocator.dupeSentinel(u8, cap_base, 0);
     defer allocator.free(cap_path);
     defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
 
@@ -455,7 +455,7 @@ fn writeGarbageDb(prefix: []const u8) !void {
     var dir_buf: [512]u8 = undefined;
     try test_io.cwd().createDirPath(std.Options.debug_io, try dbDir(&dir_buf, prefix));
     var path_buf: [512]u8 = undefined;
-    try writeFile(try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{prefix}), "not a sqlite database, just garbage bytes" ** 4);
+    try writeFile(try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{prefix}), std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
 }
 
 /// Runs `search` in both output modes; each must abort and name the DB.

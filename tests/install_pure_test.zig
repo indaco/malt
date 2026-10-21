@@ -132,7 +132,7 @@ test "checkPrefixSane accepts realistic prefixes (up to the 256-byte sanity cap)
 }
 
 test "checkPrefixSane rejects absurdly long prefixes at the 256-byte cap" {
-    const huge = "/" ++ "x" ** 512;
+    const huge = "/" ++ &@as([512]u8, @splat('x'));
     try testing.expectError(error.PrefixAbsurd, install_args.checkPrefixSane(huge));
 }
 
@@ -743,7 +743,7 @@ test "isInstalled is false before recordKeg, true after" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
+    const keg_id = try install_record.recordKeg(&db, &f, &@as([64]u8, @splat('0')), "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
     try testing.expect(keg_id > 0);
     try testing.expect(install_record.isInstalled(&db, "foo"));
 }
@@ -799,7 +799,7 @@ test "install_record.recordKeg preserves a prior pinned flag on REPLACE (force-r
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
+    const keg_id = try install_record.recordKeg(&db, &f, &@as([64]u8, @splat('0')), "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -817,7 +817,7 @@ test "install_record.recordKeg defaults pinned=0 when no prior keg of that name 
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
+    const keg_id = try install_record.recordKeg(&db, &f, &@as([64]u8, @splat('0')), "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -844,7 +844,7 @@ test "install_record.recordKeg with inherit_pin=false clears the prior pin (opt-
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "/opt/malt/Cellar/foo/1.0",
         "direct",
         false,
@@ -873,7 +873,7 @@ test "install_record.recordKeg with .{ .in_transaction = false } opens its own B
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "/opt/malt/Cellar/foo/1.0",
         "direct",
         false,
@@ -905,7 +905,7 @@ test "install_record.recordKeg with .{ .in_transaction = true } inside an outer 
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "/opt/malt/Cellar/foo/1.0",
         "direct",
         false,
@@ -935,7 +935,7 @@ test "install_record.recordKeg writes bin_isolated=1 when the caller passes true
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "/opt/malt/Cellar/foo/1.0",
         "dependency",
         true,
@@ -961,7 +961,7 @@ test "install_record.recordKeg writes bin_isolated=0 when the caller passes fals
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "/opt/malt/Cellar/foo/1.0",
         "direct",
         false,
@@ -992,7 +992,7 @@ test "install_record.recordKeg with inherit_pin=true carries the prior pin (opti
     const keg_id = try install_record.recordKeg(
         &db,
         &f,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "/opt/malt/Cellar/foo/1.0",
         "direct",
         false,
@@ -1015,7 +1015,7 @@ test "recordKeg inserts one row per dependency in the dependencies table" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
+    const keg_id = try install_record.recordKeg(&db, &f, &@as([64]u8, @splat('0')), "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
 
     var stmt = try db.prepare("SELECT COUNT(*) FROM dependencies WHERE keg_id = ?1;");
     defer stmt.finalize();
@@ -1033,7 +1033,7 @@ test "deleteKeg removes the row and isInstalled reports false again" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
+    const keg_id = try install_record.recordKeg(&db, &f, &@as([64]u8, @splat('0')), "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
     try testing.expect(install_record.isInstalled(&db, "foo"));
     install_record.deleteKeg(&db, keg_id);
     try testing.expect(!install_record.isInstalled(&db, "foo"));

@@ -258,7 +258,7 @@ test "a malformed file is rejected whole, with the failing field named" {
 
 test "a name longer than the cap is rejected" {
     // 33 'a's > max_name (32).
-    const long = "a" ** (ct.max_name + 1);
+    const long = &@as([(ct.max_name + 1)]u8, @splat('a'));
     const src = "{\"version\":1,\"themes\":{\"" ++ long ++ "\":{\"polarity\":\"dark\"," ++ ok_roles_256 ++ "}},\"default\":\"" ++ long ++ "\"}";
     try expectReject(src, error.NameTooLong);
 }
@@ -280,7 +280,7 @@ test "more than max_themes is rejected before any colour work" {
 }
 
 test "a name of exactly the cap length is accepted" {
-    const at_cap = "a" ** ct.max_name;
+    const at_cap = &@as([ct.max_name]u8, @splat('a'));
     const src = "{\"version\":1,\"themes\":{\"" ++ at_cap ++ "\":{\"polarity\":\"dark\"," ++ ok_roles_256 ++ "}},\"default\":\"" ++ at_cap ++ "\"}";
     var storage: Storage = undefined;
     try populate(std.testing.allocator, src, &storage);

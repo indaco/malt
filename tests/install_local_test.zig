@@ -115,7 +115,7 @@ test "localErrorIsAnnounced parameter is narrowed to InstallError" {
     // A widened `anyerror` makes the inner switch meaningless — any new
     // InstallError tag compiles without a handler. Pin the narrowing.
     const info = @typeInfo(@TypeOf(install_record.localErrorIsAnnounced)).@"fn";
-    try testing.expect(info.params[0].type.? == install_record.InstallError);
+    try testing.expect(info.param_types[0].? == install_record.InstallError);
 }
 
 test "localErrorIsAnnounced handles every InstallError tag" {
@@ -123,8 +123,8 @@ test "localErrorIsAnnounced handles every InstallError tag" {
     // the exhaustive check in `localErrorIsAnnounced` already fails to
     // compile. This test also fails the whole module to compile, making
     // the missing coverage visible from `zig build test` output.
-    inline for (@typeInfo(install_record.InstallError).error_set.?) |err| {
-        const tag = @field(install_record.InstallError, err.name);
+    inline for (@typeInfo(install_record.InstallError).error_set.error_names.?) |err| {
+        const tag = @field(install_record.InstallError, err);
         _ = install_record.localErrorIsAnnounced(tag);
     }
 }
@@ -813,7 +813,7 @@ fn seedLocalKeg(
     try stmt.bindText(1, name);
     try stmt.bindText(2, source_path);
     try stmt.bindText(3, version);
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     try stmt.bindText(5, cellar_dir);
     _ = try stmt.step();
 }
@@ -894,7 +894,7 @@ test "materializeRubyFormula refuses a symlinked package dir" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const sha = "cc" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("cc".*)));
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
@@ -1015,7 +1015,7 @@ test "materializeRubyFormula refuses an escaping raw binary name before touching
         .tap_label = "u/t",
         .version = "1.0",
         .url = "https://example.invalid/tool-darwin-arm64",
-        .sha256 = "dd" ** 32,
+        .sha256 = std.mem.asBytes(&@as([32][2]u8, @splat("dd".*))),
         .binary_name = "../../../../victim",
         .dependencies = &.{"no-such-dep"},
     };
@@ -1180,7 +1180,7 @@ test "materializeRubyFormula names the keg row and Cellar leaf by the .rb revisi
     // from the row.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "ab" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
     try seedKegArchive(prefix, "revfix", sha);
 
     try installFromWarmCache(prefix, .{
@@ -1213,7 +1213,7 @@ test "materializeRubyFormula records the tap subtree its .rb came from" {
     // the row is the only place that choice survives.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "ef" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
     try seedKegArchive(prefix, "dual", sha);
 
     try installFromWarmCache(prefix, .{
@@ -1241,7 +1241,7 @@ test "materializeRubyFormula keeps a revision-less .rb on the bare Cellar leaf" 
     // compares the bare version and the leaf must stay bare.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "cd" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("cd".*)));
     try seedKegArchive(prefix, "bare", sha);
 
     try installFromWarmCache(prefix, .{
@@ -1268,7 +1268,7 @@ test "force reinstall migrates a pre-fix bare keg onto the revisioned leaf" {
     // `<version>_N` and the other-version prune removes the bare dir.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "ef" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
     try seedKegArchive(prefix, "migr", sha);
 
     const bare: install_local.ResolvedRubyFormula = .{
@@ -1337,7 +1337,7 @@ test "materializeRubyFormula registers the service a .rb service block declares"
     // plist; without both, a tap daemon is installed but unmanageable.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "1a" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("1a".*)));
     try seedKegArchive(prefix, "svcd", sha);
 
     try installFromWarmCache(prefix, .{
@@ -1374,7 +1374,7 @@ test "materializeRubyFormula lifts the plist a name-only service block says the 
     // render, so the shipped file is read into them after the pour.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "3c" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("3c".*)));
     const body = try std.fmt.allocPrint(testing.allocator,
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1455,7 +1455,7 @@ test "materializeRubyFormula keeps the keg and says so when the declared plist i
     // the block was unsupported.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "4d" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("4d".*)));
     try seedKegArchive(prefix, "noplist", sha);
 
     var warns: std.ArrayList(u8) = .empty;
@@ -1490,7 +1490,7 @@ test "materializeRubyFormula keeps the keg and warns when the service is refused
     // stop; that must cost the user the service, never the install.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "2b" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("2b".*)));
     try seedKegArchive(prefix, "badsvc", sha);
 
     var warns: std.ArrayList(u8) = .empty;
@@ -1561,7 +1561,7 @@ test "materializeRubyFormula refuses a slot another keg links and leaves it alon
     // is uninstalled.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "5e" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("5e".*)));
     try seedKegArchive(prefix, "second", sha);
     const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/first/1.0/bin/second", .{prefix});
     defer testing.allocator.free(owner);
@@ -1591,8 +1591,8 @@ test "materializeRubyFormula --force upgrade refused over another keg's slot kee
     // other keg took, or uninstalling it later would unlink that keg.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha1 = "6f" ** 32;
-    const sha2 = "6e" ** 32;
+    const sha1 = std.mem.asBytes(&@as([32][2]u8, @splat("6f".*)));
+    const sha2 = std.mem.asBytes(&@as([32][2]u8, @splat("6e".*)));
     try seedKegArchive(prefix, "foo", sha1);
     try seedKegArchive(prefix, "foo", sha2);
     const quiet: malt.install_sink.OutputSink = .{
@@ -1653,7 +1653,7 @@ test "materializeRubyFormula --force still refuses a slot another keg links" {
     // --force only sweeps the same name's links, as on the core path.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "6d" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("6d".*)));
     try seedKegArchive(prefix, "second", sha);
     const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/first/1.0/bin/second", .{prefix});
     defer testing.allocator.free(owner);
@@ -1675,7 +1675,7 @@ test "materializeRubyFormula --force refuses a same-name link that points outsid
     // A foreign Cellar (another package manager) owns that slot, not malt.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "9c" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("9c".*)));
     try seedKegArchive(prefix, "second", sha);
     const foreign = try std.fmt.allocPrint(testing.allocator, "{s}/elsewhere/Cellar/second/1.0/bin/second", .{prefix});
     defer testing.allocator.free(foreign);
@@ -1698,8 +1698,8 @@ test "materializeRubyFormula --force upgrade works under a prefix with a trailin
     defer cleanupPrefix(base);
     const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/", .{base}, 0);
     defer testing.allocator.free(prefix);
-    const sha1 = "4a" ** 32;
-    const sha2 = "4b" ** 32;
+    const sha1 = std.mem.asBytes(&@as([32][2]u8, @splat("4a".*)));
+    const sha2 = std.mem.asBytes(&@as([32][2]u8, @splat("4b".*)));
     try seedKegArchive(prefix, "slashy", sha1);
     try seedKegArchive(prefix, "slashy", sha2);
     const quiet: malt.install_sink.OutputSink = .{
@@ -1725,7 +1725,7 @@ test "materializeRubyFormula --force upgrade works under a prefix with a trailin
 test "materializeRubyFormula refuses a stray file in the slot with the file hint" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "7a" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("7a".*)));
     try seedKegArchive(prefix, "second", sha);
     try plantSlot(prefix, "second", null);
 
@@ -1745,7 +1745,7 @@ test "materializeRubyFormula --force reinstall of the same keg is not a conflict
     // The sweep must run before the check, or the keg's own links block it.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "8b" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("8b".*)));
     try seedKegArchive(prefix, "again", sha);
     const resolved: install_local.ResolvedRubyFormula = .{
         .name = "again",
@@ -1772,7 +1772,7 @@ test "materializeRubyFormula re-registers a service once on the upgrade shape" {
     // keyed by label so a second pass must update, not duplicate.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const sha = "3c" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("3c".*)));
     try seedKegArchive(prefix, "twice", sha);
 
     const resolved: install_local.ResolvedRubyFormula = .{

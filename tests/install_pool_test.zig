@@ -19,7 +19,7 @@ const test_io = @import("test_io");
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "installpool", suffix);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     inline for (.{ "store", "Cellar" }) |sub| {
@@ -101,8 +101,8 @@ test "installPoolWorker drains every job against a warm store and stamps each re
 
     // Two jobs, both warm. The atomic-index loop must hand both out and
     // stop cleanly at the end — no off-by-one, no double-processing.
-    const sha_a = "aaaa" ** 16;
-    const sha_b = "bbbb" ** 16;
+    const sha_a = std.mem.asBytes(&@as([16][4]u8, @splat("aaaa".*)));
+    const sha_b = std.mem.asBytes(&@as([16][4]u8, @splat("bbbb".*)));
     try seedWarmStore(prefix, sha_a, "alpha", "1.0");
     try seedWarmStore(prefix, sha_b, "beta", "2.0");
 
@@ -193,9 +193,9 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
     // already claimed by its sibling without re-processing them. The
     // atomic counter handles the handoff; a regression here would
     // double-materialise or skip a slot.
-    const sha_a = "1111" ** 16;
-    const sha_b = "2222" ** 16;
-    const sha_c = "3333" ** 16;
+    const sha_a = std.mem.asBytes(&@as([16][4]u8, @splat("1111".*)));
+    const sha_b = std.mem.asBytes(&@as([16][4]u8, @splat("2222".*)));
+    const sha_c = std.mem.asBytes(&@as([16][4]u8, @splat("3333".*)));
     try seedWarmStore(prefix, sha_a, "one", "1.0");
     try seedWarmStore(prefix, sha_b, "two", "2.0");
     try seedWarmStore(prefix, sha_c, "three", "3.0");
@@ -285,13 +285,13 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     // the resulting CellarError.PathTooLong through `cellar_diag`; the
     // pool worker must forward it into `result.err` instead of falling
     // back to the historical CloneFailed catch-all.
-    const sha = "f00d" ** 16;
+    const sha = std.mem.asBytes(&@as([16][4]u8, @splat("f00d".*)));
     const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
 
-    const long_name = "a" ** 230;
-    const long_ver = "1" ** 230;
+    const long_name = &@as([230]u8, @splat('a'));
+    const long_ver = &@as([230]u8, @splat('1'));
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -372,8 +372,8 @@ test "installPoolWorker bails between jobs when Ctrl-C fires" {
     // user-facing effect: hitting Ctrl-C during a wide dep-graph
     // install stops the pool quickly instead of grinding through every
     // queued keg first.
-    const sha_a = "abab" ** 16;
-    const sha_b = "cdcd" ** 16;
+    const sha_a = std.mem.asBytes(&@as([16][4]u8, @splat("abab".*)));
+    const sha_b = std.mem.asBytes(&@as([16][4]u8, @splat("cdcd".*)));
     try seedWarmStore(prefix, sha_a, "alpha", "1.0");
     try seedWarmStore(prefix, sha_b, "beta", "2.0");
 
@@ -462,7 +462,7 @@ test "installPoolWorker leaves the result untouched and marks job not-succeeded 
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install_download.DownloadJob{makeJob("ghost", "0.1", "deadbeef" ** 8)};
+    var jobs = [_]malt.install_download.DownloadJob{makeJob("ghost", "0.1", std.mem.asBytes(&@as([8][8]u8, @splat("deadbeef".*))))};
     var results: [1]malt.install_download.MaterializeResult = .{.{ .ok = false, .err = null }};
 
     var pool: malt.install_download.InstallPool = .{

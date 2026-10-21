@@ -74,7 +74,7 @@ test "installed tab heads its columns, bold and aligned" {
     const out = f.slice();
     try renderHas(bold, out);
     // Exact padded heading proves the labels sit over the value columns.
-    try renderHas("NAME" ++ " " ** 19 ++ "VERSION" ++ " " ** 8 ++ "SIZE", out);
+    try renderHas("NAME" ++ &@as([19]u8, @splat(' ')) ++ "VERSION" ++ &@as([8]u8, @splat(' ')) ++ "SIZE", out);
     try renderHas("brotli", out); // the list still renders below the heading
 }
 
@@ -89,7 +89,7 @@ test "outdated tab heads its columns past the checkbox" {
     outdated.render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
     try renderHas(bold, out);
-    try renderHas("    NAME" ++ " " ** 19 ++ "CURRENT" ++ " " ** 6 ++ "AVAILABLE" ++ " " ** 4 ++ "KIND", out);
+    try renderHas("    NAME" ++ &@as([19]u8, @splat(' ')) ++ "CURRENT" ++ &@as([6]u8, @splat(' ')) ++ "AVAILABLE" ++ &@as([4]u8, @splat(' ')) ++ "KIND", out);
     try renderHas("wget", out);
 }
 
@@ -103,7 +103,7 @@ test "services tab heads its columns past the status dot" {
     services.render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
     try renderHas(bold, out);
-    try renderHas("  NAME" ++ " " ** 21 ++ "STATE" ++ " " ** 8 ++ "START" ++ " " ** 3 ++ "KEG", out);
+    try renderHas("  NAME" ++ &@as([21]u8, @splat(' ')) ++ "STATE" ++ &@as([8]u8, @splat(' ')) ++ "START" ++ &@as([3]u8, @splat(' ')) ++ "KEG", out);
     try renderHas("redis", out);
 }
 
@@ -115,7 +115,7 @@ test "search tab heads its result columns past the checkbox" {
     search.render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
     try renderHas(bold, out);
-    try renderHas("    NAME" ++ " " ** 25 ++ "KIND", out);
+    try renderHas("    NAME" ++ &@as([25]u8, @splat(' ')) ++ "KIND", out);
     try renderHas("wget", out);
 }
 

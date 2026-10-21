@@ -787,7 +787,7 @@ test "lift refuses anything that is not one plist dict" {
         "<plist version=\"1.0\"><dict><key>Label</key><string>x</key></dict></plist>",
         "<plist version=\"1.0\"><dict><key></key><string>x</string></dict></plist>",
         "<plist version=\"1.0\"><dict><key>Label</key><string ID=\"1\">x</string></dict></plist>",
-        "<plist version=\"1.0\"><dict><key>" ++ "K" ** (max_key_len + 1) ++ "</key><string>x</string></dict></plist>",
+        "<plist version=\"1.0\"><dict><key>" ++ &@as([(max_key_len + 1)]u8, @splat('K')) ++ "</key><string>x</string></dict></plist>",
     }) |bytes| {
         try testing.expectError(error.Malformed, lift(aa, bytes, "svcd", "x", "/opt/malt", &diag));
     }

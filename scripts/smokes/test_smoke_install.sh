@@ -100,7 +100,7 @@ if [ ! -x "$MT_BIN" ]; then
     exit 2
   fi
   log "building $MT_BIN (set SKIP_BUILD=1 to reuse an existing build)"
-  zig build -Doptimize=ReleaseSafe >/dev/null
+  zig build -Doptimize=safe >/dev/null
 fi
 
 if [ ! -x "$MT_BIN" ]; then

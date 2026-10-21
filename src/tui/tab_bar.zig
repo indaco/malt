@@ -5,22 +5,22 @@ const color = @import("../ui/color.zig");
 const scroll_list = @import("scroll_list.zig");
 
 pub const Tab = enum { search, installed, outdated, services, doctor };
-pub const count = @typeInfo(Tab).@"enum".fields.len;
+pub const count = @typeInfo(Tab).@"enum".field_names.len;
 
 /// Cycle to the next tab, wrapping after the last so `tab` is a closed loop.
 pub fn next(t: Tab) Tab {
-    return @enumFromInt((@as(usize, @intFromEnum(t)) + 1) % count);
+    return @fromBackingInt(@intCast((@as(usize, @backingInt(t)) + 1) % count));
 }
 
 /// Cycle to the previous tab, wrapping before the first — the reverse of `next`.
 pub fn prev(t: Tab) Tab {
-    return @enumFromInt((@as(usize, @intFromEnum(t)) + count - 1) % count);
+    return @fromBackingInt(@intCast((@as(usize, @backingInt(t)) + count - 1) % count));
 }
 
 /// `'1'`–`'5'` jump straight to a tab; any other byte is not a jump.
 pub fn fromDigit(b: u8) ?Tab {
     if (b < '1' or b >= '1' + count) return null;
-    return @enumFromInt(b - '1');
+    return @fromBackingInt(@intCast(b - '1'));
 }
 
 /// The single accent seam for tab titles. Resolved through the active theme so
@@ -74,7 +74,7 @@ pub fn render(buf: []u8, active: Tab, titles: [count][]const u8, cols: u16) []co
     for (titles, 0..) |t, i| {
         if (i != 0) append(buf, &len, sep);
         append(buf, &len, accentCode()); // every title carries the accent
-        if (i == @intFromEnum(active)) { // active is a reverse-video, bold block
+        if (i == @backingInt(active)) { // active is a reverse-video, bold block
             append(buf, &len, color.Style.reverse.code());
             append(buf, &len, color.Style.bold.code());
         }
@@ -95,7 +95,7 @@ pub fn tabAt(titles: [count][]const u8, cols: u16, click_col: u16) ?Tab {
     for (titles, 0..) |t, i| {
         const w = visibleWidth(t);
         if (click_col < first) return null; // landed in the divider before this title
-        if (click_col < first + w) return @enumFromInt(i);
+        if (click_col < first + w) return @fromBackingInt(@intCast(i));
         first += w + sep_w;
     }
     return null; // past the last title
@@ -113,7 +113,7 @@ test "tabAt maps the first and last column of every title to that tab" {
     var first: u16 = 1;
     for (test_titles, 0..) |t, i| {
         const w: u16 = @intCast(visibleWidth(t));
-        const want: Tab = @enumFromInt(i);
+        const want: Tab = @fromBackingInt(@intCast(i));
         try std.testing.expectEqual(want, tabAt(test_titles, 80, first).?);
         try std.testing.expectEqual(want, tabAt(test_titles, 80, first + w - 1).?); // span boundary
         first += w + @as(u16, @intCast(visibleWidth(sep)));

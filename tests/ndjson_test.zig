@@ -189,7 +189,7 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     // ndjson stream stays well-formed even when no work is done.
     const base = try test_io.uniqueTempPath(testing.allocator, "ndjson", "upgrade");
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};

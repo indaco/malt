@@ -1199,7 +1199,7 @@ test "effectiveOwnerRepo rejects a slugless name instead of panicking" {
 
     // `canon_buf` is deliberately smaller than `tap_slug.max_slug_len`, so an
     // over-long slug must degrade to the same typed error, never truncate.
-    const long = "a" ** 100 ++ "/" ++ "b" ** 100;
+    const long = &@as([100]u8, @splat('a')) ++ "/" ++ &@as([100]u8, @splat('b'));
     for ([_][]const u8{ "noslash", "", long }) |slug| {
         try std.testing.expectError(
             error.ExplicitRepoRequired,
@@ -1962,8 +1962,8 @@ test "fetchRawFile trips a raw host after an exhausted transient status" {
         listener.deinit(io);
 
         // The replay keeps naming the status so the caller's message is unchanged.
-        try std.testing.expectEqual(@as(u16, @intFromEnum(status)), first.not_found);
-        try std.testing.expectEqual(@as(u16, @intFromEnum(status)), second.not_found);
+        try std.testing.expectEqual(@as(u16, @backingInt(status)), first.not_found);
+        try std.testing.expectEqual(@as(u16, @backingInt(status)), second.not_found);
         try std.testing.expectEqual(keg_rb_subtrees.len * (http.retry_backoff_ms.len + 1), srv.seen.load(.monotonic));
     }
 }
@@ -2133,7 +2133,7 @@ test "TrippedHosts full table records nothing more and dedups a repeat host" {
 test "TrippedHosts skips a host longer than its buffer rather than truncating it" {
     var tripped = TrippedHosts{};
     const io = std.Options.debug_io;
-    const long = "http://" ++ ("h" ** (TrippedHosts.max_host + 1)) ++ "/tap/raw";
+    const long = "http://" ++ (&@as([(TrippedHosts.max_host + 1)]u8, @splat('h'))) ++ "/tap/raw";
     tripped.record(io, long, .{ .status = 503 });
     try std.testing.expectEqual(@as(usize, 0), tripped.len);
     try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, long));

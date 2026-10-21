@@ -1772,7 +1772,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -1954,11 +1954,11 @@ test "emitTapCacheReport: human one-liner when cache holds bytes" {
     const cache_dir = s.p("/cache");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, s.p("/cache/Tap"));
 
-    const entry = s.p("/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz");
+    const entry = s.p("/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz");
     {
         const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, entry, .{});
         defer f.close(std.Options.debug_io);
-        try f.writeStreamingAll(std.Options.debug_io, "x" ** 256);
+        try f.writeStreamingAll(std.Options.debug_io, &@as([256]u8, @splat('x')));
     }
 
     var buf: std.ArrayList(u8) = .empty;

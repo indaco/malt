@@ -453,7 +453,7 @@ test "buildKeepLockPath surfaces PathTooLong on overflow" {
 }
 
 test "keep-cache path builders fit a cache dir past 512 bytes" {
-    const cache = "/" ++ "c" ** 200 ++ "/" ++ "c" ** 200 ++ "/" ++ "c" ** 200;
+    const cache = "/" ++ &@as([200]u8, @splat('c')) ++ "/" ++ &@as([200]u8, @splat('c')) ++ "/" ++ &@as([200]u8, @splat('c'));
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expect((try buildKeepCachePath(&buf, cache, "deadbeef")).len > 512);
     try std.testing.expect((try buildKeepLockPath(&buf, cache, "deadbeef")).len > 512);

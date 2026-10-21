@@ -369,7 +369,7 @@ test "executeLink on a missing max-length prefix fails loud instead of exiting 0
     @memset(prefix_buf[1..256], 'a'); // component 1: 255 bytes (<= NAME_MAX)
     prefix_buf[256] = '/';
     @memset(prefix_buf[257..], 'b');
-    const prefixz = try allocator.dupeZ(u8, &prefix_buf);
+    const prefixz = try allocator.dupeSentinel(u8, &prefix_buf, 0);
     defer allocator.free(prefixz);
 
     _ = c.setenv("MALT_PREFIX", prefixz.ptr, 1);

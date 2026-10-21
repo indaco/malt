@@ -23,7 +23,7 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "doctor_cask_history", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "db", "cache/Cask", "Caskroom" };
@@ -66,13 +66,13 @@ const Scratch = struct {
         try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(app_1_0).?);
         const f1 = try test_io.createFileAbsolute(std.Options.debug_io, app_1_0, .{ .truncate = true });
         defer f1.close(std.Options.debug_io);
-        try f1.writeStreamingAll(std.Options.debug_io, "x" ** 64);
+        try f1.writeStreamingAll(std.Options.debug_io, &@as([64]u8, @splat('x')));
 
         const cache_1_5 = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/alpha-1.5.dmg", .{self.path});
         defer allocator.free(cache_1_5);
         const f2 = try test_io.createFileAbsolute(std.Options.debug_io, cache_1_5, .{ .truncate = true });
         defer f2.close(std.Options.debug_io);
-        try f2.writeStreamingAll(std.Options.debug_io, "y" ** 128);
+        try f2.writeStreamingAll(std.Options.debug_io, &@as([128]u8, @splat('y')));
     }
 };
 

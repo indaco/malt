@@ -31,7 +31,7 @@ test "validateName rejects the empty string" {
 }
 
 test "validateName rejects names longer than 128 bytes" {
-    const long_name = "a" ** 129;
+    const long_name = &@as([129]u8, @splat('a'));
     try testing.expectError(api_mod.ApiError.InvalidName, api_mod.validateName(long_name));
 }
 
@@ -1088,7 +1088,7 @@ test "an implausibly large stored ETag is ignored and the GET goes out unconditi
     defer dir.deinit();
 
     // A corrupt, multi-KiB ETag must never ride out as If-None-Match.
-    const huge = "x" ** 4096;
+    const huge = &@as([4096]u8, @splat('x'));
     try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
     try dir.writeCacheFile("formula.etag", huge);
     try dir.writeCacheFile(bottles_side_car, "");
@@ -1355,7 +1355,7 @@ test "BrewApi cache round-trips under a cache dir past 512 bytes" {
     var base = try TempCacheDir.init("long_cache_dir");
     defer base.deinit();
 
-    const seg = "c" ** 200;
+    const seg = &@as([200]u8, @splat('c'));
     const long = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/{s}/{s}", .{ base.path, seg, seg, seg });
     defer testing.allocator.free(long);
     try testing.expect(long.len > 512);

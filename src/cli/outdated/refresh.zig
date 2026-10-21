@@ -719,7 +719,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -1459,7 +1459,7 @@ test "parseFormulaLatest qualifies stable with the top-level revision" {
 
 // A version that overflows pkgVersion's 256-byte buffer — the only way it
 // fails, and the parse hole the union exists to close.
-const unparseable_version = "1." ++ ("9" ** 300);
+const unparseable_version = "1." ++ (&@as([300]u8, @splat('9')));
 
 test "assembleEntries: only needs_upgrade is a line; proven_current and unknown are both absent" {
     const a = std.testing.allocator;

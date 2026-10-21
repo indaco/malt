@@ -29,7 +29,7 @@ const TestTracker = struct {
 
 /// Body big enough that the transfer is worth reporting on, small enough to
 /// keep the fixture in the binary.
-const payload = "malt-progress-fixture-" ** 256;
+const payload = std.mem.asBytes(&@as([256][22]u8, @splat("malt-progress-fixture-".*)));
 
 const Stub = struct { io: std.Io, listener: *std.Io.net.Server };
 

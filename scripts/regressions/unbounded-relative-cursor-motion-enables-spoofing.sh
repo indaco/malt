@@ -99,7 +99,7 @@ test "repeated small hops cannot accumulate into a seek" {
     // The reason a count cap was not enough: nine of these reached 81 rows.
     var b: Buf = .{};
     defer b.deinit();
-    try run("\x1b[9A" ** 9, &b);
+    try run(std.mem.asBytes(&@as([9][4]u8, @splat("\x1b[9A".*))), &b);
     try std.testing.expectEqual(@as(usize, 0), b.list.items.len);
 }
 

@@ -501,6 +501,6 @@ test "validate checks socket names and keys like every other string" {
     try testing.expectError(ValidationError.EmbeddedNul, validate(nul, "/opt/malt/Cellar/foo/1.0", "/opt/malt"));
 
     var long = base;
-    long.sockets = &.{.{ .name = "listener", .env_key = "K" ** (max_arg_len + 1) }};
+    long.sockets = &.{.{ .name = "listener", .env_key = &@as([(max_arg_len + 1)]u8, @splat('K')) }};
     try testing.expectError(ValidationError.ArgTooLong, validate(long, "/opt/malt/Cellar/foo/1.0", "/opt/malt"));
 }

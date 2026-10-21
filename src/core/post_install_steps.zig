@@ -1733,14 +1733,14 @@ extern "c" fn getgrnam(name: [*:0]const u8) ?*std.c.group;
 
 fn groupId(name: []const u8) ?std.posix.gid_t {
     var buf: [256]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch return null;
     const g = getgrnam(z) orelse return null;
     return g.gid;
 }
 
 fn userId(name: []const u8) ?std.posix.uid_t {
     var buf: [256]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch return null;
     const pw = std.c.getpwnam(z) orelse return null;
     return pw.uid;
 }
@@ -2004,7 +2004,7 @@ fn stepChangeDylibId(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// `-id` carries only the new name: LC_ID_DYLIB has a single slot, so the old
 /// value is implicit.
 fn dylibIdEntry(id: []const u8) patch.OverflowEntry {
-    return .{ .cmd = @intFromEnum(std.macho.LC.ID_DYLIB), .old_path = "", .new_path = id };
+    return .{ .cmd = @backingInt(std.macho.LC.ID_DYLIB), .old_path = "", .new_path = id };
 }
 
 const ProcessMatch = enum { name, full };
@@ -2455,7 +2455,7 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     // 0644 explicitly: the script chmods it, and a restrictive umask would
     // otherwise leave the trust store unreadable to every other user.
-    try atomic.atomicWriteFileMode(ctx.io, argv[2], bundle, @enumFromInt(0o644));
+    try atomic.atomicWriteFileMode(ctx.io, argv[2], bundle, @fromBackingInt(@intCast(0o644)));
 }
 
 // --- data-dir initialisers ---------------------------------------------------
@@ -3979,7 +3979,7 @@ test "write keeps an existing file's mode when it overwrites it" {
     const conf = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/secret.conf", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
     try atomic.atomicWriteFile(h.io, conf, "token=old\n");
-    try testing.expectEqual(@as(c_int, 0), std.c.chmod(try h.arena.allocator().dupeZ(u8, conf), 0o600));
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(try h.arena.allocator().dupeSentinel(u8, conf, 0), 0o600));
 
     // The replacement is a new file; a private config must not come back
     // world-readable.
@@ -4715,7 +4715,7 @@ test "init_data_dir points the initialiser at a tmpdir the fence can create in" 
         var w = f.writer(h.io, &.{});
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
         try w.interface.flush();
-        try f.setPermissions(h.io, @enumFromInt(0o755));
+        try f.setPermissions(h.io, @fromBackingInt(@intCast(0o755)));
     }
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -5077,7 +5077,7 @@ test "run hands the child a scrubbed environment, not malt's own" {
         // these argv shapes, string literals inside tests included.
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
         try w.interface.flush();
-        try f.setPermissions(h.io, @enumFromInt(0o755));
+        try f.setPermissions(h.io, @fromBackingInt(@intCast(0o755)));
     }
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -5121,7 +5121,7 @@ test "run passes the step's declared env to the child, expanded" {
         var w = f.writer(h.io, &.{});
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
         try w.interface.flush();
-        try f.setPermissions(h.io, @enumFromInt(0o755));
+        try f.setPermissions(h.io, @fromBackingInt(@intCast(0o755)));
     }
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -5186,7 +5186,7 @@ test "a tool step's own env vars layer onto the scrubbed base" {
         var w = f.writer(h.io, &.{});
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
         try w.interface.flush();
-        try f.setPermissions(h.io, @enumFromInt(0o755));
+        try f.setPermissions(h.io, @fromBackingInt(@intCast(0o755)));
     }
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,

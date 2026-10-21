@@ -1871,8 +1871,8 @@ test "mapTapResolveError keeps non-classified causes on FormulaNotFound" {
 test "mapTapResolveError handles every TapError tag" {
     // Comptime sweep: a future TapError addition without a switch arm
     // fails to compile here, surfacing the gap loudly.
-    inline for (@typeInfo(tap_mod.TapError).error_set.?) |err| {
-        const tag = @field(tap_mod.TapError, err.name);
+    inline for (@typeInfo(tap_mod.TapError).error_set.error_names.?) |err| {
+        const tag = @field(tap_mod.TapError, err);
         const mapped = mapTapResolveError(tag);
         try std.testing.expect(mapped == InstallError.RateLimited or
             mapped == InstallError.NetworkError or

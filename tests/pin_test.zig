@@ -37,10 +37,11 @@ fn openDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', {d});",
         .{ name, name, name, @intFromBool(pinned) },
+        0,
     );
     try db.exec(sql);
 }
@@ -162,10 +163,11 @@ test "isPinned reflects DB column" {
 
 fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', {d});",
         .{ token, token, @intFromBool(pinned) },
+        0,
     );
     try db.exec(sql);
 }
@@ -497,7 +499,7 @@ test "a bare mt pin still pins the formula when the casks table cannot be read" 
     defer _ = c.unsetenv("MALT_PREFIX");
     try seedSharedName(path, false, false);
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{path}), "casks");
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0), "casks");
 
     var err_buf: std.ArrayList(u8) = .empty;
     defer err_buf.deinit(testing.allocator);

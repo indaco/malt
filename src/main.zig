@@ -57,7 +57,7 @@ pub const panic = std.debug.FullPanic(maltPanic);
 
 fn maltPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     progress_mod.restoreTerminal();
-    if (@import("builtin").mode == .Debug) {
+    if (@import("builtin").mode == .debug) {
         std.debug.defaultPanic(msg, first_trace_addr);
     } else {
         // Release mirror of std.debug.simple_panic.call: emit the
@@ -524,11 +524,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // In debug builds, use GeneralPurposeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
     var gpa: std.heap.DebugAllocator(.{}) = .init;
-    const backing: std.mem.Allocator = if (@import("builtin").mode == .Debug)
+    const backing: std.mem.Allocator = if (@import("builtin").mode == .debug)
         gpa.allocator()
     else
         std.heap.page_allocator;
-    defer if (@import("builtin").mode == .Debug) {
+    defer if (@import("builtin").mode == .debug) {
         if (gpa.deinit() == .leak) {
             std.log.err("memory leak detected", .{});
         }

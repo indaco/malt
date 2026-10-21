@@ -105,7 +105,7 @@ test "execute with no positional formula returns Aborted" {
 test "execute on a fresh prefix with no db emits an empty result" {
     const unique = try test_io.uniqueTempPath(testing.allocator, "uses_cli", "no_db");
     defer testing.allocator.free(unique);
-    const path = try testing.allocator.dupeZ(u8, unique);
+    const path = try testing.allocator.dupeSentinel(u8, unique, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -205,7 +205,7 @@ fn writeGarbageDb(prefix: []const u8) !void {
     const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix});
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
-    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
 }
 
 /// Runs `execute` in both output modes and expects each to abort.

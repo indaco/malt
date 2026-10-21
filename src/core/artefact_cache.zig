@@ -124,7 +124,7 @@ test "adoptLegacy moves both tiers under the override and clears the legacy dirs
     try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap"));
     try putFile(s.p("/cache/Cask/flux-2.0.dmg"), "dmg");
     try putFile(s.p("/cache/Cask/flux-2.0.fonts"), "spec");
-    try putFile(s.p("/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz"), "tgz");
+    try putFile(s.p("/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz"), "tgz");
 
     // The override does not exist yet: the first mutating command creates it.
     adoptLegacy(dbg_io, s.base, s.p("/alt"));
@@ -132,7 +132,7 @@ test "adoptLegacy moves both tiers under the override and clears the legacy dirs
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("dmg", try readSmall(s.p("/alt/Cask/flux-2.0.dmg"), &buf));
     try std.testing.expectEqualStrings("spec", try readSmall(s.p("/alt/Cask/flux-2.0.fonts"), &buf));
-    try std.testing.expectEqualStrings("tgz", try readSmall(s.p("/alt/Tap/" ++ "ab" ** 32 ++ ".tar.gz"), &buf));
+    try std.testing.expectEqualStrings("tgz", try readSmall(s.p("/alt/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz"), &buf));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(dbg_io, s.p("/cache/Cask"), .{}));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(dbg_io, s.p("/cache/Tap"), .{}));
 }
@@ -173,11 +173,11 @@ test "adoptLegacy leaves a legacy subdirectory alone and still empties the files
     var s = try Scratch.init("artefact_adopt_subdir");
     defer s.deinit();
     try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap/nested"));
-    try putFile(s.p("/cache/Tap/" ++ "cd" ** 32 ++ ".zip"), "zip");
+    try putFile(s.p("/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))) ++ ".zip"), "zip");
 
     adoptLegacy(dbg_io, s.base, s.p("/alt"));
 
-    try std.Io.Dir.accessAbsolute(dbg_io, s.p("/alt/Tap/" ++ "cd" ** 32 ++ ".zip"), .{});
+    try std.Io.Dir.accessAbsolute(dbg_io, s.p("/alt/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))) ++ ".zip"), .{});
     try std.Io.Dir.accessAbsolute(dbg_io, s.p("/cache/Tap/nested"), .{});
 }
 
@@ -191,7 +191,7 @@ test "adoptLegacy with no legacy tree touches nothing" {
 test "adoptLegacy moves a Tap archive onto a destination path past 512 bytes" {
     var s = try Scratch.init("artefact_adopt_long");
     defer s.deinit();
-    const seg = "c" ** 200;
+    const seg = &@as([200]u8, @splat('c'));
     const cache_dir = s.p("/" ++ seg ++ "/" ++ seg ++ "/" ++ seg);
     try std.testing.expect(cache_dir.len + "/Tap".len > 512);
     try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap"));

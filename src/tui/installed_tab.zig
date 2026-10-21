@@ -104,7 +104,7 @@ pub fn footerHint() []const u8 {
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
-    return filter.len == 0 or std.ascii.indexOfIgnoreCase(name, filter) != null;
+    return filter.len == 0 or std.ascii.findIgnoreCase(name, filter) != null;
 }
 
 fn filteredCount(items: []const Pkg, filter: []const u8) usize {
@@ -747,7 +747,7 @@ test "uppercase Y confirms the guard like y" {
 }
 
 test "the latch truncates an oversized name instead of overflowing" {
-    const long = "n" ** (row_buf_len + 44);
+    const long = &@as([(row_buf_len + 44)]u8, @splat('n'));
     const t = ConfirmTarget.init(long, .formula);
     try testing.expectEqual(@as(usize, row_buf_len), t.name().len);
     try testing.expectEqualStrings(long[0..row_buf_len], t.name());
@@ -790,7 +790,7 @@ test "render heads the columns in bold, aligned over their values" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
     // Exact padding proves NAME / VERSION / SIZE sit over their value columns.
-    try testing.expect(std.mem.indexOf(u8, out, "NAME" ++ " " ** 19 ++ "VERSION" ++ " " ** 8 ++ "SIZE") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "NAME" ++ &@as([19]u8, @splat(' ')) ++ "VERSION" ++ &@as([8]u8, @splat(' ')) ++ "SIZE") != null);
     try testing.expect(std.mem.indexOf(u8, out, "brotli") != null); // the list still renders below
 }
 
@@ -920,10 +920,10 @@ test "the in-list guard wraps to keep the whole name and [y/N]" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("a" ** 35, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(&@as([35]u8, @splat('a')), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 6 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "a" ** 35) != null);
+    try testing.expect(std.mem.indexOf(u8, out, &@as([35]u8, @splat('a'))) != null);
     try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
 }
 
@@ -931,10 +931,10 @@ test "the in-list guard keeps a name longer than the row buffer" {
     var buf: [8192]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("n" ** 250, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(&@as([250]u8, @splat('n')), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "n" ** 50) != null);
+    try testing.expect(std.mem.indexOf(u8, out, &@as([50]u8, @splat('n'))) != null);
     try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
 }
 
@@ -942,7 +942,7 @@ test "the in-list guard stays in the rows it is given when the rect is short" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("a" ** 120, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(&@as([120]u8, @splat('a')), .formula);
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;") == null); // nothing below the one row
@@ -953,7 +953,7 @@ test "the in-list guard keeps the name and [y/N] when the body has only one row"
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("a" ** 44, .formula); // "<name>? " fills the row
+    s.confirm_uninstall = ConfirmTarget.init(&@as([44]u8, @splat('a')), .formula); // "<name>? " fills the row
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
     try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
     try testing.expect(std.mem.indexOf(u8, f.slice(), "aaaa") != null); // the name stays too
@@ -970,7 +970,7 @@ test "the in-list guard takes at most the rows the rect gives" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("a" ** 120, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(&@as([120]u8, @splat('a')), .formula);
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 2 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[5;") == null); // no third row
@@ -993,7 +993,7 @@ test "the in-list guard tail never splits a multibyte name" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("é" ** 40, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([40][2]u8, @splat("é".*))), .formula);
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
     const out = f.slice();
     try testing.expect(std.unicode.utf8ValidateSlice(out));
@@ -1004,27 +1004,27 @@ test "the in-list guard tail keeps every row within the rect width" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("é" ** 60, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([60][2]u8, @splat("é".*))), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 11, .height = 3 });
     const out = f.slice();
     try testing.expect(std.unicode.utf8ValidateSlice(out));
     try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
     // 3 rows x 11 codepoints: two full rows of "é", then 4 "é" and the keys
-    try testing.expect(std.mem.indexOf(u8, out, "é" ** 11) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "é" ** 12) == null);
-    try testing.expect(std.mem.indexOf(u8, out, "é" ** 4 ++ "? [y/N]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, std.mem.asBytes(&@as([11][2]u8, @splat("é".*)))) != null);
+    try testing.expect(std.mem.indexOf(u8, out, std.mem.asBytes(&@as([12][2]u8, @splat("é".*)))) == null);
+    try testing.expect(std.mem.indexOf(u8, out, std.mem.asBytes(&@as([4][2]u8, @splat("é".*))) ++ "? [y/N]") != null);
 }
 
 test "the in-list guard reserves only the rows its tail paints" {
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("é" ** 20, .formula); // 38 codepoints, 58 bytes
+    s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([20][2]u8, @splat("é".*))), .formula); // 38 codepoints, 58 bytes
     const content = listContentRect(&s, .{ .row = 1, .col = 1, .width = 20, .height = 3 });
     try testing.expectEqual(@as(u16, 1), content.height); // 2 guard rows, no blank row
 }
 
 test "the in-list guard reserves only the rows its tail paints for a cut name" {
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("é" ** 20 ++ "\x80", .formula); // ends mid-rune
+    s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([20][2]u8, @splat("é".*))) ++ "\x80", .formula); // ends mid-rune
     const content = listContentRect(&s, .{ .row = 1, .col = 1, .width = 20, .height = 3 });
     try testing.expectEqual(@as(u16, 1), content.height);
 }
@@ -1033,7 +1033,7 @@ test "the in-list guard tail survives a stray continuation byte" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("a\x80\x80\x80" ** 20, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([20][4]u8, @splat("a\x80\x80\x80".*))), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 8, .height = 2 });
     try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
 }
@@ -1042,7 +1042,7 @@ test "the in-list guard never splits a multibyte name" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("é" ** 40, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([40][2]u8, @splat("é".*))), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 6 });
     const out = f.slice();
     try testing.expect(std.unicode.utf8ValidateSlice(out));
@@ -1053,7 +1053,7 @@ test "the wrapped in-list guard and the docked detail pane both stay visible" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &tall_sample, .detail = .{ .pkg = tall_sample[0], .info = .{} } };
-    s.confirm_uninstall = ConfirmTarget.init("a" ** 35, .formula);
+    s.confirm_uninstall = ConfirmTarget.init(&@as([35]u8, @splat('a')), .formula);
     const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 50, .height = 12 };
     render(&s, &f, rect);
     const out = f.slice();
@@ -1065,7 +1065,7 @@ test "the wrapped in-list guard and the docked detail pane both stay visible" {
 
 test "hitTest follows the wrapped guard height" {
     var s: State = .{ .items = &sample };
-    s.confirm_uninstall = ConfirmTarget.init("a" ** 35, .formula); // 2 rows at width 50
+    s.confirm_uninstall = ConfirmTarget.init(&@as([35]u8, @splat('a')), .formula); // 2 rows at width 50
     const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 50, .height = 10 };
     try testing.expect(hitTest(&s, rect, 2, 1) == null); // second guard row
     try testing.expect(hitTest(&s, rect, 3, 1) == null); // heading row

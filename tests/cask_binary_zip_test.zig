@@ -26,7 +26,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "binzip", tag);
-        const base_z = try arena.allocator().dupeZ(u8, base);
+        const base_z = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
         return .{ .arena = arena, .base = base_z };
@@ -86,7 +86,7 @@ test "a binary-only zip cask links its executable from a persisted Caskroom copy
     defer testing.allocator.free(body);
     try testing.expectEqualStrings("#!/bin/sh\necho rabbit\n", body);
     const st = try std.Io.Dir.cwd().statFile(io, fx.p("Caskroom/rabbit/0.7.8/rabbit"), .{});
-    try testing.expect(@intFromEnum(st.permissions) & 0o111 != 0);
+    try testing.expect(@backingInt(st.permissions) & 0o111 != 0);
 }
 
 test "the link conflict check refuses a casks table it cannot read" {
@@ -387,7 +387,7 @@ test "links an APPDIR binary into the placed bundle" {
     try expectLinkInto(io, fx.p("bin/editor"), fx.p("Applications/Editor.app/Contents/MacOS/editor"));
     try expectLinkInto(io, fx.p("bin/editor-tunnel"), fx.p("Applications/Editor.app/Contents/MacOS/editor-tunnel"));
     const st = try std.Io.Dir.cwd().statFile(io, fx.p("Applications/Editor.app/Contents/MacOS/editor"), .{});
-    try testing.expect(@intFromEnum(st.permissions) & 0o111 != 0);
+    try testing.expect(@backingInt(st.permissions) & 0o111 != 0);
 
     // The links are recorded under the Caskroom so uninstall can remove them.
     const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/editor/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
@@ -910,7 +910,7 @@ test "uninstall refuses a version too long to name the links manifest" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    const long = "9" ** 300;
+    const long = &@as([300]u8, @splat('9'));
     try db.exec("INSERT INTO casks(token,name,version,url,sha256,app_path) VALUES('x','x','" ++ long ++ "','https://e/x.zip','aa','/nowhere/X.app');");
 
     // A truncated version would silently miss the manifest and leave the

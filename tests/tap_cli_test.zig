@@ -24,7 +24,7 @@ const Scratch = struct {
         // Process-unique: a bare timestamp collides between overlapping runs.
         const raw = try test_io.uniqueTempPath(allocator, "tap_cli", tag);
         defer allocator.free(raw);
-        const path = try allocator.dupeZ(u8, raw);
+        const path = try allocator.dupeSentinel(u8, raw, 0);
         errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -116,7 +116,7 @@ test "execute --help short-circuits without opening the database" {
 test "execute on a fresh prefix with no db is a clean no-op" {
     const raw = try test_io.uniqueTempPath(testing.allocator, "tap_cli", "no_db");
     defer testing.allocator.free(raw);
-    const path = try testing.allocator.dupeZ(u8, raw);
+    const path = try testing.allocator.dupeSentinel(u8, raw, 0);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
@@ -853,7 +853,7 @@ fn seedNotADatabase(prefix: []const u8) !void {
     }
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{});
     defer f.close(std.Options.debug_io);
-    try f.writeStreamingAll(std.Options.debug_io, "this is not a sqlite database " ** 20);
+    try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([20][30]u8, @splat("this is not a sqlite database ".*))));
 }
 
 fn restoreDbMode(prefix: []const u8) void {

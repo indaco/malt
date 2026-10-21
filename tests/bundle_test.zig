@@ -399,7 +399,7 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     // the runner must skip `recordBundle`, leaving the `bundles` table empty.
     const dir = try test_io.uniqueTempPath(testing.allocator, "bundle", "dry_run_cli_wire");
     defer testing.allocator.free(dir);
-    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    const dir_z = try testing.allocator.dupeSentinel(u8, dir, 0);
     defer testing.allocator.free(dir_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);

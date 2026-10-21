@@ -69,7 +69,7 @@ fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
 /// chain: without it the concat lands in a stack temporary and the fixture
 /// hands back a dangling slice.
 fn storeKey(comptime seed: []const u8) *const [64]u8 {
-    const padded = seed ++ "0" ** 64;
+    const padded = seed ++ &@as([64]u8, @splat('0'));
     return padded[0..64];
 }
 

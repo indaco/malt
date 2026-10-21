@@ -967,7 +967,7 @@ test "buildResults flags an installed cask on the exact match" {
 }
 
 test "isInstalled rejects an over-long name instead of overflowing the fold buffer" {
-    const long = "a" ** 129;
+    const long = &@as([129]u8, @splat('a'));
     try testing.expect(!isInstalled(&.{long}, long));
 }
 

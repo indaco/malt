@@ -46,7 +46,7 @@ const TempDb = struct {
 
 test "TempDb removes its database file on deinit" {
     var t = try TempDb.init("cleanup_contract");
-    const path = try testing.allocator.dupeZ(u8, t.path);
+    const path = try testing.allocator.dupeSentinel(u8, t.path, 0);
     defer testing.allocator.free(path);
 
     try std.Io.Dir.cwd().access(std.Options.debug_io, path, .{});

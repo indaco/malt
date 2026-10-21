@@ -11,7 +11,7 @@ const TranslatedCModules = struct {
 fn addTranslatedCModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) TranslatedCModules {
     const c_sqlite = b.addTranslateC(.{
         .root_source_file = b.path("c/sqlite.h"),
@@ -46,29 +46,14 @@ fn linkTrustFrameworks(b: *std.Build, m: *std.Build.Module) void {
     m.linkFramework("Security", .{});
     m.linkFramework("CoreFoundation", .{});
 
-    // Named explicitly rather than left to the compiler's SDK detection,
-    // because the sysroot below suppresses that detection and the universal
-    // step's targets never had it: naming an arch makes a target cross even
-    // on macOS. Without this the link finds no frameworks at all.
-    m.addSystemFrameworkPath(.{
-        .cwd_relative = b.pathJoin(&.{ b.sysroot.?, "System", "Library", "Frameworks" }),
-    });
+    // A cross target gets no SDK detection, so it links against the
+    // `--sysroot` SDK. Naming an arch makes a target cross even on macOS.
+    if (!m.resolved_target.?.query.isNative()) {
+        m.addSystemFrameworkPath(b.graph.cwdRelativePath("/System/Library/Frameworks"));
+    }
 }
 
 pub fn build(b: *std.Build) void {
-    // Whole-build setting, so it is decided here rather than wherever it is
-    // first needed. The cross-compiled halves of the universal binary link
-    // frameworks, and CoreFoundation re-exports /usr/lib/libobjc.A.dylib - an
-    // absolute path that is no longer a file on disk, it lives in the dyld
-    // shared cache. Only a sysroot makes the linker resolve that name inside
-    // the SDK. This is the SDK a native build picks by itself, so native
-    // builds see no change.
-    if (b.sysroot == null) b.sysroot = std.zig.system.darwin.getSdk(
-        b.allocator,
-        b.graph.io,
-        &b.graph.host.result,
-    ) orelse std.debug.panic("no macOS SDK found; install the Command Line Tools", .{});
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -76,7 +61,7 @@ pub fn build(b: *std.Build) void {
         bool,
         "strip",
         "Strip debug info from release binaries (default: true for non-Debug)",
-    ) orelse (optimize != .Debug);
+    ) orelse (optimize != .debug);
 
     // --- Version from .version file ---
     const version_options = b.addOptions();
@@ -121,16 +106,14 @@ pub fn build(b: *std.Build) void {
 
     // `mt` is a symlink to `malt` — half the disk, one binary to update.
     const mt_symlink = b.addSystemCommand(&.{ "ln", "-sfn", "malt", "mt" });
-    mt_symlink.setCwd(.{ .cwd_relative = b.getInstallPath(.bin, "") });
+    mt_symlink.setCwd(.{ .relative = .{ .base = .install_bin } });
     mt_symlink.step.dependOn(&malt_install.step);
     b.getInstallStep().dependOn(&mt_symlink.step);
 
     // --- Run step ---
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the mt binary");
     run_step.dependOn(&run_cmd.step);
 
@@ -353,7 +336,7 @@ pub fn build(b: *std.Build) void {
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("bench/snapshot_bench.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     bench_mod.addImport("malt", malt_lib);
@@ -549,17 +532,17 @@ pub fn build(b: *std.Build) void {
     x86_exe.root_module.addImport("c_mount", x86_c_mods.c_mount);
 
     const lipo = b.addSystemCommand(&.{"lipo"});
-    lipo.addArtifactArg(arm64_exe);
-    lipo.addArtifactArg(x86_exe);
+    lipo.addArtifactArg2(arm64_exe, .{});
+    lipo.addArtifactArg2(x86_exe, .{});
     lipo.addArgs(&.{ "-create", "-output" });
-    const universal_output = lipo.addOutputFileArg("malt");
+    const universal_output = lipo.addOutputFileArg2("malt", .{});
 
     const install_universal = b.addInstallBinFile(universal_output, "malt");
     universal_step.dependOn(&install_universal.step);
 
     // Mirror the default install layout: `mt` is a symlink to `malt`.
     const universal_mt_symlink = b.addSystemCommand(&.{ "ln", "-sfn", "malt", "mt" });
-    universal_mt_symlink.setCwd(.{ .cwd_relative = b.getInstallPath(.bin, "") });
+    universal_mt_symlink.setCwd(.{ .relative = .{ .base = .install_bin } });
     universal_mt_symlink.step.dependOn(&install_universal.step);
     universal_step.dependOn(&universal_mt_symlink.step);
 }

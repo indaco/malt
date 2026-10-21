@@ -280,7 +280,7 @@ test "openDbTri returns .unreadable for a db/ symlink whose target is gone" {
 test "openDbTri returns .unreadable for a prefix too long to hold the database path" {
     // Reading an unbuildable path as absent would let `--wipe --backup`
     // write an empty manifest.
-    try expectUnreadable("/" ++ "p" ** prefix_path.path_buf_len);
+    try expectUnreadable("/" ++ &@as([prefix_path.path_buf_len]u8, @splat('p')));
 }
 
 test "formatBytes delegates to the shared humanizer" {

@@ -405,7 +405,7 @@ const Scratch = struct {
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
@@ -679,7 +679,7 @@ test "atomic_write keeps the mode of a target it cannot open for reading" {
     const target = try std.fs.path.join(alloc, &.{ keg, "writeonly" });
     defer alloc.free(target);
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @enumFromInt(0o200) });
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @fromBackingInt(@intCast(0o200)) });
         f.close(io);
     }
 
@@ -695,7 +695,7 @@ test "atomic_write keeps the mode of a target it cannot open for reading" {
     // Reading the mode by opening the file fails here, and falling back to the
     // default would hand a write-only file world-readable permissions.
     const st = try std.Io.Dir.cwd().statFile(io, target, .{});
-    try std.testing.expectEqual(@as(u32, 0o200), @intFromEnum(st.permissions) & 0o777);
+    try std.testing.expectEqual(@as(u32, 0o200), @backingInt(st.permissions) & 0o777);
 }
 
 test "atomic_write keeps the target's existing mode instead of widening it" {
@@ -709,7 +709,7 @@ test "atomic_write keeps the target's existing mode instead of widening it" {
     const target = try std.fs.path.join(alloc, &.{ keg, "secret" });
     defer alloc.free(target);
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @enumFromInt(0o600) });
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @fromBackingInt(@intCast(0o600)) });
         defer f.close(io);
         try f.writeStreamingAll(io, "before");
     }
@@ -726,5 +726,5 @@ test "atomic_write keeps the target's existing mode instead of widening it" {
     // Replacing by rename creates a new inode; a restrictive mode on a config
     // file must not silently widen because of that.
     const st = try std.Io.Dir.cwd().statFile(io, target, .{});
-    try std.testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
+    try std.testing.expectEqual(@as(u32, 0o600), @backingInt(st.permissions) & 0o777);
 }

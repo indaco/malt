@@ -265,8 +265,8 @@ test "runPostInstall rejects hostile prefix with InvalidInput" {
 test "describeError covers every RubyError variant with a user hint" {
     // Core returns outcomes; UI renders at the boundary — this helper is
     // the single source of truth for the user-facing text per variant.
-    inline for (comptime @typeInfo(ruby.RubyError).error_set.?) |v| {
-        const err = @field(ruby.RubyError, v.name);
+    inline for (comptime @typeInfo(ruby.RubyError).error_set.error_names.?) |v| {
+        const err = @field(ruby.RubyError, v);
         const msg = ruby.describeError(err);
         try testing.expect(msg.len > 0);
     }

@@ -1104,7 +1104,7 @@ test "render heads the result columns in bold, indented past the checkbox" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
     // 4-col checkbox indent plus exact padding aligns NAME / KIND over their values.
-    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ " " ** 25 ++ "KIND") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ &@as([25]u8, @splat(' ')) ++ "KIND") != null);
     try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still renders below
 }
 

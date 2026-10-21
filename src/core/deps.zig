@@ -476,10 +476,11 @@ fn seedKegOnDisk(io: std.Io, prefix: []const u8, name: []const u8, db: *sqlite.D
     try std.Io.Dir.cwd().createDirPath(io, cellar_path);
 
     var sql_buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
+    const sql = try std.fmt.bufPrintSentinel(
         &sql_buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '1.0', 'sha', '{s}');",
         .{ name, name, cellar_path },
+        0,
     );
     try db.exec(sql);
     return cellar_path;

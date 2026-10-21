@@ -999,8 +999,8 @@ test "buildFormulaUrl returns OutOfMemory when the buffer can't hold the URL" {
 test "extractBottles keeps each formula's placeable tags with their digests" {
     const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
     const other = if (arch.len == 0) "arm64_" else "";
-    const a = "a" ** 64;
-    const b = "b" ** 64;
+    const a = &@as([64]u8, @splat('a'));
+    const b = &@as([64]u8, @splat('b'));
     const body = "[{\"name\":\"wget\",\"bottle\":{\"stable\":{\"files\":{" ++
         "\"" ++ arch ++ "golden_gate\":{\"url\":\"u\",\"sha256\":\"" ++ a ++ "\"}," ++
         "\"" ++ arch ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ b ++ "\"}," ++
@@ -1023,8 +1023,8 @@ test "extractBottles drops entries the install path would refuse to pour" {
     // Doctor would otherwise promise `mt reinstall` for a bottle install rejects.
     const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
     const body = "[{\"name\":\"jq\",\"bottle\":{\"stable\":{\"files\":{" ++
-        "\"" ++ arch ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ "A" ** 64 ++ "\"}," ++
-        "\"" ++ arch ++ "sonoma\":{\"sha256\":\"" ++ "a" ** 64 ++ "\"}}}}}]";
+        "\"" ++ arch ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat('A')) ++ "\"}," ++
+        "\"" ++ arch ++ "sonoma\":{\"sha256\":\"" ++ &@as([64]u8, @splat('a')) ++ "\"}}}}}]";
     const out = try extractBottles(testing.allocator, body);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("jq\t\n", out);
@@ -1034,7 +1034,7 @@ test "extractBottles drops what could break the line format or a cache path" {
     // Third-party JSON: a malformed digest or name must not reach the file.
     const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
     const body = "[{\"name\":\"jq\",\"bottle\":{\"stable\":{\"files\":{" ++
-        "\"" ++ arch ++ "tahoe\":{\"sha256\":\"," ++ "a" ** 63 ++ "\"}," ++
+        "\"" ++ arch ++ "tahoe\":{\"sha256\":\"," ++ &@as([63]u8, @splat('a')) ++ "\"}," ++
         "\"" ++ arch ++ "sonoma\":{}}}}}," ++
         "{\"name\":\"../evil\",\"bottle\":{\"stable\":{\"files\":{}}}}," ++
         "{\"name\":\"tab\\tname\"}]";

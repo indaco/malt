@@ -518,7 +518,7 @@ test "the verified mark refuses out-of-charset keys" {
 test "an overflowing prefix is refused by every entry point, not truncated" {
     // The delegated key check formats a shorter path than ours, so it must not
     // be what decides an overflow - every caller still has to see PathTooLong.
-    const long_prefix = "/tmp/" ++ ("p" ** 520);
+    const long_prefix = "/tmp/" ++ (&@as([520]u8, @splat('p')));
     try testing.expect(!has(testIo(), long_prefix, valid_sha_for_tests));
     try testing.expectError(
         RelocatedStoreError.PathTooLong,
@@ -540,7 +540,7 @@ test "the delegated key check does not narrow the path budget" {
     // has to format, and only one more byte may tip it over.
     const ver = std.fmt.comptimePrint("{d}", .{RELOC_LOGIC_VERSION});
     const shape = "/store-relocated/v".len + ver.len + 1 + 64;
-    const fits = "/" ++ ("p" ** (512 - shape - 1));
+    const fits = "/" ++ (&@as([(512 - shape - 1)]u8, @splat('p')));
     var buf: [512]u8 = undefined;
     const formatted = try cacheDir(&buf, fits, RELOC_LOGIC_VERSION, valid_sha_for_tests);
     try testing.expectEqual(@as(usize, 512), formatted.len);
@@ -847,7 +847,7 @@ test "markVerified round-trips and only answers for the marked sha" {
     markVerified(testIo(), prefix, valid_sha_for_tests);
     try testing.expect(isVerified(testIo(), prefix, valid_sha_for_tests));
 
-    const other = "f" ** 64;
+    const other = &@as([64]u8, @splat('f'));
     try testing.expect(!isVerified(testIo(), prefix, other));
     try testing.expect(!isVerified(testIo(), prefix, valid_sha_for_tests[0..63]));
     try testing.expect(!isVerified(testIo(), prefix, "../../etc/passwd"));
@@ -977,7 +977,7 @@ test "markVerified ignores an invalid sha instead of writing a path" {
 test "verified mark refuses a prefix that would overflow the path buffer" {
     // A prefix long enough to blow the 512-byte buffer must not silently
     // produce a truncated path to create or probe.
-    const long_prefix = "/tmp/" ++ ("p" ** 520);
+    const long_prefix = "/tmp/" ++ (&@as([520]u8, @splat('p')));
     markVerified(testIo(), long_prefix, valid_sha_for_tests);
     try testing.expect(!isVerified(testIo(), long_prefix, valid_sha_for_tests));
 }

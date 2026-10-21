@@ -146,22 +146,22 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 
 // One distinct 64-hex key per fixture. The cellar refuses anything else, and
 // the relocated-cache test needs its seed key to differ from the cached one.
-const sha_revision_suffix = "ab" ** 32;
-const sha_stale_keg = "cd" ** 32;
-const sha_exact_version = "ef" ** 32;
-const sha_relocatable = "01" ** 32;
-const sha_dep_placeholder = "23" ** 32;
-const sha_dep_unresolved = "45" ** 32;
-const sha_perl_shebang = "67" ** 32;
-const sha_repo_library = "89" ** 32;
-const sha_perl_fallback = "ba" ** 32;
-const sha_multi_token = "dc" ** 32;
-const sha_no_placeholder = "fe" ** 32;
-const sha_binary_skip = "10" ** 32;
-const sha_cache_seed = "32" ** 32;
-const sha_absent_source = "54" ** 32;
-const sha_absent_sibling = "76" ** 32;
-const sha_symlinked_pkg = "98" ** 32;
+const sha_revision_suffix = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
+const sha_stale_keg = std.mem.asBytes(&@as([32][2]u8, @splat("cd".*)));
+const sha_exact_version = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
+const sha_relocatable = std.mem.asBytes(&@as([32][2]u8, @splat("01".*)));
+const sha_dep_placeholder = std.mem.asBytes(&@as([32][2]u8, @splat("23".*)));
+const sha_dep_unresolved = std.mem.asBytes(&@as([32][2]u8, @splat("45".*)));
+const sha_perl_shebang = std.mem.asBytes(&@as([32][2]u8, @splat("67".*)));
+const sha_repo_library = std.mem.asBytes(&@as([32][2]u8, @splat("89".*)));
+const sha_perl_fallback = std.mem.asBytes(&@as([32][2]u8, @splat("ba".*)));
+const sha_multi_token = std.mem.asBytes(&@as([32][2]u8, @splat("dc".*)));
+const sha_no_placeholder = std.mem.asBytes(&@as([32][2]u8, @splat("fe".*)));
+const sha_binary_skip = std.mem.asBytes(&@as([32][2]u8, @splat("10".*)));
+const sha_cache_seed = std.mem.asBytes(&@as([32][2]u8, @splat("32".*)));
+const sha_absent_source = std.mem.asBytes(&@as([32][2]u8, @splat("54".*)));
+const sha_absent_sibling = std.mem.asBytes(&@as([32][2]u8, @splat("76".*)));
+const sha_symlinked_pkg = std.mem.asBytes(&@as([32][2]u8, @splat("98".*)));
 
 // ---------------------------------------------------------------------------
 // Keg directory flattening (revision suffix handling)
@@ -727,7 +727,7 @@ test "checkPrefixSane accepts realistic MALT_PREFIX values" {
 }
 
 test "checkPrefixSane rejects absurd prefixes at the 256-byte cap" {
-    const huge = "/" ++ "x" ** 512;
+    const huge = "/" ++ &@as([512]u8, @splat('x'));
     try testing.expectError(error.PrefixAbsurd, install_args.checkPrefixSane(huge));
 }
 
@@ -1484,7 +1484,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     try setupMaltDirs(testing.allocator, prefix);
 
     // Place a synthetic Mach-O inside the store tree.
-    const sha = "ac" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ac".*)));
     const name = "relfake";
     const version = "1.0";
     const keg_bin_dir = try std.fmt.allocPrint(
@@ -1671,7 +1671,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     try setupMaltDirs(testing.allocator, prefix);
 
     // Drop a fat Mach-O fixture into the store.
-    const sha = "bd" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("bd".*)));
     const name = "fatfake";
     const version = "1.0";
     const keg_bin_dir = try std.fmt.allocPrint(
@@ -1764,7 +1764,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
     try setupMaltDirs(testing.allocator, prefix);
 
-    const sha = "ce" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ce".*)));
     const name = "cellarfake";
     const version = "2.0";
     const keg_bin_dir = try std.fmt.allocPrint(

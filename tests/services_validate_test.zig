@@ -214,7 +214,7 @@ test "validate: empty calendar rejected" {
 }
 
 test "validate: calendar above the entry cap rejected" {
-    const too_many = [_]plist.CalendarInterval{.{}} ** (plist.max_calendar_entries + 1);
+    const too_many: [plist.max_calendar_entries + 1]plist.CalendarInterval = @splat(.{});
     try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &too_many }));
 }
 

@@ -24,7 +24,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
-        const base = try a.dupeZ(u8, try test_io.uniqueTempPath(a, "flight", tag));
+        const base = try a.dupeSentinel(u8, try test_io.uniqueTempPath(a, "flight", tag), 0);
         const home = try std.fmt.allocPrintSentinel(a, "{s}_home", .{base}, 0);
         for ([_][]const u8{ base, home }) |dir| {
             test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};

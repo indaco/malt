@@ -70,7 +70,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         if (install_args.localRecipePrintable(note.name, note.path))
             backup_mod.warnLocal(note.name, note.path)
         else
-            output.warn(install_args.unprintable_local_fmt ++ "; restore skips it", .{ std.zig.fmtString(note.name), std.zig.fmtString(note.path) });
+            output.warn(install_args.unprintable_local_fmt ++ "; restore skips it", .{ output.escaped(note.name), output.escaped(note.path) });
     }
 
     if (std.mem.indexOf(u8, text, backup_mod.versioned_format_marker) == null) warnLegacyPins(entries);

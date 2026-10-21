@@ -22,7 +22,7 @@ const Scratch = struct {
         // Process-unique: a bare timestamp collides between overlapping runs.
         const raw = try test_io.uniqueTempPath(allocator, "restore", tag);
         defer allocator.free(raw);
-        const path = try allocator.dupeZ(u8, raw);
+        const path = try allocator.dupeSentinel(u8, raw, 0);
         errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);

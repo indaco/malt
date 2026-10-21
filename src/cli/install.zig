@@ -2334,7 +2334,7 @@ test "formatMaterializeFailure: a symlinked package dir names the cause and the 
 
 test "formatMaterializeFailure: a name that overflows the buffer still reports a failure" {
     var buf: [32]u8 = undefined;
-    const msg = formatMaterializeFailure(&buf, "n" ** 64, cellar_mod.CellarError.CloneFailed);
+    const msg = formatMaterializeFailure(&buf, &@as([64]u8, @splat('n')), cellar_mod.CellarError.CloneFailed);
     try std.testing.expectEqualStrings("Failed to materialize <truncated>", msg);
 }
 

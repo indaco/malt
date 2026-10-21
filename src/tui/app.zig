@@ -84,8 +84,8 @@ fn moduleFor(comptime t: Tab) type {
 
 // Every tab must satisfy the contract; a non-conforming one is a build error.
 comptime {
-    for (@typeInfo(Tab).@"enum".fields) |fld| {
-        tab.verify(moduleFor(@field(Tab, fld.name)));
+    for (@typeInfo(Tab).@"enum".field_names) |name| {
+        tab.verify(moduleFor(@field(Tab, name)));
     }
 }
 
@@ -303,8 +303,8 @@ fn activeTitle(a: *const App) []const u8 {
 
 fn tabTitles() [tab_bar.count][]const u8 {
     var t: [tab_bar.count][]const u8 = undefined;
-    inline for (@typeInfo(Tab).@"enum".fields, 0..) |fld, i| {
-        t[i] = moduleFor(@field(Tab, fld.name)).title();
+    inline for (@typeInfo(Tab).@"enum".field_names, 0..) |name, i| {
+        t[i] = moduleFor(@field(Tab, name)).title();
     }
     return t;
 }
@@ -671,7 +671,13 @@ fn installedCountArgv(allocator: std.mem.Allocator, mt_path: []const u8) std.mem
 /// structurally cannot touch a tab's `Storage`. The parse+count is delegated to
 /// `installed.countFromJson` so the hub need not import the list parser.
 fn refreshInstalledCount(io: std.Io, allocator: std.mem.Allocator, mt_path: []const u8, shared: *SharedModel) RunError!void {
-    errdefer |err| shared.banner.set("keg count refresh failed", @errorName(err));
+    loadInstalledCount(io, allocator, mt_path, shared) catch |err| {
+        shared.banner.set("keg count refresh failed", @errorName(err));
+        return err;
+    };
+}
+
+fn loadInstalledCount(io: std.Io, allocator: std.mem.Allocator, mt_path: []const u8, shared: *SharedModel) RunError!void {
     const argv = try installedCountArgv(allocator, mt_path);
     defer allocator.free(argv);
     const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
@@ -1414,7 +1420,7 @@ test "a tab without a modal guard never holds the banner" {
 test "at the minimum size a long name still leaves [y/N] on screen" {
     var a: App = .{ .active = .installed };
     a.states.installed.items = &many_pkgs;
-    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("a" ** 45, .formula);
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init(&@as([45]u8, @splat('a')), .formula);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, layout.min_cols, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
@@ -1804,7 +1810,7 @@ test "a left-press on a Search results row picks it into the basket" {
 
 test "a left-press on an Outdated row picks it for the upgrade batch" {
     var a: App = .{ .active = .outdated };
-    var checked = [_]bool{false} ** 3;
+    var checked = @as([3]bool, @splat(false));
     a.states.outdated.items = &click_rows;
     a.states.outdated.checked = &checked;
     try serviceMouseA(&a, leftAt(first_row + 1)); // second list row
@@ -1815,7 +1821,7 @@ test "a left-press on an Outdated row picks it for the upgrade batch" {
 
 test "a left-press mid-filter moves the cursor without picking or typing into the box" {
     var a: App = .{ .active = .outdated };
-    var checked = [_]bool{false} ** 3;
+    var checked = @as([3]bool, @splat(false));
     a.states.outdated.items = &click_rows;
     a.states.outdated.checked = &checked;
     stepA(&a, ch('/')); // start editing the filter
@@ -1831,7 +1837,7 @@ test "a left-press mid-filter moves the cursor without picking or typing into th
 
 test "a left-press on a pinned Outdated row moves the cursor but never picks it" {
     var a: App = .{ .active = .outdated };
-    var checked = [_]bool{false} ** 3;
+    var checked = @as([3]bool, @splat(false));
     a.states.outdated.items = &click_rows;
     a.states.outdated.checked = &checked;
     try serviceMouseA(&a, leftAt(first_row + 2)); // pkgc, pinned
@@ -1841,7 +1847,7 @@ test "a left-press on a pinned Outdated row moves the cursor but never picks it"
 
 test "a right-press on an Outdated row moves the cursor but finds no pane to open" {
     var a: App = .{ .active = .outdated };
-    var checked = [_]bool{false} ** 3;
+    var checked = @as([3]bool, @splat(false));
     a.states.outdated.items = &click_rows;
     a.states.outdated.checked = &checked;
     try serviceMouseA(&a, rightAt(first_row + 1));
@@ -1852,7 +1858,7 @@ test "a right-press on an Outdated row moves the cursor but finds no pane to ope
 
 test "a click below the populated Outdated rows leaves the cursor alone" {
     var a: App = .{ .active = .outdated };
-    var checked = [_]bool{false} ** 3;
+    var checked = @as([3]bool, @splat(false));
     a.states.outdated.items = &click_rows;
     a.states.outdated.checked = &checked;
     try serviceMouseA(&a, leftAt(first_row + 7)); // blank tail past the three rows

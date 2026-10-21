@@ -157,12 +157,12 @@ test "parse refuses a key or value launchd validation would reject, so the servi
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
-    const long = "x" ** (plist.max_arg_len + 1);
+    const long = &@as([(plist.max_arg_len + 1)]u8, @splat('x'));
     var diag: Diag = .{};
     try testing.expectError(error.BadValue, parse(aa, "A=" ++ long, &diag));
     try testing.expectError(error.BadKey, parse(aa, "A" ++ long ++ "=1", &diag));
     // Exactly at the limit is still a value validation accepts.
-    try testing.expectEqual(@as(usize, 1), (try parse(aa, "A=" ++ "x" ** plist.max_arg_len, &diag)).len);
+    try testing.expectEqual(@as(usize, 1), (try parse(aa, "A=" ++ &@as([plist.max_arg_len]u8, @splat('x')), &diag)).len);
 }
 
 test "parse refuses PATH, HOME and every DYLD_ key" {

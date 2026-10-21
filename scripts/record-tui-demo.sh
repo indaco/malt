@@ -34,7 +34,7 @@ fi
 
 if [[ ! -x zig-out/bin/malt ]]; then
   echo "==> Building release malt binary..."
-  zig build -Doptimize=ReleaseSafe
+  zig build -Doptimize=safe
 fi
 
 # Throwaway prefix. 7 bytes, safely under malt's Mach-O patch budget (matches

@@ -231,7 +231,7 @@ test "repeated wildcards cost steps, not combinations" {
     var pattern: [12 * 2 + 1]u8 = undefined;
     for (0..12) |i| @memcpy(pattern[i * 2 ..][0..2], "*a");
     pattern[24] = 'b';
-    const name = "a" ** 60;
+    const name = &@as([60]u8, @splat('a'));
 
     try std.testing.expect(!match(&pattern, name));
     try std.testing.expect(match("*a*a*b", "aaaaaaab"));

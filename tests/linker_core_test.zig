@@ -57,7 +57,7 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     try insert.bindText(1, "foo");
     try insert.bindText(2, "foo");
     try insert.bindText(3, "1.0");
-    try insert.bindText(4, "0" ** 64);
+    try insert.bindText(4, &@as([64]u8, @splat('0')));
     try insert.bindText(5, keg);
     _ = try insert.step();
     insert.finalize();
@@ -868,7 +868,7 @@ test "link handles a nested path longer than 512 bytes without dropping it" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
 
-    const seg = "d" ** 250;
+    const seg = &@as([250]u8, @splat('d'));
     const rel = try std.fmt.allocPrint(testing.allocator, "share/{s}/{s}/leaf.txt", .{ seg, seg });
     defer testing.allocator.free(rel);
     const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nest/1.0", .{prefix});

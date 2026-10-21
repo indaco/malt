@@ -50,7 +50,7 @@ const formula_jq_json = blk: {
 fn uniquePrefixZ(tag: []const u8) ![:0]const u8 {
     const p = try test_io.uniqueTempPath(testing.allocator, "mamb", tag);
     defer testing.allocator.free(p);
-    return testing.allocator.dupeZ(u8, p);
+    return testing.allocator.dupeSentinel(u8, p, 0);
 }
 
 fn seedCacheFile(prefix: []const u8, rel: []const u8, body: []const u8) !void {

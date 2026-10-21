@@ -123,7 +123,7 @@ test "parseRepoOverride preserves hyphens, digits, dots in both components" {
 test "parseRepoOverride rejects components longer than 64 chars" {
     // Pre-existing validateTapName cap. Documented here so a future
     // relaxation surfaces as a test diff rather than silent acceptance.
-    const long = "a" ** 65 ++ "/" ++ "b" ** 4;
+    const long = &@as([65]u8, @splat('a')) ++ "/" ++ &@as([4]u8, @splat('b'));
     try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, long, "github.com"));
 }
 

@@ -154,8 +154,8 @@ pub const Term = struct {
         // mode (with ISIG) is restored on exit, and during a delegated `mt` run
         // (`restore` then re-`enterRaw`), so Ctrl-C still interrupts the child.
         raw.lflag.ISIG = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+        raw.cc[@backingInt(std.posix.V.TIME)] = 0;
         std.posix.tcsetattr(self.fd, .FLUSH, raw) catch return TermError.TermiosFailed;
         self.saved = saved;
         // Mirror into the crash registry: defers never run on panic or a
@@ -357,7 +357,7 @@ test "drainInput drops a paste larger than the tty queue" {
     // The blocking write outlives one flush, like a terminal pasting 8 KiB.
     const paste = struct {
         fn run(fd: c_int) void {
-            var chunk = [_]u8{'y'} ** 512;
+            var chunk = @as([512]u8, @splat('y'));
             for (0..16) |_| if (std.c.write(fd, &chunk, chunk.len) < 0) return;
         }
     };

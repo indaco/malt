@@ -18,7 +18,7 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     // we assert it stays intact.
     const dir = try test_io.uniqueTempPath(testing.allocator, "bundle_cleanup", "cli_dry_run");
     defer testing.allocator.free(dir);
-    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    const dir_z = try testing.allocator.dupeSentinel(u8, dir, 0);
     defer testing.allocator.free(dir_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);

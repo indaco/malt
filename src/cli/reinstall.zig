@@ -304,7 +304,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             if (install_args.localRecipePrintable(name, path))
                 output.err("{s} was installed from a local formula; reinstall it with `mt install --local --force {f}`", .{ name, output.shellQuoted(path) })
             else
-                output.err(install_args.unprintable_local_fmt ++ "; move or rename the recipe, then reinstall it with `mt install --local --force`", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
+                output.err(install_args.unprintable_local_fmt ++ "; move or rename the recipe, then reinstall it with `mt install --local --force`", .{ output.escaped(name), output.escaped(path) });
             return error.Aborted;
         },
         .keg, .cask => {},

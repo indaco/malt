@@ -27,7 +27,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "info", tag);
-        const base_z = try arena.allocator().dupeZ(u8, base);
+        const base_z = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
         return .{ .arena = arena, .base = base_z };
@@ -108,7 +108,7 @@ test "openInstallDb refuses a file that exists but is not a database" {
     try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
     const f = try test_io.createFileAbsolute(std.Options.debug_io, fx.p("db/malt.db"), .{ .truncate = true });
     defer f.close(std.Options.debug_io);
-    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
     try expectRefused(fx.base);
 }
 
@@ -150,7 +150,7 @@ test "openInstallDb refuses a prefix that is a file" {
 test "openInstallDb refuses a prefix too long to hold the database path" {
     // Silently reading an unbuildable path as "no db/" would hide every
     // install under it.
-    const long_prefix = "/" ++ "p" ** malt.prefix_path.path_buf_len;
+    const long_prefix = "/" ++ &@as([malt.prefix_path.path_buf_len]u8, @splat('p'));
     var err_buf: std.ArrayList(u8) = .empty;
     defer err_buf.deinit(testing.allocator);
     output.beginStderrCapture(testing.allocator, &err_buf);
@@ -309,7 +309,7 @@ const Prefix = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Prefix {
         const base = try test_io.uniqueTempPath(allocator, "info_dispatch", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
         defer allocator.free(db_dir);
@@ -386,7 +386,7 @@ fn captureInfo(allocator: std.mem.Allocator, args: []const []const u8, tag: []co
 
     const cap_base = try test_io.uniqueTempPath(allocator, "info_cap", tag);
     defer allocator.free(cap_base);
-    const cap_path = try allocator.dupeZ(u8, cap_base);
+    const cap_path = try allocator.dupeSentinel(u8, cap_base, 0);
     defer allocator.free(cap_path);
     defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
 

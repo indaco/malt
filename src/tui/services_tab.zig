@@ -61,7 +61,7 @@ pub fn footerHint() []const u8 {
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
-    return filter.len == 0 or std.ascii.indexOfIgnoreCase(name, filter) != null;
+    return filter.len == 0 or std.ascii.findIgnoreCase(name, filter) != null;
 }
 
 fn filteredCount(items: []const Row, filter: []const u8) usize {
@@ -474,7 +474,7 @@ test "render heads the columns in bold, indented past the status dot" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
     // The 2-col dot indent plus exact padding aligns the labels over values.
-    try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ " " ** 21 ++ "STATE" ++ " " ** 8 ++ "START" ++ " " ** 3 ++ "KEG") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ &@as([21]u8, @splat(' ')) ++ "STATE" ++ &@as([8]u8, @splat(' ')) ++ "START" ++ &@as([3]u8, @splat(' ')) ++ "KEG") != null);
     try testing.expect(std.mem.indexOf(u8, out, "redis") != null); // the list still renders below
 }
 

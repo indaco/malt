@@ -75,7 +75,7 @@ fn serveCapturingToken(fx: *TokenFixture) void {
 }
 
 fn envWithLongGitlabToken() std.process.Environ {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "t" ** 600};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ &@as([600]u8, @splat('t'))};
     return .{ .block = .{ .slice = entries[0..1 :null] } };
 }
 
@@ -107,7 +107,7 @@ test "getRawFile: gitlab raw fetch carries a 600-byte token in full through the 
     defer resp.deinit();
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqual(@as(usize, 600), fx.token_len);
-    try std.testing.expectEqualStrings("t" ** 600, fx.token_buf[0..fx.token_len]);
+    try std.testing.expectEqualStrings(&@as([600]u8, @splat('t')), fx.token_buf[0..fx.token_len]);
 }
 
 test "getRawFile: github raw fetch carries no auth header even with MALT_GITHUB_TOKEN set" {

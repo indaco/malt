@@ -28,7 +28,7 @@ fn resetOutput() void {
 fn scratchDir(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "mig", suffix);
     defer testing.allocator.free(base);
-    const p = try testing.allocator.dupeZ(u8, base);
+    const p = try testing.allocator.dupeSentinel(u8, base, 0);
     errdefer testing.allocator.free(p);
     test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, p);
@@ -36,7 +36,7 @@ fn scratchDir(suffix: []const u8) ![:0]u8 {
 }
 
 fn setenvZ(key: [*:0]const u8, value: []const u8) !void {
-    const sz = try testing.allocator.dupeZ(u8, value);
+    const sz = try testing.allocator.dupeSentinel(u8, value, 0);
     defer testing.allocator.free(sz);
     _ = c.setenv(key, sz.ptr, 1);
 }
@@ -255,7 +255,7 @@ test "long-but-valid MALT_PREFIX reaches the real db failure instead of exiting 
     defer testing.allocator.free(db_as_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_as_dir);
 
-    const prefixz = try testing.allocator.dupeZ(u8, prefix);
+    const prefixz = try testing.allocator.dupeSentinel(u8, prefix, 0);
     defer testing.allocator.free(prefixz);
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -483,7 +483,7 @@ test "already-installed kegs are skipped without touching the network" {
     try stmt.bindText(1, "seeded");
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
@@ -847,7 +847,7 @@ test "--json on an already-installed keg records it under skipped_installed" {
     try stmt.bindText(1, "seeded");
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
@@ -1149,7 +1149,7 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
     try stmt.bindText(1, "seeded");
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
@@ -1281,7 +1281,7 @@ test "already-installed stderr pins the 'Migration completed.' + 'Skipped (insta
     try stmt.bindText(1, "seeded");
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
@@ -1788,7 +1788,7 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
     try seed_stmt.bindText(1, "alreadydone");
     try seed_stmt.bindText(2, "alreadydone");
     try seed_stmt.bindText(3, "1.0");
-    try seed_stmt.bindText(4, "0" ** 64);
+    try seed_stmt.bindText(4, &@as([64]u8, @splat('0')));
     const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alreadydone/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try seed_stmt.bindText(5, seeded_cellar);
@@ -2021,7 +2021,7 @@ test "--parallel honours the resume manifest the same way serial does" {
         try s.bindText(1, name);
         try s.bindText(2, name);
         try s.bindText(3, "1.0");
-        try s.bindText(4, "0" ** 64);
+        try s.bindText(4, &@as([64]u8, @splat('0')));
         const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/" ++ name ++ "/1.0", .{mt_z});
         defer testing.allocator.free(cellar_path);
         try s.bindText(5, cellar_path);
@@ -2452,7 +2452,7 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
     try stmt.bindText(1, "recovered");
     try stmt.bindText(2, "recovered");
     try stmt.bindText(3, "1.0");
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/recovered/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);

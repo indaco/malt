@@ -12,7 +12,7 @@ const schema = malt.schema;
 const migrate_keg = malt.cli_migrate_keg;
 
 /// 64 lowercase hex, or the bottle entry is dropped by the parser.
-const sha = "feed" ** 16;
+const sha = std.mem.asBytes(&@as([16][4]u8, @splat("feed".*)));
 
 const Fixture = struct {
     prefix: []const u8,

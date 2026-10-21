@@ -45,7 +45,7 @@ const Fixture = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
         const unique = try test_io.uniqueTempPath(a, "custom_theme", tag);
-        const base = try a.dupeZ(u8, unique);
+        const base = try a.dupeSentinel(u8, unique, 0);
         test_io.deleteTreeAbsolute(dbg_io, base) catch {};
         try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
         const file = try std.fmt.allocPrintSentinel(a, "{s}/themes.json", .{base}, 0);

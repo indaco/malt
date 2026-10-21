@@ -23,7 +23,7 @@ fn tag(comptime codename: []const u8) []const u8 {
 }
 
 fn entry(comptime codename: []const u8, comptime sha_char: []const u8) []const u8 {
-    return "\"" ++ tag(codename) ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ sha_char ** 64 ++ "\"}";
+    return "\"" ++ tag(codename) ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat(sha_char[0])) ++ "\"}";
 }
 
 fn fixture(comptime files: []const u8) []const u8 {
@@ -42,13 +42,13 @@ test "bottle gate: host 14 refuses a map of newer bottles" {
 test "bottle gate: host 15 takes sequoia, not tahoe" {
     var formula = try f.parseFormula(std.testing.allocator, newer_only);
     defer formula.deinit();
-    try std.testing.expectEqualStrings("b" ** 64, (try f.resolveBottleFor(&formula, 15)).sha256);
+    try std.testing.expectEqualStrings(&@as([64]u8, @splat('b')), (try f.resolveBottleFor(&formula, 15)).sha256);
 }
 
 test "bottle gate: host 27 takes golden_gate" {
     var formula = try f.parseFormula(std.testing.allocator, with_golden_gate);
     defer formula.deinit();
-    try std.testing.expectEqualStrings("c" ** 64, (try f.resolveBottleFor(&formula, 27)).sha256);
+    try std.testing.expectEqualStrings(&@as([64]u8, @splat('c')), (try f.resolveBottleFor(&formula, 27)).sha256);
 }
 ZIG
 

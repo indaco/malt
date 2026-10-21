@@ -21,9 +21,9 @@ const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
 const newer_tag = arch ++ "golden_gate";
 const host_tag = arch ++ "tahoe";
 const host_major: u32 = 26;
-const sha_a = "a" ** 64;
-const sha_b = "b" ** 64;
-const sha_c = "c" ** 64;
+const sha_a = &@as([64]u8, @splat('a'));
+const sha_b = &@as([64]u8, @splat('b'));
+const sha_c = &@as([64]u8, @splat('c'));
 
 const Scratch = struct {
     path: []const u8,

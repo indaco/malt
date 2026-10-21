@@ -96,7 +96,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
           # Release runs rarely; a fresh compile takes a few extra
           # minutes but is worth it. A cancelled or crashed release
           # job (e.g. the one we killed while debugging the smoke
@@ -117,6 +117,9 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Export macOS SDK path
+        run: echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7

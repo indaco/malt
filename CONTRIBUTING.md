@@ -37,7 +37,7 @@ devbox install                                   # fetch pinned tools
 devbox shell --pure                              # enter the isolated shell
 ```
 
-`devbox.json` pins `zig@0.16`, `just`, `git`, `curl`, `shellcheck`, `shfmt`, and `sqlite`. These tools are sufficient to build, test, lint, and run all scripts under `scripts/`.
+`devbox.json` pins `zig@0.17`, `just`, `git`, `curl`, `shellcheck`, `shfmt`, and `sqlite`. These tools are sufficient to build, test, lint, and run all scripts under `scripts/`.
 
 To see all build, test, lint, and bench targets, run `just --list`.
 
@@ -45,7 +45,7 @@ To see all build, test, lint, and bench targets, run `just --list`.
 
 If you do not want to use Devbox, install these tools:
 
-- [Zig 0.16](https://ziglang.org/download/): the toolchain. Use 0.16, not `master`.
+- [Zig 0.17](https://ziglang.org/download/): the toolchain. Use 0.17, not `master`.
 - [just](https://github.com/casey/just): the task runner for the `zig build`, lint, and bench targets.
 - [shellcheck](https://www.shellcheck.net/) and [shfmt](https://github.com/mvdan/sh): necessary for the shell-script lint.
 - `sqlite3`, `curl`, and `git`: standard tools, usually already on macOS.
@@ -124,8 +124,8 @@ The goreleaser workflow signs releases keyless with cosign. `scripts/install.sh`
 
 ```bash
 zig build                                        # Debug binary
-zig build -Doptimize=ReleaseSafe                 # release-equivalent binary
-zig build universal                              # universal binary (arm64 + x86_64 via lipo)
+zig build -Doptimize=safe                        # release-equivalent binary
+just build-universal                             # universal binary (arm64 + x86_64 via lipo)
 zig build test                                   # unit tests
 ./scripts/lint-spawn-invariants.sh               # argv-only lint
 ./scripts/test/install_sh_test.sh                # install.sh regression

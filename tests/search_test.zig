@@ -100,7 +100,7 @@ const TempCacheDir = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "search", tag);
-        const p = try arena.allocator().dupeZ(u8, base);
+        const p = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .arena = arena, .path = p };

@@ -356,7 +356,7 @@ test "renderHeading lays bold columns with an indent and per-column gaps" {
     const out = f.slice();
     try std.testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
     // 2-space indent, A padded to width 4, then a 2-cell gap before B.
-    try std.testing.expect(std.mem.indexOf(u8, out, "  A" ++ " " ** 5 ++ "B") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "  A" ++ &@as([5]u8, @splat(' ')) ++ "B") != null);
 }
 
 test "renderHeading truncates to the rect width and still closes the bold" {

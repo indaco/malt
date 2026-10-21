@@ -92,7 +92,7 @@ test "initFailureMessage degrades to a generic line when buf is too small" {
 
 test "openPreviewable creates the file for a real run and nothing for a preview" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-open-prefix-{d}.db", .{std.c.getpid()});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-open-prefix-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     const cwd = std.Io.Dir.cwd();
     defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
@@ -116,7 +116,7 @@ test "openPreviewableCreating previews a prefix without db/ as empty and leaves 
     var dir_buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-open-creating-{d}", .{std.c.getpid()});
     var path_buf: [80]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/db/malt.db", .{dir});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{dir}, 0);
     const io = std.Options.debug_io;
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};

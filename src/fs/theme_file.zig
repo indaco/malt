@@ -228,7 +228,7 @@ test "read refuses a file larger than the caller's cap" {
     var s = try Scratch.init("theme_file_oversize");
     defer s.deinit();
     const path = s.p("/themes.json");
-    try writeFile(path, "x" ** 64); // 64 bytes
+    try writeFile(path, &@as([64]u8, @splat('x'))); // 64 bytes
 
     var te: ThemesEnv = .{};
     const env = try te.env(path);

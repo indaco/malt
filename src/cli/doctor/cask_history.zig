@@ -281,13 +281,13 @@ test "collectCensus reports retained versions plus on-disk bytes" {
     try std.Io.Dir.cwd().createDirPath(fs_test_io, cask_1_0);
     const app_1_0 = try std.fmt.allocPrint(allocator, "{s}/Caskroom/alpha/1.0/Alpha.app", .{prefix});
     defer allocator.free(app_1_0);
-    try writeFile(app_1_0, "x" ** 64);
+    try writeFile(app_1_0, &@as([64]u8, @splat('x')));
 
     const cache_dir = try std.fs.path.join(allocator, &.{ prefix, "cache" });
     defer allocator.free(cache_dir);
     const cache_1_5 = try std.fmt.allocPrint(allocator, "{s}/Cask/alpha-1.5.dmg", .{cache_dir});
     defer allocator.free(cache_1_5);
-    try writeFile(cache_1_5, "y" ** 128);
+    try writeFile(cache_1_5, &@as([128]u8, @splat('y')));
 
     var census = collectCensus(allocator, fs_test_io, prefix, cache_dir);
     defer census.deinit(allocator);
@@ -483,7 +483,7 @@ test "perVersionFootprint counts a cached artefact whose path exceeds 512 bytes"
     const root = try std.fmt.allocPrint(a, "/tmp/malt_doctor_long_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const seg = "d" ** 200;
+    const seg = &@as([200]u8, @splat('d'));
     const cache = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
     defer a.free(cache);
     const cask_dir = try std.fmt.allocPrint(a, "{s}/Cask", .{cache});

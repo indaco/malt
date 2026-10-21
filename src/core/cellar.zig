@@ -1628,7 +1628,7 @@ test "install receipt with an over-long value degrades without crashing" {
     const testing = std.testing;
     // A tap longer than the escape scratch buffer overruns; the writer must
     // bail out gracefully (best-effort path) rather than panic or truncate mid-JSON.
-    const long_tap = "a" ** 300;
+    const long_tap = &@as([300]u8, @splat('a'));
     const bytes = try writeReceiptAndRead(std.Options.debug_io, testing.allocator, "overflow", long_tap, "1.0");
     defer testing.allocator.free(bytes);
     // Nothing was written; the empty receipt is the graceful degradation.
@@ -1683,7 +1683,7 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
                 io,
                 testing.allocator,
                 prefix,
-                "0" ** 64,
+                &@as([64]u8, @splat('0')),
                 pair[0],
                 pair[1],
                 "",
@@ -1750,10 +1750,10 @@ test "materializeWithCellar refuses a bottle key outside the store charset" {
 
     const bad = [_][]const u8{
         "abc123", // a short placeholder, the shape tap JSON drift produces
-        "../../victim" ++ "a" ** 52, // 64 chars, still hops out
-        "a" ** 32 ++ "/" ++ "a" ** 31, // 64 chars, splits into two components
-        "A" ** 64, // uppercase hex: the store names entries in lowercase
-        "a" ** 63 ++ "\x00", // a NUL truncates the path the kernel sees
+        "../../victim" ++ &@as([52]u8, @splat('a')), // 64 chars, still hops out
+        &@as([32]u8, @splat('a')) ++ "/" ++ &@as([31]u8, @splat('a')), // 64 chars, splits into two components
+        &@as([64]u8, @splat('A')), // uppercase hex: the store names entries in lowercase
+        &@as([63]u8, @splat('a')) ++ "\x00", // a NUL truncates the path the kernel sees
     };
     for (bad) |sha| {
         try testing.expectError(error.InvalidSha256, materializeWithCellar(
@@ -1782,13 +1782,13 @@ test "every Cellar sink reports a path that will not fit as PathTooLong" {
     // Long enough that `<prefix>/Cellar/<name>` still fits but the
     // `/<version>` below it does not, and split into components the kernel
     // will still stat. Nothing here touches the filesystem.
-    const prefix = "/" ++ "p" ** 200 ++ "/" ++ "q" ** 200 ++ "/" ++ "r" ** 97;
+    const prefix = "/" ++ &@as([200]u8, @splat('p')) ++ "/" ++ &@as([200]u8, @splat('q')) ++ "/" ++ &@as([97]u8, @splat('r'));
 
     try testing.expectError(CellarError.PathTooLong, materializeWithCellar(
         io,
         testing.allocator,
         prefix,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "pkg",
         "1.0",
         "",
@@ -1815,12 +1815,12 @@ test "a store path that will not fit reports PathTooLong, not an allocation fail
 
     // Nothing on this path allocates, so OutOfMemory would send the caller
     // hunting for memory pressure that does not exist.
-    const too_long = "/" ++ "p" ** store_path.entry_buf_len;
+    const too_long = "/" ++ &@as([store_path.entry_buf_len]u8, @splat('p'));
     try testing.expectError(CellarError.PathTooLong, materializeWithCellar(
         io,
         testing.allocator,
         too_long,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "pkg",
         "1.0",
         "",
@@ -1851,7 +1851,7 @@ test "every Cellar sink refuses a symlinked package dir" {
         io,
         testing.allocator,
         prefix,
-        "0" ** 64,
+        &@as([64]u8, @splat('0')),
         "probe",
         "1.0",
         "",
@@ -1889,7 +1889,7 @@ test "the package-dir guard leaves a real directory and a first install alone" {
             io,
             testing.allocator,
             prefix,
-            "0" ** 64,
+            &@as([64]u8, @splat('0')),
             name,
             "1.0",
             "",

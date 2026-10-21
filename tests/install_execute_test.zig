@@ -17,7 +17,7 @@ const c = test_io.c;
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const unique = try test_io.uniqueTempPath(testing.allocator, "install_exec", suffix);
     defer testing.allocator.free(unique);
-    const path = try testing.allocator.dupeZ(u8, unique);
+    const path = try testing.allocator.dupeSentinel(u8, unique, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -399,7 +399,7 @@ test "execute --dry-run with an already-installed package short-circuits" {
     try stmt.bindText(1, "seeded");
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
-    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(4, &@as([64]u8, @splat('0')));
     const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{prefix_z});
     defer testing.allocator.free(cellar_path);
     try stmt.bindText(5, cellar_path);
@@ -426,7 +426,7 @@ test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
     // The former 12-byte Mach-O ceiling is gone — install_name_tool
     // grows overflowing slots into __LINKEDIT padding. What remains is
     // a cheap upper bound on pathological values.
-    const too_long = "/tmp/malt_install_exec_absurdly_long_" ++ "x" ** 400;
+    const too_long = "/tmp/malt_install_exec_absurdly_long_" ++ &@as([400]u8, @splat('x'));
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", too_long, 1);
     try testing.expectError(

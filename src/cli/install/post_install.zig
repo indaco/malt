@@ -1008,7 +1008,7 @@ test "renderNotes keeps a codepoint that straddles the scrub buffer intact" {
     var flog = dsl.FallbackLog.init(std.testing.allocator);
     defer flog.deinit();
     // 1023 filler bytes put the coffee cup's lead byte on the window edge.
-    const note = ("x" ** 1023) ++ "\u{2615}tail\n";
+    const note = (&@as([1023]u8, @splat('x'))) ++ "\u{2615}tail\n";
     flog.note(note);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -1026,7 +1026,7 @@ test "renderNotes makes progress on a note that is all continuation bytes" {
     defer flog.deinit();
     // No lead byte anywhere: the boundary walk-back finds nothing to back off
     // to, so this pins that the loop still advances instead of spinning.
-    flog.note("\x80" ** 1100 ++ "ok\n");
+    flog.note(&@as([1100]u8, @splat(0x80)) ++ "ok\n");
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -1040,7 +1040,7 @@ test "renderNotes makes progress on a note that is all continuation bytes" {
 test "renderNotes keeps a note longer than the scrub buffer whole" {
     var flog = dsl.FallbackLog.init(std.testing.allocator);
     defer flog.deinit();
-    const long = "x" ** 3000;
+    const long = &@as([3000]u8, @splat('x'));
     flog.note(long ++ "\x1btail\n");
 
     var buf: std.ArrayList(u8) = .empty;

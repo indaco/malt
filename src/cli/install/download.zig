@@ -1135,8 +1135,8 @@ test "isDeterministicDownloadError: every BottleError variant has an explicit ve
     // Comptime sweep: the helper's switch is exhaustive, so a future
     // BottleError tag added without a classification fails to compile there.
     // The walk here is the runtime mirror — every tag returns true or false.
-    inline for (@typeInfo(bottle_mod.BottleError).error_set.?) |err| {
-        const tag = @field(bottle_mod.BottleError, err.name);
+    inline for (@typeInfo(bottle_mod.BottleError).error_set.error_names.?) |err| {
+        const tag = @field(bottle_mod.BottleError, err);
         _ = isDeterministicDownloadError(tag);
     }
 }
@@ -1211,7 +1211,7 @@ test "downloadBottleToStore returns false when the store already holds the bottl
     const prefix_path = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx_value.io, prefix_path);
 
-    const sha = "ba" ** 32;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ba".*)));
     const seeded = s.p("/store/" ++ sha);
     try std.Io.Dir.cwd().createDirPath(ctx_value.io, seeded);
 
