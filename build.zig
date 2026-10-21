@@ -6,36 +6,40 @@ const TranslatedCModules = struct {
     c_mount: *std.Build.Module,
 };
 
-// addTranslateC binds the target at creation time, so universal builds
-// (which compile the same sources for two arches) need their own set.
+const Translator = @import("translate_c").Translator;
+
+// A translation binds its target, so universal builds (which compile the
+// same sources for two arches) need their own set.
 fn addTranslatedCModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
 ) TranslatedCModules {
-    const c_sqlite = b.addTranslateC(.{
-        .root_source_file = b.path("c/sqlite.h"),
+    const translate_c = b.dependency("translate_c", .{});
+
+    const c_sqlite: Translator = .init(translate_c, .{
+        .c_source_file = b.path("c/sqlite.h"),
         .target = target,
         .optimize = optimize,
     });
     c_sqlite.addIncludePath(b.path("vendor/"));
 
-    const c_clonefile = b.addTranslateC(.{
-        .root_source_file = b.path("c/clonefile.h"),
+    const c_clonefile: Translator = .init(translate_c, .{
+        .c_source_file = b.path("c/clonefile.h"),
         .target = target,
         .optimize = optimize,
     });
 
-    const c_mount = b.addTranslateC(.{
-        .root_source_file = b.path("c/mount.h"),
+    const c_mount: Translator = .init(translate_c, .{
+        .c_source_file = b.path("c/mount.h"),
         .target = target,
         .optimize = optimize,
     });
 
     return .{
-        .c_sqlite = c_sqlite.createModule(),
-        .c_clonefile = c_clonefile.createModule(),
-        .c_mount = c_mount.createModule(),
+        .c_sqlite = c_sqlite.mod,
+        .c_clonefile = c_clonefile.mod,
+        .c_mount = c_mount.mod,
     };
 }
 
@@ -67,9 +71,8 @@ pub fn build(b: *std.Build) void {
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", @embedFile(".version"));
 
-    // Zig 0.16 prefers build-system `addTranslateC` over inline `@cImport`:
-    // each header is translated once per build graph instead of once per
-    // root source file.
+    // Each header is translated once per build graph, not once per root
+    // source file.
     const host_c_mods = addTranslatedCModules(b, target, optimize);
 
     // --- Main executable: mt ---
