@@ -1335,7 +1335,7 @@ pub fn materializeRubyFormula(
         if (all.len > 0) allocator.free(all);
     }
     if (found.len > 0) {
-        install_mod.reportConflicts(sink, found, resolved.name);
+        install_mod.reportConflicts(sink, found, resolved.name, force);
         return InstallError.LinkFailed;
     }
 

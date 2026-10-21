@@ -1127,6 +1127,26 @@ test "checkConflicts keeps a link written under a trailing-slash prefix in_cella
     try testing.expect((try conflictFor(slashed, own)).in_cellar);
 }
 
+test "checkConflicts keeps a link that climbs out through .. out of in_cellar" {
+    const base = try uniquePrefix("in_cellar_dotdot");
+    defer testing.allocator.free(base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    const climb = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/../../x/Cellar/bar/1/bin/tool", .{base});
+    defer testing.allocator.free(climb);
+    try testing.expect(!(try conflictFor(base, climb)).in_cellar);
+}
+
+test "checkConflicts keeps a sibling prefix out of in_cellar under a trailing slash" {
+    const base = try uniquePrefix("in_cellar_slash_sib");
+    defer testing.allocator.free(base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    const sibling = try std.fmt.allocPrint(testing.allocator, "{s}2/Cellar/bar/1/bin/tool", .{base});
+    defer testing.allocator.free(sibling);
+    const slashed = try std.fmt.allocPrint(testing.allocator, "{s}/", .{base});
+    defer testing.allocator.free(slashed);
+    try testing.expect(!(try conflictFor(slashed, sibling)).in_cellar);
+}
+
 fn linkExists(prefix: []const u8, rel: []const u8) bool {
     var buf: [512]u8 = undefined;
     const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, rel }) catch return false;

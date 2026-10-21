@@ -1692,6 +1692,36 @@ test "materializeRubyFormula --force refuses a same-name link that points outsid
     try testing.expectEqualStrings(foreign, buf[0..n]);
 }
 
+test "materializeRubyFormula --force upgrade works under a prefix with a trailing slash" {
+    // The keg's own links read "<prefix>//Cellar"; they must not look foreign.
+    const base = try scratchPrefix();
+    defer cleanupPrefix(base);
+    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/", .{base}, 0);
+    defer testing.allocator.free(prefix);
+    const sha1 = "4a" ** 32;
+    const sha2 = "4b" ** 32;
+    try seedKegArchive(prefix, "slashy", sha1);
+    try seedKegArchive(prefix, "slashy", sha2);
+    const quiet: malt.install_sink.OutputSink = .{
+        .ctx = null,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+    inline for (.{ .{ "1.0", sha1, false }, .{ "2.0", sha2, true } }) |v| {
+        try installFromWarmCacheWith(prefix, .{
+            .name = "slashy",
+            .full_name = "user/repo/slashy",
+            .tap_label = "user/repo",
+            .version = v[0],
+            .url = "https://example.invalid/slashy.tar.gz",
+            .sha256 = v[1],
+        }, v[2], quiet);
+    }
+}
+
 test "materializeRubyFormula refuses a stray file in the slot with the file hint" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);

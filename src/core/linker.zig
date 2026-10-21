@@ -110,7 +110,8 @@ pub const Linker = struct {
                     // Skip repeated slashes: a "/opt/malt/" prefix yields "//Cellar".
                     const rest = if (std.mem.startsWith(u8, target, root)) target[root.len..] else "";
                     const ours = rest.len > 0 and rest[0] == '/' and
-                        std.mem.startsWith(u8, std.mem.trimStart(u8, rest, "/"), "Cellar/");
+                        std.mem.startsWith(u8, std.mem.trimStart(u8, rest, "/"), "Cellar/") and
+                        std.mem.indexOf(u8, rest, "/../") == null; // a climb leaves the Cellar
                     break :blk .{ extractKegFromPath(target) orelse target, true, ours };
                 };
 
