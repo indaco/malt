@@ -5,7 +5,7 @@
 #
 # Hermetic: local fixtures only, MALT_OFFLINE short-circuits the network.
 #
-# Usage: scripts/regressions/shellenv-exports-stale-ca-bundle-no-openssl-major.sh
+# Usage: scripts/regressions/shellenv-skips-stale-ca-bundle-shellenv-exports-stale-ca-bundle-with-no-openssl-major.sh
 
 set -euo pipefail
 

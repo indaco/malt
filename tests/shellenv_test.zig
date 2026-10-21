@@ -254,6 +254,7 @@ test "findCertFile skips a dangling openssl@4 link and falls back to openssl@3" 
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@3");
+    try mkdirIn(prefix, "/opt/openssl@4");
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@4", .{prefix});
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
@@ -435,7 +436,7 @@ test "findCertFile prefers openssl@4 among installed majors" {
 }
 
 test "findCertFile ignores a plain-file leftover when no major is installed" {
-    // The copy can hold frozen roots and doctor draws no row for it.
+    // The copy can hold frozen roots that nothing re-checks.
     const prefix = try certPrefix("nomajor_plain", &.{"openssl@3"});
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -459,4 +460,15 @@ test "findCertFile accepts a leftover link into an installed ca-certificates whe
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try expectFound(prefix, "openssl@3");
+}
+
+test "findCertFile prefers openssl@4 among leftover links when no major is installed" {
+    const prefix = try linkedLeftover("nomajor_both", "openssl@3");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/etc/openssl@4");
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@4/cert.pem", .{prefix});
+    defer testing.allocator.free(link);
+    try test_io.cwd().symLink(std.Options.debug_io, "../ca-certificates/cert.pem", link, .{});
+    try expectFound(prefix, "openssl@4");
 }

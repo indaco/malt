@@ -97,7 +97,7 @@ jobs:
         run: ./scripts/regressions/shellenv-exports-leftover-ca-bundle-shellenv-drops-ssl-cert-file-for-unlinked-major.sh
 
       - name: Regression guard - shellenv skips a stale CA bundle with no OpenSSL major
-        run: ./scripts/regressions/shellenv-exports-stale-ca-bundle-no-openssl-major.sh
+        run: ./scripts/regressions/shellenv-skips-stale-ca-bundle-shellenv-exports-stale-ca-bundle-with-no-openssl-major.sh
 
       # Security smoke: flag-scope enforcement, argv-only lint,
       # pins-manifest shape, install.sh fail-closed regression suite.
