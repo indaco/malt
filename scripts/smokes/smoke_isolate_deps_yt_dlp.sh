@@ -4,21 +4,21 @@
 # Canonical-example smoke for the `--isolate-deps` contract.
 #
 # The feature is motivated by yt-dlp: a real-world formula whose
-# runtime deps include `deno` and `python@3.14`. The PR's user-facing
+# runtime deps include `deno` and `python@3.x`. The PR's user-facing
 # promise is "I asked for yt-dlp, I get yt-dlp in my PATH — not also
-# deno and python3.14 just because yt-dlp needed them." This smoke
+# deno and python3.x just because yt-dlp needed them." This smoke
 # drives that exact scenario against the live Homebrew API and asserts
 # the contract end-to-end.
 #
 # Slower than `scripts/regressions/bin_isolation_basics.sh` (downloads
-# python@3.14 + deno; ~5 min on a warm connection), so it lives under
+# python@3.x + deno; ~5 min on a warm connection), so it lives under
 # `smokes/` rather than `regressions/`.
 #
 # Assertions:
 #   1. <prefix>/bin/yt-dlp present (user's named package lands in PATH).
-#   2. <prefix>/bin/deno and <prefix>/bin/python3.14 absent (deps are
+#   2. <prefix>/bin/deno and <prefix>/bin/python3.x absent (deps are
 #      isolated).
-#   3. <prefix>/opt/deno and <prefix>/opt/python@3.14 present (Mach-O
+#   3. <prefix>/opt/deno and <prefix>/opt/python@3.x present (Mach-O
 #      and rewritten-shebang dependents still resolve).
 #   4. DB rows: yt-dlp is `direct, bin_isolated=0`; every transitive
 #      dep is `dependency, bin_isolated=1`.
@@ -52,12 +52,15 @@ fail() {
 
 DB="$PREFIX/db/malt.db"
 TARGET="yt-dlp"
-ISOLATED_DEPS=("deno" "python@3.14" "certifi")
-
 printf '▸ malt install --isolate-deps %s\n' "$TARGET"
 "$BIN" install --quiet --isolate-deps "$TARGET" || fail "install --isolate-deps $TARGET failed"
 
 [[ -f "$DB" ]] || fail "DB not created at $DB"
+
+# yt-dlp tracks the newest python@3.x, so read the one it pulled in.
+PYTHON=$(sqlite3 "$DB" "SELECT name FROM kegs WHERE name LIKE 'python@3.%' LIMIT 1;")
+[[ -n "$PYTHON" ]] || fail "no python@3.x keg installed as a dependency of $TARGET"
+ISOLATED_DEPS=("deno" "$PYTHON" "certifi")
 
 # ── 1. Named package's bin landed in <prefix>/bin ─────────────────
 [[ -e "$PREFIX/bin/$TARGET" ]] || fail "$TARGET binary not linked into <prefix>/bin"
@@ -65,9 +68,9 @@ pass "<prefix>/bin/$TARGET present (named package in PATH)"
 
 # ── 2. Each isolated dep's bin is *absent* from <prefix>/bin ──────
 # Use the formula's bottled bin names; brew exposes deno as `deno`
-# and python@3.14 as `python3.14` (the versioned name the formula
+# and python@3.x as `python3.x` (the versioned name the formula
 # installs into bin/).
-for absent in "deno" "python3.14"; do
+for absent in "deno" "python${PYTHON#python@}"; do
   if [[ -e "$PREFIX/bin/$absent" ]]; then
     fail "$absent leaked into <prefix>/bin under --isolate-deps"
   fi
@@ -111,10 +114,10 @@ pass "links table holds zero bin/sbin rows for the isolated deps"
 # ── 6. yt-dlp runs — exercises the bottle-time shebang rewriting ──
 #    Bottle authors `inreplace` `#!/usr/bin/env python3` into a path
 #    that anchors yt-dlp to its own Cellar interpreter. Under
-#    isolation `<prefix>/bin/python3.14` is missing, but the
-#    pinned path stays valid through `<prefix>/opt/python@3.14`.
+#    isolation `<prefix>/bin/python3.x` is missing, but the
+#    pinned path stays valid through `<prefix>/opt/python@3.x`.
 out=$("$PREFIX/bin/$TARGET" --version 2>&1 | head -1)
 [[ -n "$out" ]] || fail "$TARGET --version produced no output"
 printf '  ✓ %s --version → %s\n' "$TARGET" "$out"
 
-printf '\n✓ smoke_isolate_deps_yt_dlp: yt-dlp/deno/python3.14 contract holds\n'
+printf '\n✓ smoke_isolate_deps_yt_dlp: yt-dlp/deno/%s contract holds\n' "$PYTHON"
