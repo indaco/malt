@@ -20,6 +20,7 @@ const linker_mod = @import("../core/linker.zig");
 const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
 const tap_slug = @import("../tap_slug.zig");
+const glob = @import("../glob.zig");
 const lock_mod = @import("../db/lock.zig");
 const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
@@ -1404,33 +1405,9 @@ fn matchesLinkOverwrite(patterns: []const []const u8, rel: []const u8) bool {
         if (pat.len == 0) continue;
         if (std.mem.eql(u8, pat, rel)) return true;
         if (rel.len > pat.len and rel[pat.len] == '/' and std.mem.startsWith(u8, rel, pat)) return true;
-        if (std.mem.indexOfScalar(u8, pat, '*') != null and globMatch(pat, rel)) return true;
+        if (std.mem.indexOfScalar(u8, pat, '*') != null and glob.match(pat, rel)) return true;
     }
     return false;
-}
-
-/// `*` matches any run of bytes, `/` included; both ends anchored.
-fn globMatch(pat: []const u8, s: []const u8) bool {
-    var pi: usize = 0;
-    var si: usize = 0;
-    var star: ?usize = null;
-    var mark: usize = 0;
-    while (si < s.len) {
-        if (pi < pat.len and pat[pi] == '*') {
-            star = pi;
-            mark = si;
-            pi += 1;
-        } else if (pi < pat.len and pat[pi] == s[si]) {
-            pi += 1;
-            si += 1;
-        } else if (star) |st| {
-            pi = st + 1;
-            mark += 1;
-            si = mark;
-        } else return false;
-    }
-    while (pi < pat.len and pat[pi] == '*') pi += 1;
-    return pi == pat.len;
 }
 
 /// A slot may change hands only when another keg's own symlink holds it and
@@ -1555,13 +1532,13 @@ test "matchesLinkOverwrite follows the Homebrew pattern rules" {
     try std.testing.expect(!matchesLinkOverwrite(&.{}, "bin/openssl"));
 }
 
-test "globMatch backtracks and anchors both ends" {
-    try std.testing.expect(globMatch("a*b*c", "aXbYbZc"));
-    try std.testing.expect(globMatch("lib/libssl*", "lib/libssl"));
-    try std.testing.expect(globMatch("*ssl.gz", "man/man1/openssl.gz"));
-    try std.testing.expect(!globMatch("a*b", "abX"));
-    try std.testing.expect(!globMatch("Xa*", "a"));
-    try std.testing.expect(!globMatch("a*c", "a"));
+test "matchesLinkOverwrite globs backtrack, span `/` and anchor both ends" {
+    try std.testing.expect(matchesLinkOverwrite(&.{"a*b*c"}, "aXbYbZc"));
+    try std.testing.expect(matchesLinkOverwrite(&.{"lib/libssl*"}, "lib/libssl"));
+    try std.testing.expect(matchesLinkOverwrite(&.{"*ssl.gz"}, "man/man1/openssl.gz"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{"a*b"}, "abX"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{"Xa*"}, "a"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{"a*c"}, "a"));
 }
 
 test "matchesLinkOverwrite ignores an empty pattern" {
