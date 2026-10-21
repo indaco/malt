@@ -44,7 +44,10 @@
 #   (offline/reproducibility).
 # - bru was previously part of the bench but was dropped: upstream pins
 #   Zig 0.15.2 and uses `std.heap.ThreadSafeAllocator`, which was removed in
-#   Zig 0.16 (what malt and nanobrew now build on). Re-add when bru tracks 0.16.
+#   Zig 0.16. Re-add when bru tracks 0.16 or later.
+# - Each tree builds with the Zig it declares. A Zig that is not on PATH is
+#   fetched once into BENCH_WORK_DIR (nanobrew, or a release branch that
+#   lags the dev tree).
 # - With BENCH_TRUE_COLD=1 each tool's prefix is wiped before its cold
 #   install, forcing a real network download (matches a fresh CI runner).
 # - Every package bench starts with a discarded "warmup" round that runs
@@ -298,6 +301,57 @@ latest_release_branch() {
     pick_latest_release_branch
 }
 
+# Zig nanobrew builds with. It ships no build.zig.zon to read it from.
+NB_ZIG_VERSION="${NB_ZIG_VERSION:-0.16.0}"
+
+# tree_zig_version <dir> — `minimum_zig_version` from <dir>/build.zig.zon.
+# Empty when the tree has none. Pure/offline — unit-tested.
+tree_zig_version() {
+  sed -nE 's/^[[:space:]]*\.minimum_zig_version = "([^"]+)".*/\1/p' "$1/build.zig.zon" 2>/dev/null | head -1
+}
+
+# optimize_flag <zig-version> <safe|fast> — the -Doptimize value that Zig
+# accepts. 0.17 renamed ReleaseSafe/ReleaseFast to safe/fast.
+optimize_flag() {
+  case "$1" in
+  0.[0-9].* | 0.1[0-6].*) [ "$2" = fast ] && echo ReleaseFast || echo ReleaseSafe ;;
+  *) echo "$2" ;;
+  esac
+}
+
+# zig_for <version> — path to a zig of that version. Uses the PATH zig when
+# it matches, else fetches the release once into WORK_DIR and checks its
+# sha256 against ziglang.org's index.
+zig_for() {
+  local want=$1
+  if [ "$(zig version 2>/dev/null)" = "$want" ]; then
+    command -v zig
+    return
+  fi
+  local dir="$WORK_DIR/zig-$want"
+  if [ "$("$dir/zig" version 2>/dev/null)" != "$want" ]; then
+    need curl
+    need python3
+    local arch
+    arch=$(uname -m)
+    [ "$arch" = arm64 ] && arch=aarch64
+    info "fetch zig $want ($arch-macos) → $dir"
+    local meta url sha
+    meta=$(curl -fsSL https://ziglang.org/download/index.json |
+      python3 -I -c 'import json,sys; e=json.load(sys.stdin)[sys.argv[1]][sys.argv[2]]; print(e["tarball"], e["shasum"])' \
+        "$want" "$arch-macos") || err "zig $want has no $arch-macos release on ziglang.org"
+    url=${meta% *}
+    sha=${meta#* }
+    rm -rf "$dir" "$dir.tar.xz"
+    curl -fsSL "$url" -o "$dir.tar.xz" || err "download failed: $url"
+    echo "$sha  $dir.tar.xz" | shasum -a 256 -c - >/dev/null || err "sha256 mismatch: $url"
+    mkdir -p "$dir"
+    tar -xJf "$dir.tar.xz" -C "$dir" --strip-components 1
+    rm -f "$dir.tar.xz"
+  fi
+  echo "$dir/zig"
+}
+
 # over_threshold <value> <threshold> — true (exit 0) only when value is a
 # finite number strictly greater than threshold. Non-numeric (FAIL/empty) or a
 # zero/empty threshold (guard disabled) is never "over". Float-safe via awk.
@@ -347,11 +401,15 @@ build_malt() {
     fi
   fi
 
-  info "build malt (ReleaseSafe) → $BENCH_BUILD_PREFIX"
+  local zv zig_bin
+  zv=$(tree_zig_version "$src")
+  [ -n "$zv" ] || err "$src/build.zig.zon declares no minimum_zig_version"
+  zig_bin=$(zig_for "$zv")
+  info "build malt (safe, zig $zv) → $BENCH_BUILD_PREFIX"
   # Wipe the dedicated bench prefix so we never pick up a stale debug binary
   # left behind by `zig build` / `just build` / IDE builds in ./zig-out.
   rm -rf "$BENCH_BUILD_PREFIX"
-  (cd "$src" && zig build -Doptimize=safe --prefix "$BENCH_BUILD_PREFIX")
+  (cd "$src" && "$zig_bin" build -Doptimize="$(optimize_flag "$zv" safe)" --prefix "$BENCH_BUILD_PREFIX")
   if [ ! -x "$MALT_BIN" ]; then
     err "build did not produce $MALT_BIN"
   fi
@@ -441,7 +499,9 @@ build_nanobrew() {
   grep -rlF "/opt/nanobrew" "$NB_DIR/src" 2>/dev/null | while read -r f; do
     sed -i '' "s|/opt/nanobrew|$NB_BENCH_PREFIX|g" "$f"
   done
-  (cd "$NB_DIR" && zig build -Doptimize=ReleaseFast)
+  local zig_bin
+  zig_bin=$(zig_for "$NB_ZIG_VERSION")
+  (cd "$NB_DIR" && "$zig_bin" build -Doptimize="$(optimize_flag "$NB_ZIG_VERSION" fast)")
   mkdir -p "$NB_BENCH_PREFIX"
   "$NB_BIN" init >/dev/null 2>&1 || true
 }

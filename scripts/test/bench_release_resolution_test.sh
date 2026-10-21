@@ -11,7 +11,9 @@
 #   2. over_threshold — the guard predicate: a peer tool's cold median above
 #      the ceiling trips; FAIL/empty medians and a disabled (0) ceiling never
 #      trip, so a legitimately slow-but-fine number is never hidden by mistake.
-#   3. fail-fast scope + failed-peer cells — a peer tool's broken install must
+#   3. tree_zig_version / optimize_flag / zig_for — each tree builds with the
+#      Zig it declares, with the -Doptimize spelling of that Zig.
+#   4. fail-fast scope + failed-peer cells — a peer tool's broken install must
 #      degrade to a marked cell (like the ceiling guard already does) instead
 #      of aborting the run, which would also cost malt its own stress step;
 #      malt's own failure must still abort and stay visible in the table.
@@ -93,6 +95,31 @@ check_pred "unreported version fails" 1 built_version_matches "$ver_src" ""
 command rm -f "$ver_src/.version"
 check_pred "missing .version fails" 1 built_version_matches "$ver_src" "0.25.2"
 rm -rf "$ver_src"
+
+echo "tree_zig_version:"
+# Each tree builds with the Zig it declares: the release branch can lag the
+# dev tree by a Zig release, and one PATH zig cannot build both.
+zon_src=$(mktemp -d /tmp/bench-zon.XXXXXX)
+printf '.{\n    .name = .malt,\n    .minimum_zig_version = "0.16.0",\n}\n' >"$zon_src/build.zig.zon"
+check "reads minimum_zig_version" "0.16.0" "$(tree_zig_version "$zon_src")"
+command rm -f "$zon_src/build.zig.zon"
+check "no build.zig.zon yields empty" "" "$(tree_zig_version "$zon_src")"
+rm -rf "$zon_src"
+
+echo "optimize_flag:"
+# Zig 0.17 renamed the modes, and each spelling is an error on the other side.
+check "0.16 safe" "ReleaseSafe" "$(optimize_flag 0.16.0 safe)"
+check "0.16 fast" "ReleaseFast" "$(optimize_flag 0.16.0 fast)"
+check "0.9 safe is pre-rename" "ReleaseSafe" "$(optimize_flag 0.9.1 safe)"
+check "0.17 safe" "safe" "$(optimize_flag 0.17.0 safe)"
+check "0.17 fast" "fast" "$(optimize_flag 0.17.0 fast)"
+check "0.18 keeps the new spelling" "fast" "$(optimize_flag 0.18.1 fast)"
+
+echo "zig_for:"
+path_zig=$(command -v zig || true)
+if [ -n "$path_zig" ]; then
+  check "a matching PATH zig is used, nothing fetched" "$path_zig" "$(zig_for "$(zig version)")"
+fi
 
 echo "over_threshold:"
 check_pred "130.802 over 30 trips" 0 over_threshold "130.802" "30"

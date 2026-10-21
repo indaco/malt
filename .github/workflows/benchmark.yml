@@ -31,6 +31,7 @@ jobs:
       # branch with the ambient GITHUB_TOKEN.
       - uses: actions/checkout@v7
 
+      # bench.sh fetches any other Zig a benched tree declares.
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
