@@ -72,7 +72,7 @@ pub fn copyTreeFallback(io: std.Io, allocator: std.mem.Allocator, src_path: []co
                 dst_dir.createDirPath(io, entry.path) catch |err| captureFirst(&first_err, err);
             },
             .file => {
-                if (std.fs.path.dirname(entry.path)) |parent| {
+                if (std.Io.Dir.path.dirname(entry.path)) |parent| {
                     dst_dir.createDirPath(io, parent) catch |err| captureFirst(&first_err, err);
                 }
                 std.Io.Dir.copyFile(entry.dir, entry.basename, dst_dir, entry.path, io, .{}) catch |err|

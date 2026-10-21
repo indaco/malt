@@ -78,7 +78,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
 /// underlying error name is written to `underlying_name_out` so the caller
 /// can surface the real cause (e.g. NoSpaceLeft) instead of a generic label.
 fn writeAtomic(io: std.Io, path: []const u8, content: []const u8, underlying_name_out: *?[]const u8) AtomicWriteError!void {
-    const dir_path = std.fs.path.dirname(path) orelse "/";
+    const dir_path = std.Io.Dir.path.dirname(path) orelse "/";
 
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{}) catch |e| {
         underlying_name_out.* = @errorName(e);
@@ -87,9 +87,9 @@ fn writeAtomic(io: std.Io, path: []const u8, content: []const u8, underlying_nam
     defer dir.close(io);
 
     // Create a temp file in the same directory
-    const basename = std.fs.path.basename(path);
-    var tmp_name_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".{s}.malt.tmp", .{basename}) catch return error.NameTooLong;
+    const basename = std.Io.Dir.path.basename(path);
+    var tmp_name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tmp_name = std.mem.print(&tmp_name_buf, ".{s}.malt.tmp", .{basename}) catch return error.NameTooLong;
 
     // Write temp file
     const tmp_file = dir.createFile(io, tmp_name, .{}) catch |e| {
@@ -118,7 +118,7 @@ fn writeAtomic(io: std.Io, path: []const u8, content: []const u8, underlying_nam
 /// Surfaces both the failing step (e.g. WriteFailed) and the underlying cause
 /// (e.g. NoSpaceLeft) so operators can triage without reading the source.
 fn formatAtomicWriteFailureMessage(buf: []u8, kind: AtomicWriteError, underlying: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buf,
         "malt: inreplace atomic write failed ({s}: {s}); falling back to direct overwrite\n",
         .{ @errorName(kind), underlying },
@@ -137,20 +137,20 @@ fn writeDirectly(ctx: ExecCtx, path: []const u8, content: []const u8) void {
 test "atomic-write failure message preserves the underlying error name" {
     var buf: [256]u8 = undefined;
     const msg = try formatAtomicWriteFailureMessage(&buf, error.WriteFailed, "NoSpaceLeft");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "WriteFailed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "NoSpaceLeft") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "AccessDenied") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "WriteFailed") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "NoSpaceLeft") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "AccessDenied") == null);
 }
 
 test "atomic-write failure message names the failing step" {
     var buf: [256]u8 = undefined;
     const create_msg = try formatAtomicWriteFailureMessage(&buf, error.TempCreateFailed, "ReadOnlyFileSystem");
-    try std.testing.expect(std.mem.indexOf(u8, create_msg, "TempCreateFailed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, create_msg, "ReadOnlyFileSystem") != null);
+    try std.testing.expect(std.mem.find(u8, create_msg, "TempCreateFailed") != null);
+    try std.testing.expect(std.mem.find(u8, create_msg, "ReadOnlyFileSystem") != null);
 
     const rename_msg = try formatAtomicWriteFailureMessage(&buf, error.RenameFailed, "CrossDeviceLink");
-    try std.testing.expect(std.mem.indexOf(u8, rename_msg, "RenameFailed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rename_msg, "CrossDeviceLink") != null);
+    try std.testing.expect(std.mem.find(u8, rename_msg, "RenameFailed") != null);
+    try std.testing.expect(std.mem.find(u8, rename_msg, "CrossDeviceLink") != null);
 }
 
 test "inreplace refuses to read through a source symlink outside the keg" {
@@ -158,13 +158,13 @@ test "inreplace refuses to read through a source symlink outside the keg" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_inreplace_source_{d}", .{std.c.getpid()});
+    const base = try alloc.print("/tmp/malt_inreplace_source_{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
-    const keg = try std.fmt.allocPrint(alloc, "{s}/keg", .{base});
-    const victim = try std.fmt.allocPrint(alloc, "{s}/victim", .{base});
-    const link = try std.fmt.allocPrint(alloc, "{s}/config", .{keg});
+    const keg = try alloc.print("{s}/keg", .{base});
+    const victim = try alloc.print("{s}/victim", .{base});
+    const link = try alloc.print("{s}/config", .{keg});
     try std.Io.Dir.cwd().createDirPath(io, keg);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, victim, .{});

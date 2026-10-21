@@ -196,7 +196,7 @@ fn unhonouredKey(ctx: StepsCtx, tag: StepTag, obj: std.json.ObjectMap) bool {
         const key = entry.key_ptr.*;
         for (common_keys) |k| if (std.mem.eql(u8, key, k)) continue :keys;
         for (honouredKeys(tag)) |k| if (std.mem.eql(u8, key, k)) continue :keys;
-        const detail = std.fmt.allocPrint(ctx.allocator, "{s} with {s}", .{ @tagName(tag), key }) catch key;
+        const detail = ctx.allocator.print("{s} with {s}", .{ @tagName(tag), key }) catch key;
         logUnsupported(ctx, detail);
         return true;
     }
@@ -307,7 +307,7 @@ fn unlinkDeclaredSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const target = resolvePathSpec(ctx, obj, "target") orelse return false;
     if (!confined(ctx, target)) return false;
     const source = resolvePathSpec(ctx, obj, "source") orelse return false;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = std.Io.Dir.readLinkAbsolute(ctx.io, target, &buf) catch |e| switch (e) {
         error.FileNotFound, error.NotLink, error.NotDir => return true,
         else => return ioFail(ctx, "symlink", target, e),
@@ -422,11 +422,11 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// Expand `{{token}}` template placeholders the way brew's installer does:
 /// known tokens substitute, unknown ones stay verbatim.
 pub fn expandTemplates(ctx: StepsCtx, s: []const u8) ![]const u8 {
-    if (std.mem.indexOf(u8, s, "{{") == null) return s;
+    if (std.mem.find(u8, s, "{{") == null) return s;
     var out: std.ArrayList(u8) = .empty;
     var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, s, pos, "{{")) |start| {
-        const end = std.mem.indexOfPos(u8, s, start + 2, "}}") orelse break;
+    while (std.mem.findPos(u8, s, pos, "{{")) |start| {
+        const end = std.mem.findPos(u8, s, start + 2, "}}") orelse break;
         try out.appendSlice(ctx.allocator, s[pos..start]);
         const token = s[start + 2 .. end];
         if (templateValue(ctx, token)) |v| {
@@ -524,7 +524,7 @@ fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
             .staged_path => c.staged_path,
             .caskroom_path => c.caskroom_path,
             .appdir => c.appdir,
-            .temp => std.fmt.allocPrint(ctx.allocator, "{s}/tmp", .{ctx.prefix}) catch null,
+            .temp => ctx.allocator.print("{s}/tmp", .{ctx.prefix}) catch null,
         },
     };
 }
@@ -537,23 +537,23 @@ fn formulaTemplateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
         .version_major => versionComponents(ctx.version, 1),
         .version_major_minor => versionComponents(ctx.version, 2),
         .homebrew_prefix => ctx.prefix,
-        .prefix_etc => std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null,
-        .prefix_var => std.fmt.allocPrint(a, "{s}/var", .{ctx.prefix}) catch null,
+        .prefix_etc => a.print("{s}/etc", .{ctx.prefix}) catch null,
+        .prefix_var => a.print("{s}/var", .{ctx.prefix}) catch null,
         // Null when the environment has no USER: the caller must refuse
         // rather than write an unresolved token into a live config.
         .user => std.process.Environ.getPosix(ctx.environ, "USER"),
         // Keg-relative; the layouts are Homebrew's standard completion dirs.
-        .keg_bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.keg_path}) catch null,
+        .keg_bin => a.print("{s}/bin", .{ctx.keg_path}) catch null,
         // Keg-relative, matching Homebrew's `libexec` in a formula body.
-        .keg_libexec => std.fmt.allocPrint(a, "{s}/libexec", .{ctx.keg_path}) catch null,
+        .keg_libexec => a.print("{s}/libexec", .{ctx.keg_path}) catch null,
         // Prefix-relative, matching `resolveBase` for the same names.
-        .pkgetc => std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
-        .pkgshare => std.fmt.allocPrint(a, "{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
-        .opt_pkgshare => std.fmt.allocPrint(a, "{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
-        .bash_completion => std.fmt.allocPrint(a, "{s}/etc/bash_completion.d", .{ctx.keg_path}) catch null,
-        .zsh_completion => std.fmt.allocPrint(a, "{s}/share/zsh/site-functions", .{ctx.keg_path}) catch null,
-        .fish_completion => std.fmt.allocPrint(a, "{s}/share/fish/vendor_completions.d", .{ctx.keg_path}) catch null,
-        .pwsh_completion => std.fmt.allocPrint(a, "{s}/share/pwsh/completions", .{ctx.keg_path}) catch null,
+        .pkgetc => a.print("{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .pkgshare => a.print("{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .opt_pkgshare => a.print("{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
+        .bash_completion => a.print("{s}/etc/bash_completion.d", .{ctx.keg_path}) catch null,
+        .zsh_completion => a.print("{s}/share/zsh/site-functions", .{ctx.keg_path}) catch null,
+        .fish_completion => a.print("{s}/share/fish/vendor_completions.d", .{ctx.keg_path}) catch null,
+        .pwsh_completion => a.print("{s}/share/pwsh/completions", .{ctx.keg_path}) catch null,
     };
 }
 
@@ -641,7 +641,7 @@ pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[
             .caskroom_path => c.caskroom_path,
             .appdir => c.appdir,
             .homebrew_prefix => ctx.prefix,
-            .temp => std.fmt.allocPrint(ctx.allocator, "{s}/tmp", .{ctx.prefix}) catch null,
+            .temp => ctx.allocator.print("{s}/tmp", .{ctx.prefix}) catch null,
             .formula_pkgetc, .formula_opt_prefix => resolveFormulaBase(ctx, base, formula_ref),
         },
     };
@@ -653,23 +653,23 @@ fn resolveFormulaBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8)
     return switch (base_map.get(base) orelse return null) {
         .homebrew_prefix => ctx.prefix,
         .prefix => ctx.keg_path,
-        .opt_prefix => std.fmt.allocPrint(a, "{s}/opt/{s}", .{ ctx.prefix, ctx.name }) catch null,
-        .var_dir => std.fmt.allocPrint(a, "{s}/var", .{ctx.prefix}) catch null,
-        .etc => std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null,
-        .lib => std.fmt.allocPrint(a, "{s}/lib", .{ctx.prefix}) catch null,
-        .bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.prefix}) catch null,
-        .libexec => std.fmt.allocPrint(a, "{s}/libexec", .{ctx.keg_path}) catch null,
-        .pkgetc => std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
-        .pkgshare => std.fmt.allocPrint(a, "{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
-        .opt_pkgshare => std.fmt.allocPrint(a, "{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
-        .frameworks => std.fmt.allocPrint(a, "{s}/Frameworks", .{ctx.keg_path}) catch null,
+        .opt_prefix => a.print("{s}/opt/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .var_dir => a.print("{s}/var", .{ctx.prefix}) catch null,
+        .etc => a.print("{s}/etc", .{ctx.prefix}) catch null,
+        .lib => a.print("{s}/lib", .{ctx.prefix}) catch null,
+        .bin => a.print("{s}/bin", .{ctx.prefix}) catch null,
+        .libexec => a.print("{s}/libexec", .{ctx.keg_path}) catch null,
+        .pkgetc => a.print("{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .pkgshare => a.print("{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .opt_pkgshare => a.print("{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
+        .frameworks => a.print("{s}/Frameworks", .{ctx.keg_path}) catch null,
         .formula_pkgetc => {
             const f = formula_ref orelse return null;
-            return std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, f }) catch null;
+            return a.print("{s}/etc/{s}", .{ ctx.prefix, f }) catch null;
         },
         .formula_opt_prefix => {
             const f = formula_ref orelse return null;
-            return std.fmt.allocPrint(a, "{s}/opt/{s}", .{ ctx.prefix, f }) catch null;
+            return a.print("{s}/opt/{s}", .{ ctx.prefix, f }) catch null;
         },
     };
 }
@@ -703,12 +703,12 @@ fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]con
             const detail = if (ctx.subject == .cask and std.mem.eql(u8, base, "home"))
                 "base home (HOME is not set)"
             else
-                std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base;
+                ctx.allocator.print("base {s}", .{base}) catch base;
             logUnsupported(ctx, detail);
         }
         return null;
     };
-    return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+    return std.Io.Dir.path.join(ctx.allocator, &.{ root, path }) catch null;
 }
 
 // --- confinement -----------------------------------------------------------
@@ -735,7 +735,7 @@ fn rootPairs(ctx: StepsCtx) RootPairs {
             // the disk, relative, or unset never enters the set. OOM and a
             // bad root both narrow it rather than widen it.
             const home_lib = if (saneRoot(c.home))
-                std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch null
+                std.Io.Dir.path.join(ctx.allocator, &.{ c.home, "Library" }) catch null
             else
                 null;
             const appdir: ?[]const u8 = if (saneRoot(c.appdir)) c.appdir else null;
@@ -749,7 +749,7 @@ fn rootPairs(ctx: StepsCtx) RootPairs {
 
 /// Absolute and below `/`: the only shape a confinement root may have.
 fn saneRoot(path: []const u8) bool {
-    return std.fs.path.isAbsolute(path) and std.mem.trimEnd(u8, path, "/").len > 0;
+    return std.Io.Dir.path.isAbsolute(path) and std.mem.trimEnd(u8, path, "/").len > 0;
 }
 
 fn validatePath(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
@@ -818,7 +818,7 @@ fn confined(ctx: StepsCtx, path: []const u8) bool {
 /// Reported here, a parent that cannot be made names the directory; left to
 /// the step, it would read as its leaf "not found".
 fn mkParent(ctx: StepsCtx, step: []const u8, path: []const u8) bool {
-    const parent = std.fs.path.dirname(path) orelse return true;
+    const parent = std.Io.Dir.path.dirname(path) orelse return true;
     std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch |e| return ioFail(ctx, step, parent, e);
     return true;
 }
@@ -838,7 +838,7 @@ fn stepMkdir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     std.Io.Dir.createDirAbsolute(ctx.io, path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "mkdir {s}: {s}", .{ path, @errorName(e) }) catch "mkdir");
+            logCmdFail(ctx, ctx.allocator.print("mkdir {s}: {s}", .{ path, @errorName(e) }) catch "mkdir");
             return false;
         },
     };
@@ -912,14 +912,14 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // else is the destination path itself.
     var dest = target;
     if (isDir(ctx, target)) {
-        dest = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ target, std.fs.path.basename(source) }) catch
+        dest = ctx.allocator.print("{s}/{s}", .{ target, std.Io.Dir.path.basename(source) }) catch
             return false;
         if (!confined(ctx, dest)) return false;
     } else if (!mkParent(ctx, "copy", target)) return false;
 
     // Staged beside the destination rather than into it: the replace is only
     // committed once the replacement exists.
-    const staging = std.fmt.allocPrint(ctx.allocator, "{s}.malt-incoming", .{dest}) catch return false;
+    const staging = ctx.allocator.print("{s}.malt-incoming", .{dest}) catch return false;
     // clonefile(2) refuses a destination that exists, and a crashed run can
     // have left one behind.
     std.Io.Dir.cwd().deleteTree(ctx.io, staging) catch {};
@@ -1033,7 +1033,7 @@ fn placeLink(ctx: StepsCtx, step: []const u8, source: []const u8, link: []const 
 }
 
 fn linksTo(ctx: StepsCtx, link: []const u8, source: []const u8) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.Io.Dir.readLinkAbsolute(ctx.io, link, &buf) catch return false;
     return std.mem.eql(u8, buf[0..n], source);
 }
@@ -1047,8 +1047,8 @@ fn relativeSource(obj: std.json.ObjectMap) bool {
 /// directory every match lands in, keeping its own name. Without this the
 /// pattern would be symlinked verbatim and the files silently go unlinked.
 fn symlinkGlob(ctx: StepsCtx, obj: std.json.ObjectMap, source: []const u8, target: []const u8) bool {
-    const dir_path = std.fs.path.dirname(source) orelse return false;
-    const pattern = std.fs.path.basename(source);
+    const dir_path = std.Io.Dir.path.dirname(source) orelse return false;
+    const pattern = std.Io.Dir.path.basename(source);
 
     std.Io.Dir.cwd().createDirPath(ctx.io, target) catch |e| return ioFail(ctx, "symlink", target, e);
     var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch |e| switch (e) {
@@ -1062,8 +1062,8 @@ fn symlinkGlob(ctx: StepsCtx, obj: std.json.ObjectMap, source: []const u8, targe
     // A read error must not read as "no more matches".
     while (iter.next(ctx.io) catch |e| return ioFail(ctx, "symlink", dir_path, e)) |entry| {
         if (!glob_match.match(pattern, entry.name)) continue;
-        const child = std.fs.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
-        const link_path = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
+        const child = std.Io.Dir.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
+        const link_path = std.Io.Dir.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
         // Each match is its own write: a planted symlink must not redirect
         // one of them out of the prefix.
         if (!confined(ctx, link_path)) return false;
@@ -1179,7 +1179,7 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
     const after = expandTemplates(ctx, after_raw) catch return false;
-    if (std.mem.indexOf(u8, after, "{{") != null) {
+    if (std.mem.find(u8, after, "{{") != null) {
         // Writing a literal `{{user}}` into a config is worse than not running.
         logUnsupported(ctx, "inreplace with an unresolved template");
         return false;
@@ -1246,12 +1246,12 @@ fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         const path = resolveSpec(ctx, item.object, "paths") orelse continue;
         if (!confined(ctx, path)) continue;
 
-        var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const len = std.Io.Dir.readLinkAbsolute(ctx.io, path, &target_buf) catch |e| switch (e) {
             error.FileNotFound, error.NotLink, error.NotDir => continue,
             else => return ioFail(ctx, "remove", path, e),
         };
-        if (std.mem.indexOf(u8, target_buf[0..len], needle) == null) continue;
+        if (std.mem.find(u8, target_buf[0..len], needle) == null) continue;
         if (!clearForLink(ctx, "remove", path)) return false;
     }
     return true;
@@ -1286,17 +1286,17 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
 /// applications dir itself — one app inside it is the cask's own to remove.
 fn sharedDir(ctx: StepsCtx, raw: []const u8) bool {
     // Normalised so `<appdir>/.` reads as the appdir, not as a child of it.
-    const path = std.fs.path.resolvePosix(ctx.allocator, &.{raw}) catch return true;
+    const path = std.Io.Dir.path.resolveAllocPosix(ctx.allocator, &.{raw}) catch return true;
     if (selfOrChild(path, ctx.prefix)) return true;
     switch (ctx.subject) {
         .formula => return false,
         .cask => |c| {
-            const home_lib = std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return true;
+            const home_lib = std.Io.Dir.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return true;
             if (selfOrChild(path, home_lib)) return true;
             // ponytail: a fixed deny-list; an ownership record of what this
             // cask created would let the rest of `$HOME/Library` be refused too.
             for (protected_home_trees) |sub| {
-                const tree = std.fs.path.join(ctx.allocator, &.{ home_lib, sub }) catch return true;
+                const tree = std.Io.Dir.path.join(ctx.allocator, &.{ home_lib, sub }) catch return true;
                 if (sandbox.pathHasPrefix(path, tree)) return true;
             }
             return std.mem.eql(u8, path, std.mem.trimEnd(u8, c.appdir, "/"));
@@ -1312,7 +1312,7 @@ const protected_home_trees = [_][]const u8{
 fn selfOrChild(path: []const u8, root: []const u8) bool {
     const r = std.mem.trimEnd(u8, root, "/");
     if (std.mem.eql(u8, path, r)) return true;
-    const parent = std.fs.path.dirname(path) orelse return true;
+    const parent = std.Io.Dir.path.dirname(path) orelse return true;
     return std.mem.eql(u8, parent, r);
 }
 
@@ -1336,7 +1336,7 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // The name must land in `target`; a separator walks it out of the
     // directory just confined. A readdir name never holds one.
     for ([_][]const u8{ link_prefix, link_suffix }) |part| {
-        if (std.mem.indexOfScalar(u8, part, '/') != null) {
+        if (std.mem.findScalar(u8, part, '/') != null) {
             logViolation(ctx, part);
             return false;
         }
@@ -1349,9 +1349,9 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     defer dir.close(ctx.io);
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch |e| return ioFail(ctx, "link_children", source, e)) |entry| {
-        const child = std.fs.path.join(ctx.allocator, &.{ source, entry.name }) catch continue;
-        const link_name = std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}", .{ link_prefix, entry.name, link_suffix }) catch continue;
-        const link_path = std.fs.path.join(ctx.allocator, &.{ target, link_name }) catch continue;
+        const child = std.Io.Dir.path.join(ctx.allocator, &.{ source, entry.name }) catch continue;
+        const link_name = ctx.allocator.print("{s}{s}{s}", .{ link_prefix, entry.name, link_suffix }) catch continue;
+        const link_path = std.Io.Dir.path.join(ctx.allocator, &.{ target, link_name }) catch continue;
         if (!clearForLink(ctx, "link_children", link_path)) return false;
         if (!placeLink(ctx, "link_children", child, link_path)) return false;
     }
@@ -1387,8 +1387,8 @@ fn linkDirRecursive(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch |e| return ioFail(ctx, "link_dir", src, e)) |entry| {
         if (std.mem.eql(u8, entry.name, ".DS_Store")) continue;
-        const src_child = std.fs.path.join(ctx.allocator, &.{ src, entry.name }) catch continue;
-        const dst_child = std.fs.path.join(ctx.allocator, &.{ dst, entry.name }) catch continue;
+        const src_child = std.Io.Dir.path.join(ctx.allocator, &.{ src, entry.name }) catch continue;
+        const dst_child = std.Io.Dir.path.join(ctx.allocator, &.{ dst, entry.name }) catch continue;
         if (entry.kind == .directory) {
             if (!linkDirRecursive(ctx, src_child, dst_child)) return false;
         } else {
@@ -1437,7 +1437,7 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         const aside = asidePath(ctx, target) orelse return false;
         std.Io.Dir.cwd().deleteTree(ctx.io, aside) catch {};
         std.Io.Dir.renameAbsolute(target, aside, ctx.io) catch {
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not clear {s}", .{target}) catch target);
+            logCmdFail(ctx, ctx.allocator.print("could not clear {s}", .{target}) catch target);
             return false;
         };
         if (atomic.atomicRename(ctx.io, ctx.allocator, source, target)) |_| {
@@ -1445,7 +1445,7 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             return true;
         } else |_| {
             std.Io.Dir.renameAbsolute(aside, target, ctx.io) catch {};
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{source}) catch source);
+            logCmdFail(ctx, ctx.allocator.print("could not relocate {s}", .{source}) catch source);
             return false;
         }
     }
@@ -1454,7 +1454,7 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // too, or it lingers in the prefix with nothing to reclaim it.
     std.Io.Dir.cwd().deleteTree(ctx.io, asidePath(ctx, target) orelse "") catch {};
     atomic.atomicRename(ctx.io, ctx.allocator, source, target) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{source}) catch source);
+        logCmdFail(ctx, ctx.allocator.print("could not relocate {s}", .{source}) catch source);
         return false;
     };
     return true;
@@ -1465,8 +1465,8 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// so the target is skipped when it is one of the entries.
 fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // Lexically normalised so `staged/.` compares equal to its own child.
-    const source = std.fs.path.resolvePosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "source") orelse return false}) catch return false;
-    const target = std.fs.path.resolvePosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "target") orelse return false}) catch return false;
+    const source = std.Io.Dir.path.resolveAllocPosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "source") orelse return false}) catch return false;
+    const target = std.Io.Dir.path.resolveAllocPosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "target") orelse return false}) catch return false;
     // Source first: nothing is created until both ends are in bounds.
     validateDirTarget(ctx, source) catch {
         logViolation(ctx, source);
@@ -1495,11 +1495,11 @@ fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     while (iter.next(ctx.io) catch return false) |entry|
         names.append(ctx.allocator, ctx.allocator.dupe(u8, entry.name) catch return false) catch return false;
     for (names.items) |name| {
-        const child = std.fs.path.join(ctx.allocator, &.{ source, name }) catch continue;
+        const child = std.Io.Dir.path.join(ctx.allocator, &.{ source, name }) catch continue;
         if (std.mem.eql(u8, child, target)) continue;
-        const dest = std.fs.path.join(ctx.allocator, &.{ target, name }) catch continue;
+        const dest = std.Io.Dir.path.join(ctx.allocator, &.{ target, name }) catch continue;
         std.Io.Dir.renameAbsolute(child, dest, ctx.io) catch {
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{child}) catch child);
+            logCmdFail(ctx, ctx.allocator.print("could not relocate {s}", .{child}) catch child);
             return false;
         };
     }
@@ -1507,7 +1507,7 @@ fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 }
 
 fn asidePath(ctx: StepsCtx, target: []const u8) ?[]const u8 {
-    return std.fmt.allocPrint(ctx.allocator, "{s}.malt-replaced", .{target}) catch null;
+    return ctx.allocator.print("{s}.malt-replaced", .{target}) catch null;
 }
 
 /// `warn`: upstream's `opoo`. Printing IS the step, so it must never reach
@@ -1519,7 +1519,7 @@ fn stepWarn(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     };
     const message = expandTemplates(ctx, raw) catch raw;
     // The renderer writes notes verbatim, so the line ending is the caller's.
-    ctx.flog.note(std.fmt.allocPrint(ctx.allocator, "{s}\n", .{message}) catch message);
+    ctx.flog.note(ctx.allocator.print("{s}\n", .{message}) catch message);
     return true;
 }
 
@@ -1599,14 +1599,14 @@ fn resolveLink(ctx: StepsCtx, path: []const u8) []const u8 {
     var current = path;
     // Homebrew plants one hop; the bound just stops a cycle.
     for (0..8) |_| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const n = std.Io.Dir.readLinkAbsolute(ctx.io, current, &buf) catch return current;
         const target = buf[0..n];
         // Duped off the stack buffer before it goes out of scope.
-        current = if (std.fs.path.isAbsolute(target))
+        current = if (std.Io.Dir.path.isAbsolute(target))
             ctx.allocator.dupe(u8, target) catch return current
         else
-            std.fs.path.join(ctx.allocator, &.{ std.fs.path.dirname(current) orelse "/", target }) catch return current;
+            std.Io.Dir.path.join(ctx.allocator, &.{ std.Io.Dir.path.dirname(current) orelse "/", target }) catch return current;
     }
     return current;
 }
@@ -1647,7 +1647,7 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
 }
 
 fn pathDetail(ctx: StepsCtx, what: []const u8, path: []const u8) []const u8 {
-    return std.fmt.allocPrint(ctx.allocator, "{s} {s}\n", .{ what, path }) catch what;
+    return ctx.allocator.print("{s} {s}\n", .{ what, path }) catch what;
 }
 
 /// The `-R` walk `chmod` and `chown` share: `leaf.apply(ctx, path)` on the
@@ -1672,7 +1672,7 @@ fn applyTree(ctx: StepsCtx, path: []const u8, leaf: anytype) bool {
         // `-R` walks past anything that is not a file or a directory;
         // refusing a symlink here would fail the step over a keg's own links.
         if (entry.kind != .directory and entry.kind != .file) continue;
-        const child = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
+        const child = std.Io.Dir.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
         const ok = if (entry.kind == .directory) applyTree(ctx, child, leaf) else leaf.apply(ctx, child);
         if (!ok) return false;
     }
@@ -1704,7 +1704,7 @@ fn stepSetPermissions(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     };
     const mode = parseMode(permissions) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_permissions mode {s}", .{permissions}) catch "set_permissions mode");
+        logUnsupported(ctx, ctx.allocator.print("set_permissions mode {s}", .{permissions}) catch "set_permissions mode");
         return false;
     };
     const recursive = !getFlag(obj, "non_recursive");
@@ -1733,14 +1733,14 @@ extern "c" fn getgrnam(name: [*:0]const u8) ?*std.c.group;
 
 fn groupId(name: []const u8) ?std.posix.gid_t {
     var buf: [256]u8 = undefined;
-    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch return null;
+    const z = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return null;
     const g = getgrnam(z) orelse return null;
     return g.gid;
 }
 
 fn userId(name: []const u8) ?std.posix.uid_t {
     var buf: [256]u8 = undefined;
-    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch return null;
+    const z = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return null;
     const pw = std.c.getpwnam(z) orelse return null;
     return pw.uid;
 }
@@ -1788,12 +1788,12 @@ fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
     const uid: std.posix.uid_t = if (getString(obj, "user")) |u| userId(u) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_ownership user {s}", .{u}) catch "set_ownership user");
+        logUnsupported(ctx, ctx.allocator.print("set_ownership user {s}", .{u}) catch "set_ownership user");
         return false;
     } else std.c.getuid();
     const group = getString(obj, "group") orelse "staff";
     const gid = groupId(group) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_ownership group {s}", .{group}) catch "set_ownership group");
+        logUnsupported(ctx, ctx.allocator.print("set_ownership group {s}", .{group}) catch "set_ownership group");
         return false;
     };
     const recursive = !getFlag(obj, "non_recursive");
@@ -1817,16 +1817,16 @@ fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// optionally behind a `**/` descent. Null for anything else — an approximated
 /// pattern chmods the wrong files rather than failing.
 fn expandGlob(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
-    if (std.mem.indexOfScalar(u8, spec, '*') == null) {
+    if (std.mem.findScalar(u8, spec, '*') == null) {
         const one = ctx.allocator.alloc([]const u8, 1) catch return null;
         one[0] = spec;
         return one;
     }
-    const dir_path = std.fs.path.dirname(spec) orelse return logUnexpandable(ctx, spec);
-    const pattern = std.fs.path.basename(spec);
-    if (std.mem.indexOfScalar(u8, pattern, '*') == null) return logUnexpandable(ctx, spec);
+    const dir_path = std.Io.Dir.path.dirname(spec) orelse return logUnexpandable(ctx, spec);
+    const pattern = std.Io.Dir.path.basename(spec);
+    if (std.mem.findScalar(u8, pattern, '*') == null) return logUnexpandable(ctx, spec);
 
-    const root, const descend = if (std.mem.indexOfScalar(u8, dir_path, '*') == null)
+    const root, const descend = if (std.mem.findScalar(u8, dir_path, '*') == null)
         .{ dir_path, false }
     else if (std.mem.endsWith(u8, dir_path, "/**"))
         .{ dir_path[0 .. dir_path.len - "/**".len], true }
@@ -1851,7 +1851,7 @@ fn expandGlob(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
 /// One entry per refusal: the callers cannot tell the shapes apart, so logging
 /// is owned here rather than duplicated at each site.
 fn logUnexpandable(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
-    logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "a path pattern this executor cannot expand: {s}", .{spec}) catch "a path pattern this executor cannot expand");
+    logUnsupported(ctx, ctx.allocator.print("a path pattern this executor cannot expand: {s}", .{spec}) catch "a path pattern this executor cannot expand");
     return null;
 }
 
@@ -1878,7 +1878,7 @@ fn collectMatches(
     defer dir.close(ctx.io);
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        const child = std.fs.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
+        const child = std.Io.Dir.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
         if (glob_match.match(pattern, entry.name)) out.append(ctx.allocator, child) catch return;
         if (descend and entry.kind == .directory) collectMatches(ctx, child, pattern, true, out);
     }
@@ -1897,16 +1897,16 @@ fn stepInstallGzippedExecutable(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (!confinedSource(ctx, source)) return false;
     if (!confined(ctx, target)) return false;
 
-    const dir = std.fs.path.dirname(target) orelse return false;
+    const dir = std.Io.Dir.path.dirname(target) orelse return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
-    const tmp = std.fmt.allocPrint(ctx.allocator, "{s}/.{s}.install-step", .{
+    const tmp = ctx.allocator.print("{s}/.{s}.install-step", .{
         dir,
-        std.fs.path.basename(target),
+        std.Io.Dir.path.basename(target),
     }) catch return false;
 
     gunzipConfined(ctx, source, tmp) catch {
         std.Io.Dir.cwd().deleteFile(ctx.io, tmp) catch {};
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not decompress {s}", .{source}) catch source);
+        logCmdFail(ctx, ctx.allocator.print("could not decompress {s}", .{source}) catch source);
         return false;
     };
     // Mode goes on before the rename publishes the file: the archive is gone
@@ -1921,7 +1921,7 @@ fn stepInstallGzippedExecutable(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // never a moment where the executable is missing.
     atomic.atomicRename(ctx.io, ctx.allocator, tmp, target) catch {
         std.Io.Dir.cwd().deleteFile(ctx.io, tmp) catch {};
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not place {s}", .{target}) catch target);
+        logCmdFail(ctx, ctx.allocator.print("could not place {s}", .{target}) catch target);
         return false;
     };
     std.Io.Dir.cwd().deleteFile(ctx.io, source) catch {};
@@ -1991,11 +1991,11 @@ fn stepChangeDylibId(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 
     const entries = [_]patch.OverflowEntry{dylibIdEntry(id)};
     patch.flushOverflow(ctx.io, ctx.allocator, target, &entries) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not set the install name of {s}", .{target}) catch target);
+        logCmdFail(ctx, ctx.allocator.print("could not set the install name of {s}", .{target}) catch target);
         return false;
     };
     if (codesign.isArm64()) codesign.adHocSign(ctx.io, ctx.allocator, target) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not re-sign {s}", .{target}) catch target);
+        logCmdFail(ctx, ctx.allocator.print("could not re-sign {s}", .{target}) catch target);
         return false;
     };
     return true;
@@ -2029,7 +2029,7 @@ fn stepTerminateProcess(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (obj.get("notices")) |notices| if (notices == .array) for (notices.array.items) |item| {
         if (item != .string) continue;
         const line = expandTemplates(ctx, item.string) catch continue;
-        ctx.flog.note(std.fmt.allocPrint(ctx.allocator, "{s}\n", .{line}) catch line);
+        ctx.flog.note(ctx.allocator.print("{s}\n", .{line}) catch line);
     };
 
     // `full` matches the whole command line, which is how an app bundle
@@ -2055,10 +2055,10 @@ fn stepTerminateProcess(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // declared it must succeed turns it into an abort.
     if (getString(obj, "failure_message")) |raw| {
         const line = expandTemplates(ctx, raw) catch raw;
-        ctx.flog.note(std.fmt.allocPrint(ctx.allocator, "{s}\n", .{line}) catch line);
+        ctx.flog.note(ctx.allocator.print("{s}\n", .{line}) catch line);
     }
     if (getFlag(obj, "must_succeed")) {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} could not be terminated", .{name}) catch name);
+        logCmdFail(ctx, ctx.allocator.print("{s} could not be terminated", .{name}) catch name);
         return false;
     }
     return true;
@@ -2070,7 +2070,7 @@ fn stepTerminateProcess(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 fn regexLiteral(allocator: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (name) |c| {
-        if (std.mem.indexOfScalar(u8, ".[]()*+?{}|^$\\", c) != null) try out.append(allocator, '\\');
+        if (std.mem.findScalar(u8, ".[]()*+?{}|^$\\", c) != null) try out.append(allocator, '\\');
         try out.append(allocator, c);
     }
     return out.toOwnedSlice(allocator);
@@ -2128,7 +2128,7 @@ fn stepDeleteKeychainCertificate(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     return switch (securityOutcome(report.code, report.stderr)) {
         .deleted, .absent => true,
         .failed => {
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "security could not delete the {s} certificate", .{name}) catch "security failed");
+            logCmdFail(ctx, ctx.allocator.print("security could not delete the {s} certificate", .{name}) catch "security failed");
             return false;
         },
     };
@@ -2141,7 +2141,7 @@ const SecurityOutcome = enum { deleted, absent, failed };
 /// tells them apart, and an absent certificate is the normal first-run case.
 fn securityOutcome(code: u8, stderr: []const u8) SecurityOutcome {
     if (code == 0) return .deleted;
-    return if (std.mem.indexOf(u8, stderr, "Unable to delete certificate matching") != null) .absent else .failed;
+    return if (std.mem.find(u8, stderr, "Unable to delete certificate matching") != null) .absent else .failed;
 }
 
 // --- toolchain configuration -----------------------------------------------
@@ -2175,12 +2175,12 @@ fn writeClangConfigs(ctx: StepsCtx, macos_major: u32, kernel_major: u32) bool {
     const a = ctx.allocator;
     // Prefix-scoped `etc`, not the keg's — clang reads one shared config dir.
     const etc = resolveBase(ctx, "etc", null) orelse return false;
-    const config_dir = std.fs.path.join(a, &.{ etc, "clang" }) catch return false;
+    const config_dir = std.Io.Dir.path.join(a, &.{ etc, "clang" }) catch return false;
 
     var paths: [clang_arches.len * 2][]const u8 = undefined;
     for (clang_arches, 0..) |arch, i| {
-        paths[i * 2] = std.fmt.allocPrint(a, "{s}/{s}-apple-darwin{d}.cfg", .{ config_dir, arch, kernel_major }) catch return false;
-        paths[i * 2 + 1] = std.fmt.allocPrint(a, "{s}/{s}-apple-macosx{d}.cfg", .{ config_dir, arch, macos_major }) catch return false;
+        paths[i * 2] = a.print("{s}/{s}-apple-darwin{d}.cfg", .{ config_dir, arch, kernel_major }) catch return false;
+        paths[i * 2 + 1] = a.print("{s}/{s}-apple-macosx{d}.cfg", .{ config_dir, arch, macos_major }) catch return false;
     }
 
     // Idempotent: a complete set stays exactly as the user has it. The `else`
@@ -2189,7 +2189,7 @@ fn writeClangConfigs(ctx: StepsCtx, macos_major: u32, kernel_major: u32) bool {
         if (!fileExists(ctx.io, path)) break;
     } else return true;
 
-    const content = std.fmt.allocPrint(a, "-isysroot {s}/SDKs/MacOSX{d}.sdk\n", .{ command_line_tools, macos_major }) catch return false;
+    const content = a.print("-isysroot {s}/SDKs/MacOSX{d}.sdk\n", .{ command_line_tools, macos_major }) catch return false;
     if (!confined(ctx, config_dir)) return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, config_dir) catch {};
     for (paths) |path| {
@@ -2197,7 +2197,7 @@ fn writeClangConfigs(ctx: StepsCtx, macos_major: u32, kernel_major: u32) bool {
         // is that all six files exist, so a torn write would be mistaken for
         // a finished one and leave clang without an SDK for good.
         atomic.atomicWriteFile(ctx.io, path, content) catch {
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not write {s}", .{path}) catch path);
+            logCmdFail(ctx, ctx.allocator.print("could not write {s}", .{path}) catch path);
             return false;
         };
     }
@@ -2222,7 +2222,7 @@ fn sysctlMajor(name: [*:0]const u8) ?u32 {
     var len: usize = buf.len;
     if (std.c.sysctlbyname(name, &buf, &len, null, 0) != 0) return null;
     const text = std.mem.sliceTo(buf[0..len], 0);
-    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
+    const major = text[0 .. std.mem.findScalar(u8, text, '.') orelse text.len];
     return std.fmt.parseInt(u32, major, 10) catch null;
 }
 
@@ -2239,7 +2239,7 @@ fn runPathTool(ctx: StepsCtx, obj: std.json.ObjectMap, tool_formula: []const u8,
 
 fn stepGtkUpdateIconCache(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // brew prefers gtk4's tool when any gtk4 is installed, else gtk+3's.
-    const gtk4 = std.fmt.allocPrint(ctx.allocator, "{s}/opt/gtk4/bin/gtk4-update-icon-cache", .{ctx.prefix}) catch return false;
+    const gtk4 = ctx.allocator.print("{s}/opt/gtk4/bin/gtk4-update-icon-cache", .{ctx.prefix}) catch return false;
     if (fileExists(ctx.io, gtk4))
         return runPathTool(ctx, obj, "gtk4", "gtk4-update-icon-cache", &.{ "-q", "-t", "-f" });
     return runPathTool(ctx, obj, "gtk+3", "gtk3-update-icon-cache", &.{ "-q", "-t", "-f" });
@@ -2275,7 +2275,7 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
     const path = expandTemplates(ctx, raw) catch return null;
     const base = getString(spec, "base") orelse "absolute";
     if (std.mem.eql(u8, base, "absolute")) {
-        if (!std.fs.path.isAbsolute(path)) {
+        if (!std.Io.Dir.path.isAbsolute(path)) {
             logUnsupported(ctx, "run with a relative command");
             return null;
         }
@@ -2289,20 +2289,20 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
     // relative to, and `bin`/`libexec` would name nothing.
     if (ctx.subject == .cask) {
         const root = resolveBase(ctx, base, null) orelse {
-            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+            logUnsupported(ctx, ctx.allocator.print("run command base {s}", .{base}) catch base);
             return null;
         };
-        return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+        return std.Io.Dir.path.join(ctx.allocator, &.{ root, path }) catch null;
     }
     const tag = command_base_map.get(base) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+        logUnsupported(ctx, ctx.allocator.print("run command base {s}", .{base}) catch base);
         return null;
     };
     const root = if (tag == .keg)
         ctx.keg_path
     else
-        std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ ctx.keg_path, @tagName(tag) }) catch return null;
-    return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+        ctx.allocator.print("{s}/{s}", .{ ctx.keg_path, @tagName(tag) }) catch return null;
+    return std.Io.Dir.path.join(ctx.allocator, &.{ root, path }) catch null;
 }
 
 /// The formula's own helper: upstream's most common step, and the only one
@@ -2338,12 +2338,12 @@ fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     };
     if (!fileExists(ctx.io, cmd)) {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} not found", .{cmd}) catch cmd);
+        logCmdFail(ctx, ctx.allocator.print("{s} not found", .{cmd}) catch cmd);
         return false;
     }
     if (nativeCaBundle(ctx, argv.items, cmd)) |_| return true;
     const env = stepEnv(ctx, obj) orelse return false;
-    return spawnFenced(ctx, argv.items, env, std.fs.path.basename(cmd), .{});
+    return spawnFenced(ctx, argv.items, env, std.Io.Dir.path.basename(cmd), .{});
 }
 
 /// The step's declared `env`, values template-expanded as upstream does.
@@ -2364,7 +2364,7 @@ fn stepEnv(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const EnvVar {
         const key = entry.key_ptr.*;
         // `=` in a key smuggles a second variable into the block; NUL
         // truncates it.
-        if (key.len == 0 or std.mem.indexOfAny(u8, key, "=\x00") != null) {
+        if (key.len == 0 or std.mem.findAny(u8, key, "=\x00") != null) {
             logUnsupported(ctx, "run with an env key that is not a variable name");
             return null;
         }
@@ -2376,7 +2376,7 @@ fn stepEnv(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const EnvVar {
             },
         };
         const value = expandTemplates(ctx, raw) catch return null;
-        if (std.mem.indexOfScalar(u8, value, 0) != null) {
+        if (std.mem.findScalar(u8, value, 0) != null) {
             logUnsupported(ctx, "run with an env value that carries a NUL");
             return null;
         }
@@ -2406,8 +2406,7 @@ fn nativeCaBundle(ctx: StepsCtx, argv: []const []const u8, cmd: []const u8) ?voi
         // answering, goes unnoticed on a user's machine.
         // Name the reason: a code that recurs on every install is a systemic
         // problem, and a bare "declined" cannot be told apart from a one-off.
-        ctx.flog.note(std.fmt.allocPrint(
-            ctx.allocator,
+        ctx.flog.note(ctx.allocator.print(
             "ca-certificates: native trust-store build declined ({s}), running the shipped script",
             .{@errorName(err)},
         ) catch "ca-certificates: native trust-store build declined, running the shipped script");
@@ -2428,7 +2427,7 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // own linker points `{prefix}/share/<name>` entries into the keg, and the
     // real source is one of them. Resolve first, then confine where it landed.
     try validatePath(ctx, argv[1]);
-    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // Read the resolved path, not the one handed in: opening the link again
     // would follow whatever it points at now, not what was just confined.
     const source_path = try sandbox.resolveConfined(ctx.io, &real_buf, argv[1], ctx.keg_path, ctx.prefix);
@@ -2445,7 +2444,7 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
         .prefix = ctx.prefix,
     });
 
-    const dir = std.fs.path.dirname(argv[2]) orelse return error.NoParentDirectory;
+    const dir = std.Io.Dir.path.dirname(argv[2]) orelse return error.NoParentDirectory;
     // Confine before creating, not after: `validatePath` above is lexical, so
     // a destination under a symlinked directory inside the keg passes it, and
     // creating the tree first would plant directories wherever that link
@@ -2479,7 +2478,7 @@ const initialiser_map = std.StaticStringMap(enum { postgresql_initdb, mysql_init
 
 fn initDataDirPlan(ctx: StepsCtx, using: []const u8, datadir: []const u8, locale: ?[]const u8) ?InitDataDirPlan {
     const a = ctx.allocator;
-    const tmpdir = std.fmt.allocPrint(a, "{s}/var/tmp", .{ctx.prefix}) catch return null;
+    const tmpdir = a.print("{s}/var/tmp", .{ctx.prefix}) catch return null;
 
     const tag = initialiser_map.get(using) orelse return null;
 
@@ -2487,11 +2486,11 @@ fn initDataDirPlan(ctx: StepsCtx, using: []const u8, datadir: []const u8, locale
     // before the shared mysql/mariadb shape below.
     if (tag == .postgresql_initdb) {
         var argv = std.ArrayList([]const u8).empty;
-        argv.append(a, std.fmt.allocPrint(a, "{s}/bin/initdb", .{ctx.keg_path}) catch return null) catch return null;
-        argv.append(a, std.fmt.allocPrint(a, "--locale={s}", .{locale orelse "en_US.UTF-8"}) catch return null) catch return null;
+        argv.append(a, a.print("{s}/bin/initdb", .{ctx.keg_path}) catch return null) catch return null;
+        argv.append(a, a.print("--locale={s}", .{locale orelse "en_US.UTF-8"}) catch return null) catch return null;
         argv.appendSlice(a, &.{ "-E", "UTF-8", datadir }) catch return null;
         return .{
-            .marker = std.fmt.allocPrint(a, "{s}/PG_VERSION", .{datadir}) catch return null,
+            .marker = a.print("{s}/PG_VERSION", .{datadir}) catch return null,
             .argv = argv.items,
         };
     }
@@ -2503,17 +2502,17 @@ fn initDataDirPlan(ctx: StepsCtx, using: []const u8, datadir: []const u8, locale
     };
 
     var argv = std.ArrayList([]const u8).empty;
-    argv.append(a, std.fmt.allocPrint(a, "{s}/bin/{s}", .{ ctx.keg_path, mysql_like.exe }) catch return null) catch return null;
+    argv.append(a, a.print("{s}/bin/{s}", .{ ctx.keg_path, mysql_like.exe }) catch return null) catch return null;
     argv.append(a, mysql_like.first) catch return null;
     // `--user` only matters when running as root (mysqld setuids then);
     // malt installs as the invoking user, so a missing USER is benign.
     if (std.process.Environ.getPosix(ctx.environ, "USER")) |user|
-        argv.append(a, std.fmt.allocPrint(a, "--user={s}", .{user}) catch return null) catch return null;
-    argv.append(a, std.fmt.allocPrint(a, "--basedir={s}", .{ctx.keg_path}) catch return null) catch return null;
-    argv.append(a, std.fmt.allocPrint(a, "--datadir={s}", .{datadir}) catch return null) catch return null;
-    argv.append(a, std.fmt.allocPrint(a, "--tmpdir={s}", .{tmpdir}) catch return null) catch return null;
+        argv.append(a, a.print("--user={s}", .{user}) catch return null) catch return null;
+    argv.append(a, a.print("--basedir={s}", .{ctx.keg_path}) catch return null) catch return null;
+    argv.append(a, a.print("--datadir={s}", .{datadir}) catch return null) catch return null;
+    argv.append(a, a.print("--tmpdir={s}", .{tmpdir}) catch return null) catch return null;
     return .{
-        .marker = std.fmt.allocPrint(a, "{s}/{s}", .{ datadir, mysql_like.marker_rel }) catch return null,
+        .marker = a.print("{s}/{s}", .{ datadir, mysql_like.marker_rel }) catch return null,
         .argv = argv.items,
     };
 }
@@ -2526,7 +2525,7 @@ fn stepInitDataDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const datadir = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, datadir)) return false;
     const plan = initDataDirPlan(ctx, using, datadir, getString(obj, "locale")) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "init_data_dir ({s})", .{using}) catch using);
+        logUnsupported(ctx, ctx.allocator.print("init_data_dir ({s})", .{using}) catch using);
         return false;
     };
     // An initialised (or otherwise pre-populated) data dir is user data —
@@ -2536,13 +2535,13 @@ fn stepInitDataDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const preexisted = fileExists(ctx.io, plan.marker) or dirExists(ctx.io, datadir);
     if (fileExists(ctx.io, plan.marker)) return true;
     if (!fileExists(ctx.io, plan.argv[0])) {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} initialiser not found in the keg", .{using}) catch using);
+        logCmdFail(ctx, ctx.allocator.print("{s} initialiser not found in the keg", .{using}) catch using);
         return false;
     }
     std.Io.Dir.cwd().createDirPath(ctx.io, datadir) catch {};
     // Never pre-create the marker's parent: the initialisers refuse a
     // non-empty data dir, and they create their own subtrees.
-    const tmpdir = std.fmt.allocPrint(ctx.allocator, "{s}/var/tmp", .{ctx.prefix}) catch return false;
+    const tmpdir = ctx.allocator.print("{s}/var/tmp", .{ctx.prefix}) catch return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, tmpdir) catch {};
     // initdb takes no --tmpdir, so TMPDIR is the only way to keep its scratch
     // space inside the prefix, where the fence grants file creation.
@@ -2572,15 +2571,15 @@ const GdkPixbufEnv = struct {
 /// (and exits 0 even when that write fails). Derive the malt-prefix pair
 /// from the keg's versioned module dir instead.
 pub fn gdkPixbufEnvPaths(ctx: StepsCtx) ?GdkPixbufEnv {
-    const opt_moddir = std.fmt.allocPrint(ctx.allocator, "{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0", .{ctx.prefix}) catch return null;
+    const opt_moddir = ctx.allocator.print("{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0", .{ctx.prefix}) catch return null;
     var dir = std.Io.Dir.openDirAbsolute(ctx.io, opt_moddir, .{ .iterate = true }) catch return null;
     defer dir.close(ctx.io);
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
         if (entry.kind != .directory) continue;
         return .{
-            .moduledir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/gdk-pixbuf-2.0/{s}/loaders", .{ ctx.prefix, entry.name }) catch return null,
-            .module_file = std.fmt.allocPrint(ctx.allocator, "{s}/lib/gdk-pixbuf-2.0/{s}/loaders.cache", .{ ctx.prefix, entry.name }) catch return null,
+            .moduledir = ctx.allocator.print("{s}/lib/gdk-pixbuf-2.0/{s}/loaders", .{ ctx.prefix, entry.name }) catch return null,
+            .module_file = ctx.allocator.print("{s}/lib/gdk-pixbuf-2.0/{s}/loaders.cache", .{ ctx.prefix, entry.name }) catch return null,
         };
     }
     return null;
@@ -2609,9 +2608,9 @@ fn runFormulaTool(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, args
 }
 
 fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, args: []const []const u8, extra_env: []const EnvVar) bool {
-    const tool = std.fmt.allocPrint(ctx.allocator, "{s}/opt/{s}/bin/{s}", .{ ctx.prefix, tool_formula, exe }) catch return false;
+    const tool = ctx.allocator.print("{s}/opt/{s}/bin/{s}", .{ ctx.prefix, tool_formula, exe }) catch return false;
     if (!fileExists(ctx.io, tool)) {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} not found (is {s} installed?)", .{ exe, tool_formula }) catch exe);
+        logCmdFail(ctx, ctx.allocator.print("{s} not found (is {s} installed?)", .{ exe, tool_formula }) catch exe);
         return false;
     }
 
@@ -2648,13 +2647,13 @@ fn caskWriteDirs(ctx: StepsCtx) error{OutOfMemory}!CaskWriteDirs {
     var allow: std.ArrayList([]const u8) = .empty;
     var deny: std.ArrayList([]const u8) = .empty;
     if (saneRoot(c.home)) {
-        const home_lib = try std.fs.path.join(a, &.{ c.home, "Library" });
+        const home_lib = try std.Io.Dir.path.join(a, &.{ c.home, "Library" });
         try allow.append(a, home_lib);
-        for (protected_home_trees) |sub| try deny.append(a, try std.fs.path.join(a, &.{ home_lib, sub }));
+        for (protected_home_trees) |sub| try deny.append(a, try std.Io.Dir.path.join(a, &.{ home_lib, sub }));
     }
     if (saneRoot(c.appdir)) try allow.append(a, c.appdir);
     if (saneRoot(c.staged_path)) try allow.append(a, c.staged_path);
-    for ([_][]const u8{ "bin", "tmp" }) |sub| try allow.append(a, try std.fs.path.join(a, &.{ ctx.prefix, sub }));
+    for ([_][]const u8{ "bin", "tmp" }) |sub| try allow.append(a, try std.Io.Dir.path.join(a, &.{ ctx.prefix, sub }));
     return .{ .allow = allow.items, .deny = deny.items };
 }
 
@@ -2673,7 +2672,7 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
     // The kernel fence must admit what the argv lint admits, or a cask's
     // step is killed writing to the appdir the lint just approved.
     const cask_dirs = caskWriteDirs(ctx) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
+        logCmdFail(ctx, ctx.allocator.print("{s} failed to spawn", .{label}) catch label);
         return false;
     };
     profile_opts.write_dirs = cask_dirs.allow;
@@ -2684,7 +2683,7 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
     };
 
     var env_map = buildChildEnv(ctx, extra_env) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
+        logCmdFail(ctx, ctx.allocator.print("{s} failed to spawn", .{label}) catch label);
         return false;
     };
     defer env_map.deinit();
@@ -2703,19 +2702,19 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
         .stderr = sandbox_macos.childStdioMode(false, raw),
         .environ_map = &env_map,
     }) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
+        logCmdFail(ctx, ctx.allocator.print("{s} failed to spawn", .{label}) catch label);
         return false;
     };
     const term = sandbox_macos.waitSanitizedChild(ctx.io, &child, .{}) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} did not terminate cleanly", .{label}) catch label);
+        logCmdFail(ctx, ctx.allocator.print("{s} did not terminate cleanly", .{label}) catch label);
         return false;
     };
     switch (term) {
         .exited => |code| {
             if (code == 0) return true;
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} exited with code {d}", .{ label, code }) catch label);
+            logCmdFail(ctx, ctx.allocator.print("{s} exited with code {d}", .{ label, code }) catch label);
         },
-        else => logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} terminated abnormally", .{label}) catch label),
+        else => logCmdFail(ctx, ctx.allocator.print("{s} terminated abnormally", .{label}) catch label),
     }
     return false;
 }
@@ -2769,7 +2768,7 @@ fn logCmdFail(ctx: StepsCtx, detail: []const u8) void {
 /// A failed filesystem write is as fatal as a failed command: counted as
 /// handled, it would report a step that left nothing on disk as done.
 fn ioFail(ctx: StepsCtx, step: []const u8, path: []const u8, e: anyerror) bool {
-    logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} {s}: {s}", .{ step, path, @errorName(e) }) catch step);
+    logCmdFail(ctx, ctx.allocator.print("{s} {s}: {s}", .{ step, path, @errorName(e) }) catch step);
     return false;
 }
 
@@ -2795,8 +2794,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -2808,8 +2806,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -2830,7 +2827,7 @@ fn uniquePrefix(io: std.Io) ![]u8 {
     var rand: [8]u8 = undefined;
     io.random(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
-    const p = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_steps_{s}", .{hex[0..]});
+    const p = try testing.allocator.print("/tmp/malt_steps_{s}", .{hex[0..]});
     try std.Io.Dir.cwd().createDirPath(io, p);
     return p;
 }
@@ -2852,7 +2849,7 @@ const TestHarness = struct {
         errdefer testing.allocator.free(prefix);
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         errdefer arena.deinit();
-        const keg = try std.fmt.allocPrint(arena.allocator(), "{s}/Cellar/glow/1.2.3", .{prefix});
+        const keg = try arena.allocator().print("{s}/Cellar/glow/1.2.3", .{prefix});
         try std.Io.Dir.cwd().createDirPath(io, keg);
         return .{
             .arena = arena,
@@ -2895,9 +2892,9 @@ const CaskHarness = struct {
         errdefer h.deinit();
         const home = try uniquePrefix(h.io);
         errdefer testing.allocator.free(home);
-        try std.Io.Dir.cwd().createDirPath(h.io, try std.fs.path.join(h.arena.allocator(), &.{ home, "Library" }));
-        try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/Caskroom/box/1.2.3", .{h.prefix}));
-        try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/Applications", .{h.prefix}));
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.Io.Dir.path.join(h.arena.allocator(), &.{ home, "Library" }));
+        try std.Io.Dir.cwd().createDirPath(h.io, try h.arena.allocator().print("{s}/Caskroom/box/1.2.3", .{h.prefix}));
+        try std.Io.Dir.cwd().createDirPath(h.io, try h.arena.allocator().print("{s}/Applications", .{h.prefix}));
         return .{ .h = h, .home = home };
     }
 
@@ -2905,11 +2902,11 @@ const CaskHarness = struct {
         const a = self.h.arena.allocator();
         var c = self.h.ctx();
         c.name = "box";
-        c.keg_path = std.fmt.allocPrint(a, "{s}/Caskroom/box", .{self.h.prefix}) catch @panic("OOM");
+        c.keg_path = a.print("{s}/Caskroom/box", .{self.h.prefix}) catch @panic("OOM");
         c.subject = .{ .cask = .{
-            .staged_path = std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{self.h.prefix}) catch @panic("OOM"),
+            .staged_path = a.print("{s}/Caskroom/box/1.2.3", .{self.h.prefix}) catch @panic("OOM"),
             .caskroom_path = c.keg_path,
-            .appdir = std.fmt.allocPrint(a, "{s}/Applications", .{self.h.prefix}) catch @panic("OOM"),
+            .appdir = a.print("{s}/Applications", .{self.h.prefix}) catch @panic("OOM"),
             .home = self.home,
         } };
         return c;
@@ -2934,11 +2931,11 @@ test "cask subject resolves home, appdir, caskroom_path and staged_path bases" {
     const a = ch.h.arena.allocator();
 
     try testing.expectEqualStrings(ch.home, resolveBase(c, "home", null).?);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Applications", .{ch.h.prefix}), resolveBase(c, "appdir", null).?);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box", .{ch.h.prefix}), resolveBase(c, "caskroom_path", null).?);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix}), resolveBase(c, "staged_path", null).?);
+    try testing.expectEqualStrings(try a.print("{s}/Applications", .{ch.h.prefix}), resolveBase(c, "appdir", null).?);
+    try testing.expectEqualStrings(try a.print("{s}/Caskroom/box", .{ch.h.prefix}), resolveBase(c, "caskroom_path", null).?);
+    try testing.expectEqualStrings(try a.print("{s}/Caskroom/box/1.2.3", .{ch.h.prefix}), resolveBase(c, "staged_path", null).?);
     try testing.expectEqualStrings(ch.h.prefix, resolveBase(c, "homebrew_prefix", null).?);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/etc/pg", .{ch.h.prefix}), resolveBase(c, "formula_pkgetc", "pg").?);
+    try testing.expectEqualStrings(try a.print("{s}/etc/pg", .{ch.h.prefix}), resolveBase(c, "formula_pkgetc", "pg").?);
     // Keg-shaped bases mean nothing for a cask: refuse rather than guess.
     try testing.expect(resolveBase(c, "prefix", null) == null);
     try testing.expect(resolveBase(c, "bin", null) == null);
@@ -2954,9 +2951,9 @@ test "home base refuses paths outside $HOME/Library" {
         \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/Application Support/box/roms"}},
         \\ {"type":"write","path":{"base":"home","path":".ssh/config"},"content":"Host *"}]
     ));
-    const roms = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, "Library/Application Support/box/roms" });
+    const roms = try std.Io.Dir.path.join(ch.h.arena.allocator(), &.{ ch.home, "Library/Application Support/box/roms" });
     try testing.expect(dirExists(c.io, roms));
-    const ssh = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, ".ssh/config" });
+    const ssh = try std.Io.Dir.path.join(ch.h.arena.allocator(), &.{ ch.home, ".ssh/config" });
     try testing.expect(!pathExists(c.io, ssh));
     try testing.expect(ch.h.flog.hasFatal());
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
@@ -2967,7 +2964,7 @@ test "the appdir root admits a write the prefix would not" {
     defer ch.deinit();
     var c = ch.ctx();
     // Point appdir outside the prefix, as a real /Applications is.
-    const appdir = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, "Apps" });
+    const appdir = try std.Io.Dir.path.join(ch.h.arena.allocator(), &.{ ch.home, "Apps" });
     try std.Io.Dir.cwd().createDirPath(c.io, appdir);
     c.subject.cask.appdir = appdir;
 
@@ -2975,7 +2972,7 @@ test "the appdir root admits a write the prefix would not" {
         \\[{"type":"touch","path":{"base":"appdir","path":"Box.app"}}]
     ));
     try testing.expect(!ch.h.flog.hasErrors());
-    try testing.expect(fileExists(c.io, try std.fs.path.join(ch.h.arena.allocator(), &.{ appdir, "Box.app" })));
+    try testing.expect(fileExists(c.io, try std.Io.Dir.path.join(ch.h.arena.allocator(), &.{ appdir, "Box.app" })));
 }
 
 test "{{version.major}} and {{version.major_minor}} expand from the cask version" {
@@ -2987,10 +2984,10 @@ test "{{version.major}} and {{version.major_minor}} expand from the cask version
     try testing.expectEqualStrings("Box 1", try expandTemplates(c, "Box {{version.major}}"));
     try testing.expectEqualStrings("j1.2/bin", try expandTemplates(c, "j{{version.major_minor}}/bin"));
     try testing.expectEqualStrings("box-1.2.3", try expandTemplates(c, "{{token}}-{{version}}"));
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/x", .{ch.h.prefix}), try expandTemplates(c, "{{staged_path}}/x"));
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/latest", .{ch.h.prefix}), try expandTemplates(c, "{{caskroom_path}}/latest"));
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Applications/A.app", .{ch.h.prefix}), try expandTemplates(c, "{{appdir}}/A.app"));
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/lib", .{ch.h.prefix}), try expandTemplates(c, "{{HOMEBREW_PREFIX}}/lib"));
+    try testing.expectEqualStrings(try a.print("{s}/Caskroom/box/1.2.3/x", .{ch.h.prefix}), try expandTemplates(c, "{{staged_path}}/x"));
+    try testing.expectEqualStrings(try a.print("{s}/Caskroom/box/latest", .{ch.h.prefix}), try expandTemplates(c, "{{caskroom_path}}/latest"));
+    try testing.expectEqualStrings(try a.print("{s}/Applications/A.app", .{ch.h.prefix}), try expandTemplates(c, "{{appdir}}/A.app"));
+    try testing.expectEqualStrings(try a.print("{s}/lib", .{ch.h.prefix}), try expandTemplates(c, "{{HOMEBREW_PREFIX}}/lib"));
     // Keg-only tokens stay verbatim under a cask, so they surface as unresolved.
     try testing.expectEqualStrings("{{bin}}/x", try expandTemplates(c, "{{bin}}/x"));
 }
@@ -3005,8 +3002,7 @@ test "a formula subject still refuses the home base and the cask tokens" {
 }
 
 fn testFormulaJson(h: *TestHarness, steps_json: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(
-        h.arena.allocator(),
+    return h.arena.allocator().print(
         \\{{"name":"glow","versions":{{"stable":"1.2.3"}},"post_install_defined":false,"post_install_steps":{s}}}
     ,
         .{steps_json},
@@ -3052,18 +3048,18 @@ test "resolveBase maps every observed upstream token into the malt prefix" {
     const a = h.arena.allocator();
 
     const cases = [_]struct { base: []const u8, formula: ?[]const u8, want: []const u8 }{
-        .{ .base = "homebrew_prefix", .formula = null, .want = try std.fmt.allocPrint(a, "{s}", .{h.prefix}) },
+        .{ .base = "homebrew_prefix", .formula = null, .want = try a.print("{s}", .{h.prefix}) },
         .{ .base = "prefix", .formula = null, .want = h.keg },
-        .{ .base = "opt_prefix", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/opt/glow", .{h.prefix}) },
-        .{ .base = "var", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/var", .{h.prefix}) },
-        .{ .base = "etc", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}) },
-        .{ .base = "lib", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/lib", .{h.prefix}) },
-        .{ .base = "bin", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix}) },
-        .{ .base = "pkgetc", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/etc/glow", .{h.prefix}) },
-        .{ .base = "pkgshare", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/share/glow", .{h.prefix}) },
-        .{ .base = "opt_pkgshare", .formula = null, .want = try std.fmt.allocPrint(a, "{s}/opt/glow/share/glow", .{h.prefix}) },
-        .{ .base = "formula_pkgetc", .formula = "ca-certificates", .want = try std.fmt.allocPrint(a, "{s}/etc/ca-certificates", .{h.prefix}) },
-        .{ .base = "formula_opt_prefix", .formula = "ca-certificates", .want = try std.fmt.allocPrint(a, "{s}/opt/ca-certificates", .{h.prefix}) },
+        .{ .base = "opt_prefix", .formula = null, .want = try a.print("{s}/opt/glow", .{h.prefix}) },
+        .{ .base = "var", .formula = null, .want = try a.print("{s}/var", .{h.prefix}) },
+        .{ .base = "etc", .formula = null, .want = try a.print("{s}/etc", .{h.prefix}) },
+        .{ .base = "lib", .formula = null, .want = try a.print("{s}/lib", .{h.prefix}) },
+        .{ .base = "bin", .formula = null, .want = try a.print("{s}/bin", .{h.prefix}) },
+        .{ .base = "pkgetc", .formula = null, .want = try a.print("{s}/etc/glow", .{h.prefix}) },
+        .{ .base = "pkgshare", .formula = null, .want = try a.print("{s}/share/glow", .{h.prefix}) },
+        .{ .base = "opt_pkgshare", .formula = null, .want = try a.print("{s}/opt/glow/share/glow", .{h.prefix}) },
+        .{ .base = "formula_pkgetc", .formula = "ca-certificates", .want = try a.print("{s}/etc/ca-certificates", .{h.prefix}) },
+        .{ .base = "formula_opt_prefix", .formula = "ca-certificates", .want = try a.print("{s}/opt/ca-certificates", .{h.prefix}) },
     };
     for (cases) |case| {
         const got = resolveBase(c, case.base, case.formula) orelse return error.TestUnexpectedResult;
@@ -3091,8 +3087,8 @@ test "execute returns false when the formula carries no steps" {
 /// Seed `<prefix>/etc/<rel>` with `body` and return its absolute path.
 fn seedEtc(h: *TestHarness, rel: []const u8, body: []const u8) ![]const u8 {
     const a = h.arena.allocator();
-    const path = try std.fmt.allocPrint(a, "{s}/etc/{s}", .{ h.prefix, rel });
-    if (std.fs.path.dirname(path)) |d| try std.Io.Dir.cwd().createDirPath(h.io, d);
+    const path = try a.print("{s}/etc/{s}", .{ h.prefix, rel });
+    if (std.Io.Dir.path.dirname(path)) |d| try std.Io.Dir.cwd().createDirPath(h.io, d);
     const f = try std.Io.Dir.createFileAbsolute(h.io, path, .{});
     try f.writeStreamingAll(h.io, body);
     f.close(h.io);
@@ -3108,9 +3104,9 @@ fn writeAt(h: *TestHarness, path: []const u8, bytes: []const u8) !void {
 /// node's shape, the one the copy step exists to serve: npm in the keg.
 fn seedNpmSrc(h: *TestHarness, version: []const u8) ![]const u8 {
     const a = h.arena.allocator();
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm", .{h.keg});
+    const src = try a.print("{s}/libexec/lib/node_modules/npm", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
-    try writeAt(h, try std.fmt.allocPrint(a, "{s}/version.txt", .{src}), version);
+    try writeAt(h, try a.print("{s}/version.txt", .{src}), version);
     return src;
 }
 
@@ -3137,7 +3133,7 @@ fn blockTree(h: *TestHarness, path: []const u8) !std.Io.File {
 
 fn expectNoScratch(h: *TestHarness, dest: []const u8) !void {
     for ([_][]const u8{ ".malt-incoming", ".malt-replaced" }) |suffix| {
-        const leftover = try std.fmt.allocPrint(h.arena.allocator(), "{s}{s}", .{ dest, suffix });
+        const leftover = try h.arena.allocator().print("{s}{s}", .{ dest, suffix });
         try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, leftover, .{}));
     }
 }
@@ -3184,9 +3180,9 @@ test "execute refuses inreplace through a source symlink outside the prefix" {
         try f.writeStreamingAll(h.io, "PRIVATE");
     }
 
-    const etc = try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix});
+    const etc = try a.print("{s}/etc", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, etc);
-    const link = try std.fmt.allocPrint(a, "{s}/leak.conf", .{etc});
+    const link = try a.print("{s}/leak.conf", .{etc});
     try std.Io.Dir.symLinkAbsolute(h.io, victim, link, .{});
 
     _ = execute(h.ctx(), try testFormulaJson(&h,
@@ -3195,7 +3191,7 @@ test "execute refuses inreplace through a source symlink outside the prefix" {
     ));
 
     try testing.expect(h.flog.hasFatal());
-    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(h.io, link, &target_buf);
 }
 
@@ -3227,7 +3223,7 @@ test "execute skips an inreplace whose if_exists guard is unmet" {
     );
     try testing.expect(execute(h.ctx(), json));
     try testing.expect(!h.flog.hasErrors());
-    const missing = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/absent.conf", .{h.prefix});
+    const missing = try h.arena.allocator().print("{s}/etc/absent.conf", .{h.prefix});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, missing, .{}));
 }
 
@@ -3348,9 +3344,9 @@ test "execute refuses a remove that carries no target guard" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    const bin = try a.print("{s}/bin", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, bin);
-    const victim = try std.fmt.allocPrint(a, "{s}/keepme", .{bin});
+    const victim = try a.print("{s}/keepme", .{bin});
     (try std.Io.Dir.createFileAbsolute(h.io, victim, .{})).close(h.io);
 
     const json = try testFormulaJson(&h,
@@ -3366,16 +3362,16 @@ test "execute refuses to remove a path outside the prefix" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const outside = try std.fmt.allocPrint(a, "{s}-escape", .{h.prefix});
+    const outside = try a.print("{s}-escape", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, outside);
     defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
-    const dest = try std.fmt.allocPrint(a, "{s}/Cellar/glow/x", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(dest).?);
+    const dest = try a.print("{s}/Cellar/glow/x", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(dest).?);
     (try std.Io.Dir.createFileAbsolute(h.io, dest, .{})).close(h.io);
-    const link = try std.fmt.allocPrint(a, "{s}/victim", .{outside});
+    const link = try a.print("{s}/victim", .{outside});
     try std.Io.Dir.symLinkAbsolute(h.io, dest, link, .{});
 
-    const json = try std.fmt.allocPrint(a,
+    const json = try a.print(
         \\{{"name":"glow","versions":{{"stable":"1.2.3"}},"post_install_steps":[
         \\ {{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{{"base":"absolute","path":"{s}"}}]}}]}}
     , .{link});
@@ -3400,9 +3396,9 @@ test "execute links keg-relative template paths into the prefix" {
     const seeds = [_][]const u8{ "bin", "etc/bash_completion.d", "share/zsh/site-functions", "share/fish/vendor_completions.d", "share/pwsh/completions" };
     const leaves = [_][]const u8{ "glow", "glow", "_glow", "glow.fish", "_glow.ps1" };
     for (seeds, leaves) |dir, leaf| {
-        const d = try std.fmt.allocPrint(a, "{s}/{s}", .{ h.keg, dir });
+        const d = try a.print("{s}/{s}", .{ h.keg, dir });
         try std.Io.Dir.cwd().createDirPath(io, d);
-        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/{s}", .{ d, leaf }), .{});
+        const f = try std.Io.Dir.createFileAbsolute(io, try a.print("{s}/{s}", .{ d, leaf }), .{});
         f.close(io);
     }
 
@@ -3418,11 +3414,11 @@ test "execute links keg-relative template paths into the prefix" {
     try testing.expectEqual(@as(usize, 5), h.flog.handled_top_level);
 
     const links = [_][]const u8{
-        try std.fmt.allocPrint(a, "{s}/bin/glow", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/etc/bash_completion.d/glow", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/share/zsh/site-functions/_glow", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/share/fish/vendor_completions.d/glow.fish", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/share/pwsh/completions/_glow.ps1", .{h.prefix}),
+        try a.print("{s}/bin/glow", .{h.prefix}),
+        try a.print("{s}/etc/bash_completion.d/glow", .{h.prefix}),
+        try a.print("{s}/share/zsh/site-functions/_glow", .{h.prefix}),
+        try a.print("{s}/share/fish/vendor_completions.d/glow.fish", .{h.prefix}),
+        try a.print("{s}/share/pwsh/completions/_glow.ps1", .{h.prefix}),
     };
     for (links) |p| try std.Io.Dir.accessAbsolute(io, p, .{});
 }
@@ -3433,11 +3429,11 @@ test "execute removes a symlink whose target matches the guard" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    const bin = try a.print("{s}/bin", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const stale = try std.fmt.allocPrint(a, "{s}/glow-init", .{bin});
-    const dest = try std.fmt.allocPrint(a, "{s}/bin/glow", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/bin", .{h.keg}));
+    const stale = try a.print("{s}/glow-init", .{bin});
+    const dest = try a.print("{s}/bin/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/bin", .{h.keg}));
     (try std.Io.Dir.createFileAbsolute(io, dest, .{})).close(io);
     try std.Io.Dir.symLinkAbsolute(io, dest, stale, .{});
 
@@ -3457,9 +3453,9 @@ test "execute leaves a regular file alone on remove" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    const bin = try a.print("{s}/bin", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const real = try std.fmt.allocPrint(a, "{s}/glow-init", .{bin});
+    const real = try a.print("{s}/glow-init", .{bin});
     (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
 
     const json = try testFormulaJson(&h,
@@ -3475,11 +3471,11 @@ test "execute keeps a symlink whose target does not match the guard" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    const bin = try a.print("{s}/bin", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const link = try std.fmt.allocPrint(a, "{s}/glow-init", .{bin});
-    const dest = try std.fmt.allocPrint(a, "{s}/etc/elsewhere", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    const link = try a.print("{s}/glow-init", .{bin});
+    const dest = try a.print("{s}/etc/elsewhere", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/etc", .{h.prefix}));
     (try std.Io.Dir.createFileAbsolute(io, dest, .{})).close(io);
     try std.Io.Dir.symLinkAbsolute(io, dest, link, .{});
 
@@ -3498,9 +3494,9 @@ test "an unmet guard holds back every step type, not just the few that checked" 
     const io = h.io;
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/share/glow", .{h.keg});
+    const src = try a.print("{s}/share/glow", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(io, src);
-    const seed = try std.fmt.allocPrint(a, "{s}/glow.dat", .{src});
+    const seed = try a.print("{s}/glow.dat", .{src});
     (try std.Io.Dir.createFileAbsolute(io, seed, .{})).close(io);
 
     const json = try testFormulaJson(&h,
@@ -3516,7 +3512,7 @@ test "an unmet guard holds back every step type, not just the few that checked" 
     try testing.expect(!h.flog.hasErrors());
 
     for ([_][]const u8{ "/share/copied", "/share/made", "/etc/glow.conf" }) |leaf| {
-        const p = try std.fmt.allocPrint(a, "{s}{s}", .{ h.prefix, leaf });
+        const p = try a.print("{s}{s}", .{ h.prefix, leaf });
         try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, p, .{}));
     }
 }
@@ -3529,9 +3525,9 @@ test "an unless_exists guard protects a file the user already has" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const varcfg = try std.fmt.allocPrint(a, "{s}/var/app", .{h.prefix});
+    const varcfg = try a.print("{s}/var/app", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, varcfg);
-    const existing = try std.fmt.allocPrint(a, "{s}/app.conf", .{varcfg});
+    const existing = try a.print("{s}/app.conf", .{varcfg});
     {
         const f = try std.Io.Dir.createFileAbsolute(io, existing, .{ .truncate = true });
         defer f.close(io);
@@ -3559,7 +3555,7 @@ test "an unless_exists guard lets the step run when the path is absent" {
     );
     try testing.expect(execute(h.ctx(), json));
     try testing.expect(!h.flog.hasErrors());
-    const written = try std.fmt.allocPrint(a, "{s}/var/app/app.conf", .{h.prefix});
+    const written = try a.print("{s}/var/app/app.conf", .{h.prefix});
     try std.Io.Dir.accessAbsolute(h.io, written, .{});
 }
 
@@ -3572,8 +3568,8 @@ test "a guard resolves its base like the step it gates" {
     const a = h.arena.allocator();
 
     // Only the base-resolved location exists; the bare relative path does not.
-    const seeded = try std.fmt.allocPrint(a, "{s}/var/marker", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/var", .{h.prefix}));
+    const seeded = try a.print("{s}/var/marker", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/var", .{h.prefix}));
     (try std.Io.Dir.createFileAbsolute(io, seeded, .{})).close(io);
 
     const json = try testFormulaJson(&h,
@@ -3581,7 +3577,7 @@ test "a guard resolves its base like the step it gates" {
         \\  "guards":[{"base":"var","path":"marker","condition":"if_exists","id":"1"}]}]
     );
     try testing.expect(execute(h.ctx(), json));
-    try std.Io.Dir.accessAbsolute(io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{});
+    try std.Io.Dir.accessAbsolute(io, try a.print("{s}/var/made", .{h.prefix}), .{});
 }
 
 test "the on guard admits a macOS step and skips a Linux one silently" {
@@ -3599,10 +3595,10 @@ test "the on guard admits a macOS step and skips a Linux one silently" {
     );
     try testing.expect(execute(h.ctx(), json));
     try testing.expect(!h.flog.hasErrors());
-    try std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/mac", .{h.prefix}), .{});
+    try std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/var/mac", .{h.prefix}), .{});
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/linux", .{h.prefix}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/var/linux", .{h.prefix}), .{}),
     );
 }
 
@@ -3621,7 +3617,7 @@ test "the on guard routes an unknown platform value loudly" {
     try testing.expect(h.flog.hasErrors());
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/var/made", .{h.prefix}), .{}),
     );
 }
 
@@ -3643,7 +3639,7 @@ test "the libexec base resolves inside the keg, matching a run command's libexec
     const c = h.ctx();
 
     const resolved = resolveBase(c, "libexec", null).?;
-    const expected = try std.fmt.allocPrint(h.arena.allocator(), "{s}/libexec", .{h.keg});
+    const expected = try h.arena.allocator().print("{s}/libexec", .{h.keg});
     try testing.expectEqualStrings(expected, resolved);
 }
 
@@ -3658,7 +3654,7 @@ test "a key the executor does honour is not mistaken for an unknown one" {
     );
     try testing.expect(execute(h.ctx(), json));
     for (h.flog.entries()) |e| {
-        try testing.expect(std.mem.indexOf(u8, e.detail, "locale") == null);
+        try testing.expect(std.mem.find(u8, e.detail, "locale") == null);
     }
 }
 
@@ -3705,9 +3701,9 @@ test "execute removes a directory tree when the guard finds it" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const doomed = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    const doomed = try a.print("{s}/lib/node_modules/npm", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, doomed);
-    const child = try std.fmt.allocPrint(a, "{s}/index.js", .{doomed});
+    const child = try a.print("{s}/index.js", .{doomed});
     (try std.Io.Dir.createFileAbsolute(io, child, .{})).close(io);
 
     const json = try testFormulaJson(&h,
@@ -3729,7 +3725,7 @@ test "execute refuses a recursive remove that would take a whole prefix dir" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const lib = try std.fmt.allocPrint(a, "{s}/lib", .{h.prefix});
+    const lib = try a.print("{s}/lib", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, lib);
 
     const json = try testFormulaJson(&h,
@@ -3751,14 +3747,14 @@ test "a recursive remove unlinks a symlinked target instead of emptying it" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const precious = try std.fmt.allocPrint(a, "{s}/etc/precious", .{h.prefix});
+    const precious = try a.print("{s}/etc/precious", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, precious);
-    const kept = try std.fmt.allocPrint(a, "{s}/keep.conf", .{precious});
+    const kept = try a.print("{s}/keep.conf", .{precious});
     (try std.Io.Dir.createFileAbsolute(io, kept, .{})).close(io);
 
-    const parent = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    const parent = try a.print("{s}/lib/node_modules", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, parent);
-    const link = try std.fmt.allocPrint(a, "{s}/npm", .{parent});
+    const link = try a.print("{s}/npm", .{parent});
     try std.Io.Dir.symLinkAbsolute(io, precious, link, .{});
 
     const json = try testFormulaJson(&h,
@@ -3787,13 +3783,13 @@ test "execute links every source_glob match into the target directory" {
     const io = h.io;
     const a = h.arena.allocator();
 
-    const man_src = try std.fmt.allocPrint(a, "{s}/share/glow/man1", .{h.keg});
+    const man_src = try a.print("{s}/share/glow/man1", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(io, man_src);
     for ([_][]const u8{ "npm.1", "npx.1", "package-json.1", "unrelated.1" }) |leaf| {
-        const p = try std.fmt.allocPrint(a, "{s}/{s}", .{ man_src, leaf });
+        const p = try a.print("{s}/{s}", .{ man_src, leaf });
         (try std.Io.Dir.createFileAbsolute(io, p, .{})).close(io);
     }
-    const man_dst = try std.fmt.allocPrint(a, "{s}/share/man/man1", .{h.prefix});
+    const man_dst = try a.print("{s}/share/man/man1", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(io, man_dst);
 
     const json = try testFormulaJson(&h,
@@ -3805,11 +3801,11 @@ test "execute links every source_glob match into the target directory" {
     try testing.expect(!h.flog.hasErrors());
 
     for ([_][]const u8{ "npm.1", "npx.1", "package-json.1" }) |leaf| {
-        const p = try std.fmt.allocPrint(a, "{s}/{s}", .{ man_dst, leaf });
+        const p = try a.print("{s}/{s}", .{ man_dst, leaf });
         try std.Io.Dir.accessAbsolute(io, p, .{});
     }
     // A non-matching sibling must not be dragged along.
-    const stray = try std.fmt.allocPrint(a, "{s}/unrelated.1", .{man_dst});
+    const stray = try a.print("{s}/unrelated.1", .{man_dst});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, stray, .{}));
 }
 
@@ -3820,10 +3816,10 @@ test "execute runs the filesystem tier natively and leaves the log clean" {
     const a = h.arena.allocator();
 
     // A child for link_children / link_dir to walk.
-    const share = try std.fmt.allocPrint(a, "{s}/share/glow", .{h.keg});
+    const share = try a.print("{s}/share/glow", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(io, share);
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/glow.dat", .{share}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(io, try a.print("{s}/glow.dat", .{share}), .{});
         f.close(io);
     }
 
@@ -3841,11 +3837,11 @@ test "execute runs the filesystem tier natively and leaves the log clean" {
     try testing.expectEqual(@as(usize, 6), h.flog.handled_top_level);
 
     const checks = [_][]const u8{
-        try std.fmt.allocPrint(a, "{s}/var/log/glow/access.log", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/var/glow/.env", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/etc/glow.dat", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/bin/glow.dat-1", .{h.prefix}),
-        try std.fmt.allocPrint(a, "{s}/share/glow-mirror/glow.dat", .{h.prefix}),
+        try a.print("{s}/var/log/glow/access.log", .{h.prefix}),
+        try a.print("{s}/var/glow/.env", .{h.prefix}),
+        try a.print("{s}/etc/glow.dat", .{h.prefix}),
+        try a.print("{s}/bin/glow.dat-1", .{h.prefix}),
+        try a.print("{s}/share/glow-mirror/glow.dat", .{h.prefix}),
     };
     for (checks) |p| {
         const f = std.Io.Dir.openFileAbsolute(io, p, .{}) catch return error.TestUnexpectedResult;
@@ -3866,8 +3862,8 @@ test "write respects existing files unless overwrite is set" {
     const a = h.arena.allocator();
     const io = h.io;
 
-    const path = try std.fmt.allocPrint(a, "{s}/etc/glow.conf", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+    const path = try a.print("{s}/etc/glow.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, std.Io.Dir.path.dirname(path).?);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
         try f.writeStreamingAll(io, "user edited\n");
@@ -3905,7 +3901,7 @@ const LockedDir = struct {
     path: [:0]const u8,
 
     fn init(h: *TestHarness, rel: []const u8) !LockedDir {
-        const path = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/{s}", .{ h.prefix, rel }, 0);
+        const path = try h.arena.allocator().printSentinel("{s}/{s}", .{ h.prefix, rel }, 0);
         try std.Io.Dir.cwd().createDirPath(h.io, path);
         try testing.expectEqual(@as(c_int, 0), std.c.chmod(path, 0o555));
         return .{ .path = path };
@@ -3921,21 +3917,21 @@ const LockedDir = struct {
 /// sentinel step after it never runs.
 fn expectIoFailureAborts(h: *TestHarness, step: []const u8) !void {
     const a = h.arena.allocator();
-    const steps = try std.fmt.allocPrint(a,
+    const steps = try a.print(
         \\[{s},{{"type":"mkdir_p","path":{{"base":"etc","path":"after"}}}}]
     , .{step});
     try testing.expect(execute(h.ctx(), try testFormulaJson(h, steps)));
     try testing.expect(h.flog.hasFatal());
     try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, h.flog.entries()[0].reason);
     try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
-    try testing.expect(!dirExists(h.io, try std.fmt.allocPrint(a, "{s}/etc/after", .{h.prefix})));
+    try testing.expect(!dirExists(h.io, try a.print("{s}/etc/after", .{h.prefix})));
 }
 
 /// A keg directory with one file, for the link-walk steps to link from.
 fn seedKegShare(h: *TestHarness) !void {
-    const share = try std.fmt.allocPrint(h.arena.allocator(), "{s}/share/glow", .{h.keg});
+    const share = try h.arena.allocator().print("{s}/share/glow", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, share);
-    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/tool", .{share}), "x\n");
+    try atomic.atomicWriteFile(h.io, try h.arena.allocator().print("{s}/tool", .{share}), "x\n");
 }
 
 test "write surfaces an IO failure instead of reporting success" {
@@ -3948,7 +3944,7 @@ test "write surfaces an IO failure instead of reporting success" {
     try expectIoFailureAborts(&h,
         \\{"type":"write","path":{"base":"etc","path":"ro/app.conf"},"content":"x\n","overwrite":true}
     );
-    try testing.expect(!pathExists(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/app.conf", .{ro.path})));
+    try testing.expect(!pathExists(h.io, try h.arena.allocator().print("{s}/app.conf", .{ro.path})));
 }
 
 test "write keeps the original file when an overwrite cannot land" {
@@ -3956,8 +3952,8 @@ test "write keeps the original file when an overwrite cannot land" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const conf = try std.fmt.allocPrint(a, "{s}/etc/ro/app.conf", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    const conf = try a.print("{s}/etc/ro/app.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(conf).?);
     try atomic.atomicWriteFile(h.io, conf, "user edited\n");
     // The file stays writable; only its directory refuses the replacement.
     const ro = try LockedDir.init(&h, "etc/ro");
@@ -3976,8 +3972,8 @@ test "write keeps the original file when an overwrite cannot land" {
 test "write keeps an existing file's mode when it overwrites it" {
     var h = try TestHarness.init();
     defer h.deinit();
-    const conf = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/secret.conf", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    const conf = try h.arena.allocator().print("{s}/etc/secret.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(conf).?);
     try atomic.atomicWriteFile(h.io, conf, "token=old\n");
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(try h.arena.allocator().dupeSentinel(u8, conf, 0), 0o600));
 
@@ -3994,11 +3990,11 @@ test "write refuses a symlinked leaf instead of replacing it" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    const outside = try a.print("{s}-OUTSIDE", .{h.prefix});
     try atomic.atomicWriteFile(h.io, outside, "outside\n");
     defer std.Io.Dir.cwd().deleteFile(h.io, outside) catch {};
-    const link = try std.fmt.allocPrint(a, "{s}/etc/app.conf", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(link).?);
+    const link = try a.print("{s}/etc/app.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(link).?);
     try std.Io.Dir.symLinkAbsolute(h.io, outside, link, .{});
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -4006,7 +4002,7 @@ test "write refuses a symlinked leaf instead of replacing it" {
     )));
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
     // Neither the link nor what it points at was touched.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(outside, buf[0..try std.Io.Dir.readLinkAbsolute(h.io, link, &buf)]);
     const f = try std.Io.Dir.openFileAbsolute(h.io, outside, .{});
     defer f.close(h.io);
@@ -4045,8 +4041,8 @@ test "touch bumps the modification time of an existing file" {
     defer h.deinit();
     // A compiled cache a formula marks as newer than its source, read-only
     // the way a bottle ships it.
-    const cache = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/lib/site-ccache/mod.go", .{h.keg}, 0);
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(cache).?);
+    const cache = try h.arena.allocator().printSentinel("{s}/lib/site-ccache/mod.go", .{h.keg}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(cache).?);
     try atomic.atomicWriteFile(h.io, cache, "compiled");
     try backdate(h.io, cache);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(cache, 0o444));
@@ -4069,8 +4065,8 @@ test "touch surfaces a locked file whose times it cannot set" {
     var h = try TestHarness.init();
     defer h.deinit();
     // The open succeeds read-only; only setting the times is refused.
-    const locked = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/etc/locked", .{h.prefix}, 0);
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(locked).?);
+    const locked = try h.arena.allocator().printSentinel("{s}/etc/locked", .{h.prefix}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(locked).?);
     try atomic.atomicWriteFile(h.io, locked, "x");
     try testing.expectEqual(@as(c_int, 0), bsd.chflags(locked, bsd.UF_IMMUTABLE));
     defer _ = bsd.chflags(locked, 0);
@@ -4084,12 +4080,12 @@ test "touch refuses a symlinked leaf" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    const outside = try a.print("{s}-OUTSIDE", .{h.prefix});
     try atomic.atomicWriteFile(h.io, outside, "outside\n");
     defer std.Io.Dir.cwd().deleteFile(h.io, outside) catch {};
     try backdate(h.io, outside);
-    const link = try std.fmt.allocPrint(a, "{s}/etc/t", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(link).?);
+    const link = try a.print("{s}/etc/t", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(link).?);
     try std.Io.Dir.symLinkAbsolute(h.io, outside, link, .{});
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -4128,8 +4124,8 @@ test "symlink surfaces an occupied target that is not its link" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const occupant = try std.fmt.allocPrint(a, "{s}/etc/l", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(occupant).?);
+    const occupant = try a.print("{s}/etc/l", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(occupant).?);
     try atomic.atomicWriteFile(h.io, occupant, "mine\n");
 
     try expectIoFailureAborts(&h,
@@ -4141,13 +4137,13 @@ test "symlink force surfaces a target it cannot clear" {
     var h = try TestHarness.init();
     defer h.deinit();
     // A directory is not unlinked by force, so the link can never be placed.
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/l/sub", .{h.prefix}));
+    try std.Io.Dir.cwd().createDirPath(h.io, try h.arena.allocator().print("{s}/etc/l/sub", .{h.prefix}));
 
     try expectIoFailureAborts(&h,
         \\{"type":"symlink","force":true,"source":{"base":"absolute","path":"/usr/bin/true"},"target":{"base":"etc","path":"l"}}
     );
     // The report names why the clear failed, not the collision it caused.
-    try testing.expect(std.mem.indexOf(u8, h.flog.entries()[0].detail, "PathAlreadyExists") == null);
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, "PathAlreadyExists") == null);
 }
 
 test "link_children surfaces a source that is not a directory" {
@@ -4251,8 +4247,8 @@ test "the link walks report a target directory they cannot create" {
         // The directory is the cause; a link "not found" inside it would
         // send the reader looking in the wrong place.
         const detail = h.flog.entries()[0].detail;
-        try testing.expect(std.mem.indexOf(u8, detail, "ro/sub:") != null);
-        try testing.expect(std.mem.indexOf(u8, detail, "FileNotFound") == null);
+        try testing.expect(std.mem.find(u8, detail, "ro/sub:") != null);
+        try testing.expect(std.mem.find(u8, detail, "FileNotFound") == null);
     }
 }
 
@@ -4260,8 +4256,8 @@ test "inreplace surfaces an edit it cannot write" {
     if (std.c.geteuid() == 0) return error.SkipZigTest;
     var h = try TestHarness.init();
     defer h.deinit();
-    const conf = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/ro/app.conf", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    const conf = try h.arena.allocator().print("{s}/etc/ro/app.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(conf).?);
     try atomic.atomicWriteFile(h.io, conf, "port=1\n");
     const ro = try LockedDir.init(&h, "etc/ro");
     defer ro.deinit();
@@ -4275,8 +4271,8 @@ test "inreplace surfaces a file it cannot read" {
     if (std.c.geteuid() == 0) return error.SkipZigTest;
     var h = try TestHarness.init();
     defer h.deinit();
-    const conf = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/etc/app.conf", .{h.prefix}, 0);
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    const conf = try h.arena.allocator().printSentinel("{s}/etc/app.conf", .{h.prefix}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(conf).?);
     try atomic.atomicWriteFile(h.io, conf, "port=1\n");
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(conf, 0o000));
     defer _ = std.c.chmod(conf, 0o644);
@@ -4290,8 +4286,8 @@ test "inreplace reports a file over its size cap instead of skipping it quietly"
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const conf = try std.fmt.allocPrint(a, "{s}/etc/big.conf", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    const conf = try a.print("{s}/etc/big.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(conf).?);
     const big = try a.alloc(u8, 4 * 1024 * 1024 + 1);
     @memset(big, 'x');
     try atomic.atomicWriteFile(h.io, conf, big);
@@ -4308,9 +4304,9 @@ test "set_permissions -R surfaces a directory it cannot descend" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const tree = try std.fmt.allocPrintSentinel(a, "{s}/var/tree", .{h.prefix}, 0);
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/sub", .{tree}));
-    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(a, "{s}/sub/f", .{tree}), "x");
+    const tree = try a.printSentinel("{s}/var/tree", .{h.prefix}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/sub", .{tree}));
+    try atomic.atomicWriteFile(h.io, try a.print("{s}/sub/f", .{tree}), "x");
     // Restored so the harness can delete the tree.
     defer _ = std.c.chmod(tree, 0o755);
 
@@ -4339,8 +4335,8 @@ test "file steps report the parent directory they cannot create" {
 
         try expectIoFailureAborts(&h, step);
         const detail = h.flog.entries()[0].detail;
-        try testing.expect(std.mem.indexOf(u8, detail, "ro/sub:") != null);
-        try testing.expect(std.mem.indexOf(u8, detail, "FileNotFound") == null);
+        try testing.expect(std.mem.find(u8, detail, "ro/sub:") != null);
+        try testing.expect(std.mem.find(u8, detail, "FileNotFound") == null);
     }
 }
 
@@ -4358,11 +4354,11 @@ test "link_dir treats a missing source directory as a no-op" {
 /// `remove` step retires.
 fn plantStaleLink(h: *TestHarness) ![]const u8 {
     const a = h.arena.allocator();
-    const dest = try std.fmt.allocPrint(a, "{s}/bin/glow", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(dest).?);
+    const dest = try a.print("{s}/bin/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(dest).?);
     try atomic.atomicWriteFile(h.io, dest, "bin");
-    const stale = try std.fmt.allocPrint(a, "{s}/bin/glow-init", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(stale).?);
+    const stale = try a.print("{s}/bin/glow-init", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(stale).?);
     try std.Io.Dir.symLinkAbsolute(h.io, dest, stale, .{});
     return stale;
 }
@@ -4378,7 +4374,7 @@ test "remove surfaces a matching link it cannot delete" {
     try expectIoFailureAborts(&h,
         \\{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}
     );
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(h.io, stale, &buf);
 }
 
@@ -4388,7 +4384,7 @@ test "remove surfaces a link it cannot read instead of skipping it" {
     defer h.deinit();
     _ = try plantStaleLink(&h);
     // No search permission: the link cannot even be inspected.
-    const bin = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/bin", .{h.prefix}, 0);
+    const bin = try h.arena.allocator().printSentinel("{s}/bin", .{h.prefix}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(bin, 0o000));
     defer _ = std.c.chmod(bin, 0o755);
 
@@ -4402,8 +4398,8 @@ test "remove surfaces a tree it cannot delete" {
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
-    const kept = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm/locked/index.js", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(kept).?);
+    const kept = try a.print("{s}/lib/node_modules/npm/locked/index.js", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(kept).?);
     try atomic.atomicWriteFile(h.io, kept, "x");
     const ro = try LockedDir.init(&h, "lib/node_modules/npm/locked");
     defer ro.deinit();
@@ -4434,8 +4430,8 @@ test "uninstall mode surfaces a placed link it cannot remove" {
     runUninstallSteps(c, declared);
     try testing.expect(ch.h.flog.hasFatal());
     try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, ch.h.flog.entries()[0].reason);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.fmt.allocPrint(ch.h.arena.allocator(), "{s}/lib/libx.1.dylib", .{ch.h.prefix}), &buf);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, try ch.h.arena.allocator().print("{s}/lib/libx.1.dylib", .{ch.h.prefix}), &buf);
 }
 
 test "uninstall mode surfaces a placed link it cannot read" {
@@ -4448,7 +4444,7 @@ test "uninstall mode surfaces a placed link it cannot read" {
         \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.1.dylib"},"uninstall":true}]
     );
     runSteps(c, declared);
-    const lib = try std.fmt.allocPrintSentinel(ch.h.arena.allocator(), "{s}/lib", .{ch.h.prefix}, 0);
+    const lib = try ch.h.arena.allocator().printSentinel("{s}/lib", .{ch.h.prefix}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o000));
     defer _ = std.c.chmod(lib, 0o755);
 
@@ -4477,9 +4473,9 @@ test "uninstall mode keeps removing the other links after one will not go" {
     // Cleanup is best-effort: one stuck link must not strand the rest.
     runUninstallSteps(c, declared);
     try testing.expect(ch.h.flog.hasFatal());
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.fmt.allocPrint(a, "{s}/liba.dylib", .{ro.path}), &buf);
-    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(c.io, try std.fmt.allocPrint(a, "{s}/lib/libb.dylib", .{ch.h.prefix}), &buf));
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, try a.print("{s}/liba.dylib", .{ro.path}), &buf);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(c.io, try a.print("{s}/lib/libb.dylib", .{ch.h.prefix}), &buf));
 }
 
 test "uninstall mode still stops at a confinement refusal" {
@@ -4487,13 +4483,13 @@ test "uninstall mode still stops at a confinement refusal" {
     defer ch.deinit();
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
-    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{ch.h.prefix});
+    const outside = try a.print("{s}-OUTSIDE", .{ch.h.prefix});
     const staged = c.subject.cask.staged_path;
-    const kept = try std.fmt.allocPrint(a, "{s}/lib/libb.dylib", .{ch.h.prefix});
-    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(kept).?);
-    try std.Io.Dir.symLinkAbsolute(c.io, try std.fmt.allocPrint(a, "{s}/libb.dylib", .{staged}), kept, .{});
+    const kept = try a.print("{s}/lib/libb.dylib", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.Io.Dir.path.dirname(kept).?);
+    try std.Io.Dir.symLinkAbsolute(c.io, try a.print("{s}/libb.dylib", .{staged}), kept, .{});
 
-    runUninstallSteps(c, try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+    runUninstallSteps(c, try parseSteps(&ch.h, try a.print(
         \\[{{"type":"symlink","source":{{"base":"staged_path","path":"liba.dylib"}},
         \\  "target":{{"base":"absolute","path":"{s}/liba.dylib"}},"uninstall":true}},
         \\ {{"type":"symlink","source":{{"base":"staged_path","path":"libb.dylib"}},
@@ -4501,7 +4497,7 @@ test "uninstall mode still stops at a confinement refusal" {
     , .{outside})));
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
     // A step that tried to leave the prefix ends the walk, as at install.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(c.io, kept, &buf);
 }
 
@@ -4513,7 +4509,7 @@ test "a planted directory symlink cannot redirect a later step outside the prefi
 
     // A genuinely-outside writable location: a SIBLING of the prefix, so
     // the component-boundary prefix check does not treat it as contained.
-    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    const outside = try a.print("{s}-OUTSIDE", .{h.prefix});
     std.Io.Dir.cwd().deleteTree(io, outside) catch {};
     try std.Io.Dir.cwd().createDirPath(io, outside);
     defer std.Io.Dir.cwd().deleteTree(io, outside) catch {};
@@ -4521,7 +4517,7 @@ test "a planted directory symlink cannot redirect a later step outside the prefi
     // Step 1 plants <prefix>/etc/la -> <outside>; step 2 tries to mkdir_p
     // and write *through* that symlink. Every mutating step must resolve
     // the parent chain and refuse, so nothing lands under <outside>.
-    const json = try std.fmt.allocPrint(a,
+    const json = try a.print(
         \\{{"name":"glow","versions":{{"stable":"1.2.3"}},"post_install_defined":false,"post_install_steps":[
         \\ {{"type":"symlink","force":true,"source":{{"base":"absolute","path":"{s}"}},"target":{{"base":"etc","path":"la"}}}},
         \\ {{"type":"mkdir_p","path":{{"base":"etc","path":"la/sub"}}}},
@@ -4530,8 +4526,8 @@ test "a planted directory symlink cannot redirect a later step outside the prefi
     try testing.expect(execute(h.ctx(), json));
 
     // The escape must have left nothing behind outside the prefix.
-    const leaked_dir = try std.fmt.allocPrint(a, "{s}/sub", .{outside});
-    const leaked_file = try std.fmt.allocPrint(a, "{s}/pwned", .{outside});
+    const leaked_dir = try a.print("{s}/sub", .{outside});
+    const leaked_file = try a.print("{s}/pwned", .{outside});
     try testing.expect(std.Io.Dir.openDirAbsolute(io, leaked_dir, .{}) == error.FileNotFound);
     try testing.expect(std.Io.Dir.openFileAbsolute(io, leaked_file, .{}) == error.FileNotFound);
     // And the redirect steps were refused as violations, not counted handled.
@@ -4547,7 +4543,7 @@ test "a step resolving outside the prefix is refused and logged as a sandbox vio
     // one asserted absent below, even with test binaries running concurrently.
     var s = try Scratch.init("steps_escape_zz");
     defer s.deinit();
-    const steps = try std.fmt.allocPrint(a,
+    const steps = try a.print(
         \\[{{"type":"mkdir_p","path":{{"base":"absolute","path":"{s}"}}}}]
     , .{s.base});
 
@@ -4606,7 +4602,7 @@ test "initDataDirPlan builds each initialiser's argv and marker" {
     var found_tmpdir = false;
     for (my.argv) |a| {
         if (std.mem.startsWith(u8, a, "--tmpdir=")) {
-            try testing.expect(std.mem.indexOf(u8, a, h.prefix) != null);
+            try testing.expect(std.mem.find(u8, a, h.prefix) != null);
             found_tmpdir = true;
         }
     }
@@ -4623,10 +4619,10 @@ test "init_data_dir skips initialisation when the marker file exists" {
 
     // Marker present → already initialised; the step must count as handled
     // without spawning anything (no initdb exists in this fixture keg).
-    const datadir = try std.fmt.allocPrint(a, "{s}/var/postgresql", .{h.prefix});
+    const datadir = try a.print("{s}/var/postgresql", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, datadir);
     {
-        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/PG_VERSION", .{datadir}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/PG_VERSION", .{datadir}), .{});
         f.close(h.io);
     }
 
@@ -4644,7 +4640,7 @@ test "a confinement violation aborts the remaining steps like the DSL interprete
 
     var s = try Scratch.init("steps_escape_abort");
     defer s.deinit();
-    const steps = try std.fmt.allocPrint(a,
+    const steps = try a.print(
         \\[{{"type":"mkdir_p","path":{{"base":"absolute","path":"{s}"}}}},
         \\ {{"type":"mkdir_p","path":{{"base":"var","path":"after-violation"}}}}]
     , .{s.base});
@@ -4652,7 +4648,7 @@ test "a confinement violation aborts the remaining steps like the DSL interprete
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps)));
     try testing.expect(h.flog.hasFatal());
     // The step after the violation must never have run.
-    const after = try std.fmt.allocPrint(a, "{s}/var/after-violation", .{h.prefix});
+    const after = try a.print("{s}/var/after-violation", .{h.prefix});
     var ran_after = true;
     _ = std.Io.Dir.openDirAbsolute(h.io, after, .{}) catch {
         ran_after = false;
@@ -4668,9 +4664,9 @@ test "init_data_dir removes a datadir it created when the initialiser fails" {
     const io = h.io;
 
     // An initialiser that runs and exits non-zero: symlink to /usr/bin/false.
-    const keg_bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.keg});
+    const keg_bin = try a.print("{s}/bin", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(io, keg_bin);
-    try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/false", try std.fmt.allocPrint(a, "{s}/mysqld", .{keg_bin}), .{});
+    try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/false", try a.print("{s}/mysqld", .{keg_bin}), .{});
 
     const step_json = try testFormulaJson(&h,
         \\[{"type":"init_data_dir","path":{"base":"var","path":"mysql"},"using":"mysql_initialize"}]
@@ -4679,7 +4675,7 @@ test "init_data_dir removes a datadir it created when the initialiser fails" {
     try testing.expect(h.flog.hasErrors());
     // The datadir this run created must be gone so a retry starts clean —
     // mysqld refuses a non-empty datadir, so leftovers brick every retry.
-    const datadir = try std.fmt.allocPrint(a, "{s}/var/mysql", .{h.prefix});
+    const datadir = try a.print("{s}/var/mysql", .{h.prefix});
     var still_there = true;
     _ = std.Io.Dir.openDirAbsolute(io, datadir, .{}) catch {
         still_there = false;
@@ -4689,11 +4685,11 @@ test "init_data_dir removes a datadir it created when the initialiser fails" {
     // A pre-existing datadir is user data: a failed re-run must not touch it.
     try std.Io.Dir.cwd().createDirPath(io, datadir);
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/precious", .{datadir}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(io, try a.print("{s}/precious", .{datadir}), .{});
         f.close(io);
     }
     try testing.expect(execute(h.ctx(), step_json));
-    const f = std.Io.Dir.openFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/precious", .{datadir}), .{}) catch return error.TestUnexpectedResult;
+    const f = std.Io.Dir.openFileAbsolute(io, try a.print("{s}/precious", .{datadir}), .{}) catch return error.TestUnexpectedResult;
     f.close(io);
 }
 
@@ -4705,12 +4701,12 @@ test "init_data_dir points the initialiser at a tmpdir the fence can create in" 
     h.io = threaded.io();
     const a = h.arena.allocator();
 
-    const keg_bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.keg});
+    const keg_bin = try a.print("{s}/bin", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, keg_bin);
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
-    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/etc", .{h.prefix}));
+    const seen = try a.print("{s}/etc/seen.txt", .{h.prefix});
     {
-        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/initdb", .{keg_bin}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/initdb", .{keg_bin}), .{});
         defer f.close(h.io);
         var w = f.writer(h.io, &.{});
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
@@ -4731,7 +4727,7 @@ test "init_data_dir points the initialiser at a tmpdir the fence can create in" 
 
     // initdb takes no --tmpdir, so TMPDIR is its only handle on scratch space.
     // The fence grants create under the prefix but only write-data under /tmp.
-    try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "TMPDIR={s}/var/tmp\n", .{h.prefix})) != null);
+    try testing.expect(std.mem.find(u8, dump, try a.print("TMPDIR={s}/var/tmp\n", .{h.prefix})) != null);
 }
 
 test "init_data_dir with a missing initialiser binary fails loudly" {
@@ -4805,12 +4801,12 @@ test "gdkPixbufEnvPaths derives the malt-prefix module dir and cache file" {
     // No gdk-pixbuf keg → no safe env to derive.
     try testing.expect(gdkPixbufEnvPaths(h.ctx()) == null);
 
-    const moddir = try std.fmt.allocPrint(a, "{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0/2.10.0", .{h.prefix});
+    const moddir = try a.print("{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0/2.10.0", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, moddir);
 
     const env = gdkPixbufEnvPaths(h.ctx()) orelse return error.TestUnexpectedResult;
-    const want_dir = try std.fmt.allocPrint(a, "{s}/lib/gdk-pixbuf-2.0/2.10.0/loaders", .{h.prefix});
-    const want_file = try std.fmt.allocPrint(a, "{s}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache", .{h.prefix});
+    const want_dir = try a.print("{s}/lib/gdk-pixbuf-2.0/2.10.0/loaders", .{h.prefix});
+    const want_file = try a.print("{s}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache", .{h.prefix});
     try testing.expectEqualStrings(want_dir, env.moduledir);
     try testing.expectEqualStrings(want_file, env.module_file);
 }
@@ -4826,19 +4822,19 @@ test "gtk_update_icon_cache picks the gtk4 tool when present, else falls back to
         \\[{"type":"gtk_update_icon_cache","path":{"base":"homebrew_prefix","path":"share/icons/hicolor"}}]
     );
     try testing.expect(execute(h.ctx(), step_json));
-    try testing.expect(std.mem.indexOf(u8, h.flog.entries()[0].detail, "gtk3-update-icon-cache") != null);
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, "gtk3-update-icon-cache") != null);
 
     // A gtk4 probe file flips the selection; the failure now names the
     // gtk4 binary (present but not executable in this fixture).
-    const gtk4_bin = try std.fmt.allocPrint(a, "{s}/opt/gtk4/bin", .{h.prefix});
+    const gtk4_bin = try a.print("{s}/opt/gtk4/bin", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, gtk4_bin);
     {
-        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/gtk4-update-icon-cache", .{gtk4_bin}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/gtk4-update-icon-cache", .{gtk4_bin}), .{});
         f.close(h.io);
     }
     try testing.expect(execute(h.ctx(), step_json));
     const last = h.flog.entries()[h.flog.entries().len - 1];
-    try testing.expect(std.mem.indexOf(u8, last.detail, "gtk4-update-icon-cache") != null);
+    try testing.expect(std.mem.find(u8, last.detail, "gtk4-update-icon-cache") != null);
 }
 
 test "link_children honours the link-name prefix and treats a missing source as a no-op" {
@@ -4847,10 +4843,10 @@ test "link_children honours the link-name prefix and treats a missing source as 
     const a = h.arena.allocator();
     const io = h.io;
 
-    const share = try std.fmt.allocPrint(a, "{s}/share/glow", .{h.keg});
+    const share = try a.print("{s}/share/glow", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(io, share);
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/tool", .{share}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(io, try a.print("{s}/tool", .{share}), .{});
         f.close(io);
     }
 
@@ -4858,7 +4854,7 @@ test "link_children honours the link-name prefix and treats a missing source as 
         \\[{"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"homebrew_prefix","path":"bin"},"prefix":"{{name}}-"}]
     )));
     try testing.expect(!h.flog.hasErrors());
-    const linked = try std.fmt.allocPrint(a, "{s}/bin/glow-tool", .{h.prefix});
+    const linked = try a.print("{s}/bin/glow-tool", .{h.prefix});
     const f = std.Io.Dir.openFileAbsolute(io, linked, .{}) catch return error.TestUnexpectedResult;
     f.close(io);
 
@@ -4876,16 +4872,16 @@ test "link_children refuses a link-name prefix that walks out of the target" {
     const a = h.arena.allocator();
     try seedKegShare(&h);
     // What the escape would unlink and replace with a link into the keg.
-    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
-    const victim = try std.fmt.allocPrint(a, "{s}/tool", .{outside});
+    const outside = try a.print("{s}-OUTSIDE", .{h.prefix});
+    const victim = try a.print("{s}/tool", .{outside});
     try std.Io.Dir.cwd().createDirPath(h.io, outside);
     defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
     try atomic.atomicWriteFile(h.io, victim, "user file\n");
 
     // <prefix>/etc/lc/../../../<prefix>-OUTSIDE/tool
-    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try std.fmt.allocPrint(a,
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try a.print(
         \\[{{"type":"link_children","source":{{"base":"prefix","path":"share/glow"}},"target":{{"base":"etc","path":"lc"}},"prefix":"../../../{s}/"}}]
-    , .{std.fs.path.basename(outside)}))));
+    , .{std.Io.Dir.path.basename(outside)}))));
     try testing.expect(h.flog.hasFatal());
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
     var buf: [64]u8 = undefined;
@@ -4902,7 +4898,7 @@ test "link_children refuses a link-name suffix with a path separator" {
         \\[{"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"lc"},"suffix":"/x"}]
     )));
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
-    try testing.expect(!pathExists(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/lc/tool", .{h.prefix})));
+    try testing.expect(!pathExists(h.io, try h.arena.allocator().print("{s}/etc/lc/tool", .{h.prefix})));
 }
 
 test "supportedStepType matches the executable tier and rejects the rest" {
@@ -4947,23 +4943,23 @@ test "resolveCommandPath resolves a command base against the keg, not the prefix
     const cases = [_]struct { spec: []const u8, want: []const u8 }{
         .{ .spec =
         \\{"command":{"base":"bin","path":"dbus-uuidgen"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/bin/dbus-uuidgen", .{h.keg}) },
+        , .want = try a.print("{s}/bin/dbus-uuidgen", .{h.keg}) },
         .{ .spec =
         \\{"command":{"base":"libexec","path":"post-install"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/libexec/post-install", .{h.keg}) },
+        , .want = try a.print("{s}/libexec/post-install", .{h.keg}) },
         .{ .spec =
         \\{"command":{"base":"sbin","path":"daemon"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/sbin/daemon", .{h.keg}) },
+        , .want = try a.print("{s}/sbin/daemon", .{h.keg}) },
         .{ .spec =
         \\{"command":{"base":"lib","path":"helper"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/lib/helper", .{h.keg}) },
+        , .want = try a.print("{s}/lib/helper", .{h.keg}) },
         .{ .spec =
         \\{"command":{"base":"prefix","path":"bin/tool"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/bin/tool", .{h.keg}) },
+        , .want = try a.print("{s}/bin/tool", .{h.keg}) },
         // glib-networking ships a base-less absolute command carrying a token.
         .{ .spec =
         \\{"command":{"path":"{{HOMEBREW_PREFIX}}/opt/glib/bin/gio-querymodules"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/opt/glib/bin/gio-querymodules", .{h.prefix}) },
+        , .want = try a.print("{s}/opt/glib/bin/gio-querymodules", .{h.prefix}) },
     };
     for (cases) |case| {
         const got = resolveCommandPath(c, try parseStep(&h, case.spec)) orelse return error.TestUnexpectedResult;
@@ -5005,9 +5001,9 @@ test "run executes the formula's own helper with its arguments expanded" {
     // A helper the keg "ships": a system tool whose effect is observable, so
     // the assertion covers the resolved base and the expanded argument rather
     // than just an exit code.
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const libexec = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, libexec);
-    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/mkdir", try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/mkdir", try a.print("{s}/post-install", .{libexec}), .{});
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
         \\[{"type":"run","command":{"base":"libexec","path":"post-install"},
@@ -5017,7 +5013,7 @@ test "run executes the formula's own helper with its arguments expanded" {
     try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
 
     // The created directory proves the child saw an expanded argument.
-    try testing.expect(dirExists(h.io, try std.fmt.allocPrint(a, "{s}/var/lib/dbus", .{h.prefix})));
+    try testing.expect(dirExists(h.io, try a.print("{s}/var/lib/dbus", .{h.prefix})));
 }
 
 /// A secret plus an allowlisted locale var, shaped like malt's real environ.
@@ -5040,9 +5036,9 @@ test "run pins the child's working directory to the keg" {
     h.io = threaded.io();
     const a = h.arena.allocator();
 
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const libexec = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, libexec);
-    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/mkdir", try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/mkdir", try a.print("{s}/post-install", .{libexec}), .{});
 
     // A relative argument resolves against the child's cwd, so where the
     // directory lands is the assertion.
@@ -5050,7 +5046,7 @@ test "run pins the child's working directory to the keg" {
         \\[{"type":"run","command":{"base":"libexec","path":"post-install"},
         \\  "args":["cwd-probe"]}]
     )));
-    try testing.expect(dirExists(h.io, try std.fmt.allocPrint(a, "{s}/cwd-probe", .{h.keg})));
+    try testing.expect(dirExists(h.io, try a.print("{s}/cwd-probe", .{h.keg})));
 }
 
 test "run hands the child a scrubbed environment, not malt's own" {
@@ -5065,12 +5061,12 @@ test "run hands the child a scrubbed environment, not malt's own" {
     h.environ = test_secret_environ;
     const a = h.arena.allocator();
 
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const libexec = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, libexec);
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
-    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/etc", .{h.prefix}));
+    const seen = try a.print("{s}/etc/seen.txt", .{h.prefix});
     {
-        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/post-install", .{libexec}), .{});
         defer f.close(h.io);
         var w = f.writer(h.io, &.{});
         // Split literals: scripts/lint-spawn-invariants.sh greps src/ for
@@ -5093,13 +5089,13 @@ test "run hands the child a scrubbed environment, not malt's own" {
 
     // The forge token and the user's PATH are the two the fence cannot cover:
     // the profile allows process-exec* and keg/tmp writes.
-    try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
-    try testing.expect(std.mem.indexOf(u8, dump, "/attacker/bin") == null);
-    try testing.expect(std.mem.indexOf(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
+    try testing.expect(std.mem.find(u8, dump, "sentinel-must-not-leak") == null);
+    try testing.expect(std.mem.find(u8, dump, "/attacker/bin") == null);
+    try testing.expect(std.mem.find(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
     // A scrub, not a wipe: build/locale keys still reach the child, and HOME
     // points at the prefix as it does for the DSL `system` builtin.
-    try testing.expect(std.mem.indexOf(u8, dump, "LANG=en_US.UTF-8\n") != null);
-    try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "HOME={s}\n", .{h.prefix})) != null);
+    try testing.expect(std.mem.find(u8, dump, "LANG=en_US.UTF-8\n") != null);
+    try testing.expect(std.mem.find(u8, dump, try a.print("HOME={s}\n", .{h.prefix})) != null);
 }
 
 test "run passes the step's declared env to the child, expanded" {
@@ -5111,12 +5107,12 @@ test "run passes the step's declared env to the child, expanded" {
     h.environ = test_secret_environ;
     const a = h.arena.allocator();
 
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const libexec = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, libexec);
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
-    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/etc", .{h.prefix}));
+    const seen = try a.print("{s}/etc/seen.txt", .{h.prefix});
     {
-        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/post-install", .{libexec}), .{});
         defer f.close(h.io);
         var w = f.writer(h.io, &.{});
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
@@ -5136,11 +5132,11 @@ test "run passes the step's declared env to the child, expanded" {
     var r = f.reader(h.io, &.{});
     const dump = buf[0..try r.interface.readSliceShort(&buf)];
 
-    try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "CLOUDSDK_PYTHON={s}/opt/python/bin/python\n", .{h.prefix})) != null);
+    try testing.expect(std.mem.find(u8, dump, try a.print("CLOUDSDK_PYTHON={s}/opt/python/bin/python\n", .{h.prefix})) != null);
     // The step's value wins over the scrubbed base, as upstream lets it;
     // the scrub itself still holds for everything the step did not name.
-    try testing.expect(std.mem.indexOf(u8, dump, "PATH=/step/bin\n") != null);
-    try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
+    try testing.expect(std.mem.find(u8, dump, "PATH=/step/bin\n") != null);
+    try testing.expect(std.mem.find(u8, dump, "sentinel-must-not-leak") == null);
 }
 
 test "run refuses an env that is not a map of variable names to strings" {
@@ -5175,13 +5171,13 @@ test "a tool step's own env vars layer onto the scrubbed base" {
 
     // gdk-pixbuf-query-loaders is the one step that sets its own variables;
     // it derives them from the versioned module dir under the prefix.
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0/2.10.0", .{h.prefix}));
-    const bin = try std.fmt.allocPrint(a, "{s}/opt/gdk-pixbuf/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0/2.10.0", .{h.prefix}));
+    const bin = try a.print("{s}/opt/gdk-pixbuf/bin", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, bin);
-    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    const seen = try a.print("{s}/etc/seen.txt", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/etc", .{h.prefix}));
     {
-        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/gdk-pixbuf-query-loaders", .{bin}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/gdk-pixbuf-query-loaders", .{bin}), .{});
         defer f.close(h.io);
         var w = f.writer(h.io, &.{});
         try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
@@ -5200,16 +5196,16 @@ test "a tool step's own env vars layer onto the scrubbed base" {
     var r = f.reader(h.io, &.{});
     const dump = buf[0..try r.interface.readSliceShort(&buf)];
 
-    try testing.expect(std.mem.indexOf(u8, dump, "GDK_PIXBUF_MODULEDIR=") != null);
-    try testing.expect(std.mem.indexOf(u8, dump, "GDK_PIXBUF_MODULE_FILE=") != null);
+    try testing.expect(std.mem.find(u8, dump, "GDK_PIXBUF_MODULEDIR=") != null);
+    try testing.expect(std.mem.find(u8, dump, "GDK_PIXBUF_MODULE_FILE=") != null);
     // The step used to replace the whole environment with those two, leaving
     // the tool without a PATH; they now sit on top of the scrubbed base.
-    try testing.expect(std.mem.indexOf(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
-    try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
+    try testing.expect(std.mem.find(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
+    try testing.expect(std.mem.find(u8, dump, "sentinel-must-not-leak") == null);
 }
 
 test "run can read a standard user font without opening the rest of HOME" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -5218,29 +5214,28 @@ test "run can read a standard user font without opening the rest of HOME" {
     h.io = threaded.io();
     const a = h.arena.allocator();
 
-    const home = try std.fmt.allocPrint(a, "{s}_home", .{h.prefix});
+    const home = try a.print("{s}_home", .{h.prefix});
     defer std.Io.Dir.cwd().deleteTree(h.io, home) catch {};
-    const fonts = try std.fmt.allocPrint(a, "{s}/Library/Fonts", .{home});
-    const source = try std.fmt.allocPrint(a, "{s}/Probe.ttf", .{fonts});
-    const copied = try std.fmt.allocPrint(a, "{s}/share/Probe.ttf", .{h.prefix});
+    const fonts = try a.print("{s}/Library/Fonts", .{home});
+    const source = try a.print("{s}/Probe.ttf", .{fonts});
+    const copied = try a.print("{s}/share/Probe.ttf", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, fonts);
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/share", .{h.prefix}));
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/share", .{h.prefix}));
     {
         const f = try std.Io.Dir.createFileAbsolute(h.io, source, .{});
         defer f.close(h.io);
         try f.writeStreamingAll(h.io, "FONT");
     }
 
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const libexec = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, libexec);
-    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/cp", try std.fmt.allocPrint(a, "{s}/copy-font", .{libexec}), .{});
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/cp", try a.print("{s}/copy-font", .{libexec}), .{});
 
-    const home_var = try std.fmt.allocPrintSentinel(a, "HOME={s}", .{home}, 0);
+    const home_var = try a.printSentinel("HOME={s}", .{home}, 0);
     var env_entries = [_:null]?[*:0]const u8{home_var.ptr};
     h.environ = .{ .block = .{ .slice = &env_entries } };
 
-    const steps = try std.fmt.allocPrint(
-        a,
+    const steps = try a.print(
         \\[{{"type":"run","command":{{"base":"libexec","path":"copy-font"}},
         \\  "args":["{s}","{s}"]}}]
     ,
@@ -5346,7 +5341,7 @@ test "run cannot escape the keg through its command path" {
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
     // A violation is fatal, so the following step never ran.
     try testing.expect(h.flog.hasFatal());
-    try testing.expect(!dirExists(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/var/unreached", .{h.prefix})));
+    try testing.expect(!dirExists(h.io, try h.arena.allocator().print("{s}/var/unreached", .{h.prefix})));
 }
 
 test "run reports a command missing from the keg as a loud failure" {
@@ -5374,29 +5369,29 @@ test "expandTemplates resolves the keg/prefix tokens that only existed as bases"
 
     const libexec = try expandTemplates(c, "{{libexec}}/lib/node_modules/npm");
     try testing.expectEqualStrings(
-        try std.fmt.allocPrint(h.arena.allocator(), "{s}/libexec/lib/node_modules/npm", .{h.keg}),
+        try h.arena.allocator().print("{s}/libexec/lib/node_modules/npm", .{h.keg}),
         libexec,
     );
     const pkgetc = try expandTemplates(c, "{{pkgetc}}/cert.pem");
     try testing.expectEqualStrings(
-        try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/glow/cert.pem", .{h.prefix}),
+        try h.arena.allocator().print("{s}/etc/glow/cert.pem", .{h.prefix}),
         pkgetc,
     );
     try testing.expectEqualStrings(
-        try std.fmt.allocPrint(h.arena.allocator(), "{s}/share/glow", .{h.prefix}),
+        try h.arena.allocator().print("{s}/share/glow", .{h.prefix}),
         try expandTemplates(c, "{{pkgshare}}"),
     );
     // dbus embeds `{{var}}` in a run argument; it resolved as a base but had
     // no inline mapping, so the token reached the child verbatim.
     try testing.expectEqualStrings(
-        try std.fmt.allocPrint(h.arena.allocator(), "{s}/var/lib/dbus", .{h.prefix}),
+        try h.arena.allocator().print("{s}/var/lib/dbus", .{h.prefix}),
         try expandTemplates(c, "{{var}}/lib/dbus"),
     );
     // `{{bin}}` must keep meaning the *keg's* bin: the template and base maps
     // disagree on that name on purpose, and merging them would repoint every
     // existing step.
     try testing.expectEqualStrings(
-        try std.fmt.allocPrint(h.arena.allocator(), "{s}/bin", .{h.keg}),
+        try h.arena.allocator().print("{s}/bin", .{h.keg}),
         try expandTemplates(c, "{{bin}}"),
     );
 }
@@ -5410,15 +5405,15 @@ test "copy places the source inside an existing directory target, not its conten
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm/bin", .{h.keg});
+    const src = try a.print("{s}/libexec/lib/node_modules/npm/bin", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
-    const cli = try std.fmt.allocPrint(a, "{s}/npm-cli.js", .{src});
+    const cli = try a.print("{s}/npm-cli.js", .{src});
     {
         const f = try std.Io.Dir.createFileAbsolute(h.io, cli, .{ .truncate = true });
         defer f.close(h.io);
         try f.writeStreamingAll(h.io, "#cli\n");
     }
-    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    const dstdir = try a.print("{s}/lib/node_modules", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dstdir);
 
     const json = try testFormulaJson(&h,
@@ -5430,14 +5425,14 @@ test "copy places the source inside an existing directory target, not its conten
     try testing.expect(!h.flog.hasErrors());
 
     // Landed as node_modules/npm/bin/npm-cli.js …
-    const want = try std.fmt.allocPrint(a, "{s}/npm/bin/npm-cli.js", .{dstdir});
+    const want = try a.print("{s}/npm/bin/npm-cli.js", .{dstdir});
     try std.Io.Dir.accessAbsolute(h.io, want, .{});
     // … and not flattened one level up.
-    const flat = try std.fmt.allocPrint(a, "{s}/bin/npm-cli.js", .{dstdir});
+    const flat = try a.print("{s}/bin/npm-cli.js", .{dstdir});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, flat, .{}));
     // A first install has nothing to move aside; neither scratch path may
     // survive the step regardless.
-    try expectNoScratch(&h, try std.fmt.allocPrint(a, "{s}/npm", .{dstdir}));
+    try expectNoScratch(&h, try a.print("{s}/npm", .{dstdir}));
 }
 
 test "copy refuses a source outside the keg and prefix" {
@@ -5448,20 +5443,20 @@ test "copy refuses a source outside the keg and prefix" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const outside = try std.fmt.allocPrint(a, "{s}.outside", .{h.prefix});
+    const outside = try a.print("{s}.outside", .{h.prefix});
     defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
     try std.Io.Dir.cwd().createDirPath(h.io, outside);
     {
         const f = try std.Io.Dir.createFileAbsolute(
             h.io,
-            try std.fmt.allocPrint(a, "{s}/secret", .{outside}),
+            try a.print("{s}/secret", .{outside}),
             .{ .truncate = true },
         );
         defer f.close(h.io);
         try f.writeStreamingAll(h.io, "private\n");
     }
 
-    const json = try testFormulaJson(&h, try std.fmt.allocPrint(a,
+    const json = try testFormulaJson(&h, try a.print(
         \\[{{"type":"copy",
         \\  "source":{{"path":"{s}"}},
         \\  "target":{{"path":"{{{{HOMEBREW_PREFIX}}}}/share/stolen"}}}}]
@@ -5469,7 +5464,7 @@ test "copy refuses a source outside the keg and prefix" {
     _ = execute(h.ctx(), json);
     try testing.expect(h.flog.hasErrors());
 
-    const landed = try std.fmt.allocPrint(a, "{s}/share/stolen", .{h.prefix});
+    const landed = try a.print("{s}/share/stolen", .{h.prefix});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, landed, .{}));
 }
 
@@ -5480,22 +5475,22 @@ test "copy refuses a source that is a symlink out of the keg" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const outside = try std.fmt.allocPrint(a, "{s}.outside", .{h.prefix});
+    const outside = try a.print("{s}.outside", .{h.prefix});
     defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
     try std.Io.Dir.cwd().createDirPath(h.io, outside);
     {
         const f = try std.Io.Dir.createFileAbsolute(
             h.io,
-            try std.fmt.allocPrint(a, "{s}/secret", .{outside}),
+            try a.print("{s}/secret", .{outside}),
             .{ .truncate = true },
         );
         defer f.close(h.io);
         try f.writeStreamingAll(h.io, "private\n");
     }
 
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const libexec = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, libexec);
-    const doorway = try std.fmt.allocPrint(a, "{s}/doorway", .{libexec});
+    const doorway = try a.print("{s}/doorway", .{libexec});
     try std.Io.Dir.symLinkAbsolute(h.io, outside, doorway, .{});
 
     const json = try testFormulaJson(&h,
@@ -5505,7 +5500,7 @@ test "copy refuses a source that is a symlink out of the keg" {
     );
     _ = execute(h.ctx(), json);
 
-    const landed = try std.fmt.allocPrint(a, "{s}/share/stolen/secret", .{h.prefix});
+    const landed = try a.print("{s}/share/stolen/secret", .{h.prefix});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, landed, .{}));
 }
 
@@ -5514,7 +5509,7 @@ test "copy refuses a target outside the keg and prefix" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    const src = try a.print("{s}/libexec", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
 
     const json = try testFormulaJson(&h,
@@ -5539,12 +5534,12 @@ test "copy replaces a stale destination even without a force flag" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm", .{h.keg});
+    const src = try a.print("{s}/libexec/lib/node_modules/npm", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
     {
         const f = try std.Io.Dir.createFileAbsolute(
             h.io,
-            try std.fmt.allocPrint(a, "{s}/version.txt", .{src}),
+            try a.print("{s}/version.txt", .{src}),
             .{ .truncate = true },
         );
         defer f.close(h.io);
@@ -5552,13 +5547,13 @@ test "copy replaces a stale destination even without a force flag" {
     }
 
     // A stale copy already sitting at the destination.
-    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
-    const stale = try std.fmt.allocPrint(a, "{s}/npm", .{dstdir});
+    const dstdir = try a.print("{s}/lib/node_modules", .{h.prefix});
+    const stale = try a.print("{s}/npm", .{dstdir});
     try std.Io.Dir.cwd().createDirPath(h.io, stale);
     {
         const f = try std.Io.Dir.createFileAbsolute(
             h.io,
-            try std.fmt.allocPrint(a, "{s}/version.txt", .{stale}),
+            try a.print("{s}/version.txt", .{stale}),
             .{ .truncate = true },
         );
         defer f.close(h.io);
@@ -5572,7 +5567,7 @@ test "copy replaces a stale destination even without a force flag" {
     );
     try testing.expect(execute(h.ctx(), json));
 
-    const got = try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{stale}));
+    const got = try readBack(&h, try a.print("{s}/version.txt", .{stale}));
     try testing.expectEqualStrings("new\n", got);
 }
 
@@ -5585,13 +5580,13 @@ test "copy keeps the previous destination when the clone fails" {
     const a = h.arena.allocator();
 
     const src = try seedNpmSrc(&h, "new\n");
-    const blocked = try blockTree(&h, try std.fmt.allocPrint(a, "{s}/blocked", .{src}));
+    const blocked = try blockTree(&h, try a.print("{s}/blocked", .{src}));
     defer blocked.close(h.io);
     defer blocked.setPermissions(h.io, .fromMode(0o755)) catch {};
 
-    const dest = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    const dest = try a.print("{s}/lib/node_modules/npm", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dest);
-    const installed = try std.fmt.allocPrint(a, "{s}/version.txt", .{dest});
+    const installed = try a.print("{s}/version.txt", .{dest});
     try writeAt(&h, installed, "old\n");
 
     _ = execute(h.ctx(), try npmCopyJson(&h));
@@ -5611,13 +5606,13 @@ test "copy keeps the destination when the swap itself fails" {
     const a = h.arena.allocator();
 
     _ = try seedNpmSrc(&h, "new\n");
-    const dest = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    const dest = try a.print("{s}/lib/node_modules/npm", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dest);
-    const installed = try std.fmt.allocPrint(a, "{s}/version.txt", .{dest});
+    const installed = try a.print("{s}/version.txt", .{dest});
     try writeAt(&h, installed, "old\n");
 
     // An unreadable child keeps the aside non-empty, so both renames refuse it.
-    const stuck = try blockTree(&h, try std.fmt.allocPrint(a, "{s}.malt-replaced/stuck", .{dest}));
+    const stuck = try blockTree(&h, try a.print("{s}.malt-replaced/stuck", .{dest}));
     defer stuck.close(h.io);
     defer stuck.setPermissions(h.io, .fromMode(0o755)) catch {};
 
@@ -5635,14 +5630,14 @@ test "copy replaces a dangling symlink left at the destination" {
     const a = h.arena.allocator();
 
     _ = try seedNpmSrc(&h, "new\n");
-    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    const dstdir = try a.print("{s}/lib/node_modules", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dstdir);
-    const dest = try std.fmt.allocPrint(a, "{s}/npm", .{dstdir});
-    try std.Io.Dir.symLinkAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/gone", .{dstdir}), dest, .{});
+    const dest = try a.print("{s}/npm", .{dstdir});
+    try std.Io.Dir.symLinkAbsolute(h.io, try a.print("{s}/gone", .{dstdir}), dest, .{});
 
     try testing.expect(execute(h.ctx(), try npmCopyJson(&h)));
     try testing.expect(!h.flog.hasErrors());
-    try testing.expectEqualStrings("new\n", try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{dest})));
+    try testing.expectEqualStrings("new\n", try readBack(&h, try a.print("{s}/version.txt", .{dest})));
 }
 
 test "copy keeps a plain-file destination when the clone fails" {
@@ -5652,14 +5647,14 @@ test "copy keeps a plain-file destination when the clone fails" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/payload", .{h.keg});
+    const src = try a.print("{s}/libexec/payload", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
-    const blocked = try blockTree(&h, try std.fmt.allocPrint(a, "{s}/blocked", .{src}));
+    const blocked = try blockTree(&h, try a.print("{s}/blocked", .{src}));
     defer blocked.close(h.io);
     defer blocked.setPermissions(h.io, .fromMode(0o755)) catch {};
 
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/share", .{h.prefix}));
-    const dest = try std.fmt.allocPrint(a, "{s}/share/payload", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/share", .{h.prefix}));
+    const dest = try a.print("{s}/share/payload", .{h.prefix});
     try writeAt(&h, dest, "old\n");
 
     const json = try testFormulaJson(&h,
@@ -5680,12 +5675,12 @@ test "copy reclaims a staging path a crashed run left behind" {
     const a = h.arena.allocator();
 
     _ = try seedNpmSrc(&h, "new\n");
-    const dest = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}.malt-incoming/junk", .{dest}));
+    const dest = try a.print("{s}/lib/node_modules/npm", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}.malt-incoming/junk", .{dest}));
 
     try testing.expect(execute(h.ctx(), try npmCopyJson(&h)));
     try testing.expect(!h.flog.hasErrors());
-    try testing.expectEqualStrings("new\n", try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{dest})));
+    try testing.expectEqualStrings("new\n", try readBack(&h, try a.print("{s}/version.txt", .{dest})));
 }
 
 // --- migrated step types ---------------------------------------------------
@@ -5703,7 +5698,7 @@ test "configure_clang_system writes one isysroot config per arch and target" {
     const want = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk\n";
     for ([_][]const u8{ "arm64", "x86_64", "aarch64" }) |arch| {
         for ([_][]const u8{ "darwin25", "macosx26" }) |target| {
-            const path = try std.fmt.allocPrint(a, "{s}/etc/clang/{s}-apple-{s}.cfg", .{ h.prefix, arch, target });
+            const path = try a.print("{s}/etc/clang/{s}-apple-{s}.cfg", .{ h.prefix, arch, target });
             const got = try fs_read.readFileAllAbsolute(h.io, a, path, 4096);
             try testing.expectEqualStrings(want, got);
         }
@@ -5716,7 +5711,7 @@ test "configure_clang_system writes nothing when every config file already exist
     const a = h.arena.allocator();
 
     try testing.expect(writeClangConfigs(h.ctx(), 26, 25));
-    const probe = try std.fmt.allocPrint(a, "{s}/etc/clang/arm64-apple-darwin25.cfg", .{h.prefix});
+    const probe = try a.print("{s}/etc/clang/arm64-apple-darwin25.cfg", .{h.prefix});
     try atomic.atomicWriteFile(h.io, probe, "user edit\n");
 
     // A second run must leave a complete set exactly as the user has it.
@@ -5769,16 +5764,16 @@ test "move relocates a tree and refuses an occupied target without overwrite" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/html", .{h.keg});
+    const src = try a.print("{s}/libexec/html", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
-    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(a, "{s}/index.html", .{src}), "hi\n");
+    try atomic.atomicWriteFile(h.io, try a.print("{s}/index.html", .{src}), "hi\n");
 
     const json = try testFormulaJson(&h,
         \\[{"type":"move","source":{"base":"libexec","path":"html"},"target":{"base":"var","path":"www"}}]
     );
     try testing.expect(execute(h.ctx(), json));
     try testing.expect(!h.flog.hasErrors());
-    const moved = try std.fmt.allocPrint(a, "{s}/var/www/index.html", .{h.prefix});
+    const moved = try a.print("{s}/var/www/index.html", .{h.prefix});
     try testing.expectEqualStrings("hi\n", try fs_read.readFileAllAbsolute(h.io, a, moved, 64));
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, src, .{}));
 
@@ -5795,23 +5790,23 @@ test "move overwrites an occupied target when the step asks for it" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/html", .{h.keg});
+    const src = try a.print("{s}/libexec/html", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
-    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(a, "{s}/index.html", .{src}), "new\n");
-    const dst = try std.fmt.allocPrint(a, "{s}/var/www", .{h.prefix});
+    try atomic.atomicWriteFile(h.io, try a.print("{s}/index.html", .{src}), "new\n");
+    const dst = try a.print("{s}/var/www", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dst);
-    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(a, "{s}/stale.html", .{dst}), "old\n");
+    try atomic.atomicWriteFile(h.io, try a.print("{s}/stale.html", .{dst}), "old\n");
 
     const json = try testFormulaJson(&h,
         \\[{"type":"move","source":{"base":"libexec","path":"html"},"target":{"base":"var","path":"www"},"overwrite":true}]
     );
     try testing.expect(execute(h.ctx(), json));
     try testing.expect(!h.flog.hasErrors());
-    try testing.expectEqualStrings("new\n", try fs_read.readFileAllAbsolute(h.io, a, try std.fmt.allocPrint(a, "{s}/index.html", .{dst}), 64));
+    try testing.expectEqualStrings("new\n", try fs_read.readFileAllAbsolute(h.io, a, try a.print("{s}/index.html", .{dst}), 64));
     // The whole tree is replaced, not merged.
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/stale.html", .{dst}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/stale.html", .{dst}), .{}),
     );
 }
 
@@ -5825,14 +5820,14 @@ test "move refuses a source that escapes the keg and prefix" {
     try std.Io.Dir.cwd().createDirPath(h.io, outside.base);
     try atomic.atomicWriteFile(h.io, outside.p("/secret"), "s\n");
 
-    const json = try std.fmt.allocPrint(a,
+    const json = try a.print(
         \\[{{"type":"move","source":{{"path":"{s}"}},"target":{{"base":"var","path":"stolen"}}}}]
     , .{outside.base});
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h, json)));
     try testing.expect(h.flog.hasErrors());
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/stolen", .{h.prefix}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/var/stolen", .{h.prefix}), .{}),
     );
 }
 
@@ -5843,9 +5838,9 @@ test "set_permissions recurses by default and honours non_recursive" {
 
     // Upstream passes -R unless non_recursive is set. Getting that backwards
     // leaves the tree under a declared directory at its bottled mode.
-    const nested = try std.fmt.allocPrint(a, "{s}/var/tree/inner", .{h.prefix});
+    const nested = try a.print("{s}/var/tree/inner", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, nested);
-    const leaf = try std.fmt.allocPrint(a, "{s}/leaf", .{nested});
+    const leaf = try a.print("{s}/leaf", .{nested});
     try atomic.atomicWriteFile(h.io, leaf, "x\n");
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -5861,7 +5856,7 @@ test "set_permissions recurses by default and honours non_recursive" {
     try testing.expectEqual(@as(std.posix.mode_t, 0o700), try fileMode(h.io, leaf));
     try testing.expectEqual(
         @as(std.posix.mode_t, 0o755),
-        try fileMode(h.io, try std.fmt.allocPrint(a, "{s}/var/tree", .{h.prefix})),
+        try fileMode(h.io, try a.print("{s}/var/tree", .{h.prefix})),
     );
 }
 
@@ -5870,8 +5865,8 @@ test "set_permissions applies symbolic modes and skips paths that do not exist" 
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const file = try std.fmt.allocPrint(a, "{s}/share/glow/save", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(file).?);
+    const file = try a.print("{s}/share/glow/save", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(file).?);
     try atomic.atomicWriteFile(h.io, file, "x\n");
     try chmodPath(h.io, file, 0o644);
 
@@ -5923,12 +5918,12 @@ test "set_permissions expands the glob shapes upstream path specs carry" {
 
     // redis names `modules/*`; python names `venv/scripts/**/*`. A literal
     // path never matches either, so the step would be a silent no-op.
-    const modules = try std.fmt.allocPrint(a, "{s}/lib/glow/modules", .{h.prefix});
-    const deep = try std.fmt.allocPrint(a, "{s}/lib/glow/scripts/common", .{h.prefix});
+    const modules = try a.print("{s}/lib/glow/modules", .{h.prefix});
+    const deep = try a.print("{s}/lib/glow/scripts/common", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, modules);
     try std.Io.Dir.cwd().createDirPath(h.io, deep);
-    const mod = try std.fmt.allocPrint(a, "{s}/one.so", .{modules});
-    const activate = try std.fmt.allocPrint(a, "{s}/activate", .{deep});
+    const mod = try a.print("{s}/one.so", .{modules});
+    const activate = try a.print("{s}/activate", .{deep});
     try atomic.atomicWriteFile(h.io, mod, "x\n");
     try atomic.atomicWriteFile(h.io, activate, "x\n");
     try chmodPath(h.io, mod, 0o600);
@@ -5959,7 +5954,7 @@ test "the frameworks base resolves inside the keg, matching upstream's prefix/Fr
     defer h.deinit();
 
     const resolved = resolveBase(h.ctx(), "frameworks", null).?;
-    const expected = try std.fmt.allocPrint(h.arena.allocator(), "{s}/Frameworks", .{h.keg});
+    const expected = try h.arena.allocator().print("{s}/Frameworks", .{h.keg});
     try testing.expectEqualStrings(expected, resolved);
 }
 
@@ -5968,8 +5963,8 @@ test "install_gzipped_executable unpacks, marks executable, and unlinks the sour
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/bin/glow-real.gz", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(src).?);
+    const src = try a.print("{s}/libexec/bin/glow-real.gz", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(src).?);
     try atomic.atomicWriteFile(h.io, src, try gzipBytes(a, "\x7fELF payload\n"));
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -5978,7 +5973,7 @@ test "install_gzipped_executable unpacks, marks executable, and unlinks the sour
     )));
     try testing.expect(!h.flog.hasErrors());
 
-    const target = try std.fmt.allocPrint(a, "{s}/libexec/bin/glow-real", .{h.keg});
+    const target = try a.print("{s}/libexec/bin/glow-real", .{h.keg});
     try testing.expectEqualStrings("\x7fELF payload\n", try fs_read.readFileAllAbsolute(h.io, a, target, 4096));
     // Without the exec bit the unpacked binary is unrunnable, and the archive
     // left behind would ship in the keg.
@@ -5991,8 +5986,8 @@ test "install_gzipped_executable leaves no temp file behind on a corrupt source"
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/bin/glow-real.gz", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(src).?);
+    const src = try a.print("{s}/libexec/bin/glow-real.gz", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(src).?);
     try atomic.atomicWriteFile(h.io, src, "not gzip at all");
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -6001,7 +5996,7 @@ test "install_gzipped_executable leaves no temp file behind on a corrupt source"
     )));
     try testing.expect(h.flog.hasErrors());
     // A half-written dotfile in bin/ would ship in the keg and confuse linking.
-    const tmp = try std.fmt.allocPrint(a, "{s}/libexec/bin/.glow-real.install-step", .{h.keg});
+    const tmp = try a.print("{s}/libexec/bin/.glow-real.install-step", .{h.keg});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, tmp, .{}));
     // The archive survives, so a re-run can still succeed.
     try std.Io.Dir.accessAbsolute(h.io, src, .{});
@@ -6027,9 +6022,9 @@ test "change_dylib_id sets the install name on the real file behind a resolved s
     // file the rewrite lands on is the whole contract of `resolve_source`, and
     // the failure detail is the only place that choice is observable without a
     // real Mach-O to hand to install_name_tool.
-    const real = try std.fmt.allocPrint(a, "{s}/lib/libruby.3.4.dylib", .{h.keg});
-    const link = try std.fmt.allocPrint(a, "{s}/lib/libruby.dylib", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(real).?);
+    const real = try a.print("{s}/lib/libruby.3.4.dylib", .{h.keg});
+    const link = try a.print("{s}/lib/libruby.dylib", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(real).?);
     try atomic.atomicWriteFile(h.io, real, "not a mach-o\n");
     try std.Io.Dir.symLinkAbsolute(h.io, real, link, .{});
     try std.Io.Dir.accessAbsolute(h.io, real, .{});
@@ -6045,7 +6040,7 @@ test "change_dylib_id sets the install name on the real file behind a resolved s
     // leaves the harness prefix and is refused — the detail still records which
     // file the step chose, which is what `resolve_source` decides.)
     try testing.expect(std.mem.endsWith(u8, detail, "/lib/libruby.3.4.dylib"));
-    try testing.expect(std.mem.indexOf(u8, detail, "Cellar/glow/1.2.3") != null);
+    try testing.expect(std.mem.find(u8, detail, "Cellar/glow/1.2.3") != null);
 }
 
 test "change_dylib_id without resolve_source rewrites the path it was handed" {
@@ -6053,9 +6048,9 @@ test "change_dylib_id without resolve_source rewrites the path it was handed" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const real = try std.fmt.allocPrint(a, "{s}/lib/libruby.3.4.dylib", .{h.keg});
-    const link = try std.fmt.allocPrint(a, "{s}/lib/libruby.dylib", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(real).?);
+    const real = try a.print("{s}/lib/libruby.3.4.dylib", .{h.keg});
+    const link = try a.print("{s}/lib/libruby.dylib", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(real).?);
     try atomic.atomicWriteFile(h.io, real, "not a mach-o\n");
     try std.Io.Dir.symLinkAbsolute(h.io, real, link, .{});
 
@@ -6064,7 +6059,7 @@ test "change_dylib_id without resolve_source rewrites the path it was handed" {
         \\  "id":"{{HOMEBREW_PREFIX}}/opt/glow/lib/libruby.dylib"}]
     )));
     try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
-    try testing.expect(std.mem.indexOf(u8, h.flog.entries()[0].detail, link) != null);
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, link) != null);
 }
 
 test "change_dylib_id refuses a source that resolves outside the keg and prefix" {
@@ -6076,8 +6071,8 @@ test "change_dylib_id refuses a source that resolves outside the keg and prefix"
     defer outside.deinit();
     try std.Io.Dir.cwd().createDirPath(h.io, outside.base);
     try atomic.atomicWriteFile(h.io, outside.p("/libvictim.dylib"), "not macho\n");
-    const link = try std.fmt.allocPrint(a, "{s}/lib/libruby.dylib", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(link).?);
+    const link = try a.print("{s}/lib/libruby.dylib", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(link).?);
     try std.Io.Dir.symLinkAbsolute(h.io, outside.p("/libvictim.dylib"), link, .{});
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -6139,7 +6134,7 @@ test "terminate_process with a full match closes a process by its command line" 
 
     // The marker path is process-unique, so `pkill -f` can only hit this
     // child; `killall` matches on the executable name and would miss it.
-    const marker = try std.fmt.allocPrint(a, "{s}/tail-marker", .{h.prefix});
+    const marker = try a.print("{s}/tail-marker", .{h.prefix});
     try atomic.atomicWriteFile(h.io, marker, "");
     var child = try std.process.spawn(h.io, .{
         .argv = &.{ "/usr/bin/tail", "-f", marker },
@@ -6147,7 +6142,7 @@ test "terminate_process with a full match closes a process by its command line" 
         .stderr = .ignore,
     });
 
-    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try std.fmt.allocPrint(a,
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try a.print(
         \\[{{"type":"terminate_process","name":"{s}","match":"full","attempts":3,
         \\  "notices":["closing {{{{version}}}}"],"failure_message":"still running"}}]
     , .{marker}))));
@@ -6176,12 +6171,12 @@ test "terminate_process with a full match reads the name as a literal, not a pat
     // by `.`: as a regex that still matches the child, as a literal it does
     // not, so the child must survive. Nothing else on the machine carries
     // this path, so a wrong answer can only ever hit our own process.
-    const marker = try std.fmt.allocPrint(a, "{s}/tail-marker", .{h.prefix});
+    const marker = try a.print("{s}/tail-marker", .{h.prefix});
     try atomic.atomicWriteFile(h.io, marker, "");
     var child = try std.process.spawn(h.io, .{ .argv = &.{ "/usr/bin/tail", "-f", marker }, .stdout = .ignore, .stderr = .ignore });
     defer child.kill(h.io);
 
-    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try std.fmt.allocPrint(a,
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try a.print(
         \\[{{"type":"terminate_process","name":"{s}.","match":"full"}}]
     , .{marker[0 .. marker.len - 1]}))));
     try testing.expect(!h.flog.hasErrors());
@@ -6222,7 +6217,7 @@ test "terminate_process with must_succeed turns a miss into an abort" {
         \\ {"type":"mkdir_p","path":{"base":"etc","path":"after"}}]
     )));
     try testing.expect(h.flog.hasFatal());
-    try testing.expect(!dirExists(h.io, try std.fmt.allocPrint(a, "{s}/etc/after", .{h.prefix})));
+    try testing.expect(!dirExists(h.io, try a.print("{s}/etc/after", .{h.prefix})));
 }
 
 test "terminate_process refuses a match it cannot honour and an attempt count it will not wait for" {
@@ -6264,12 +6259,12 @@ test "set_ownership chowns only inside the confinement roots" {
     // can observe the change; `staff`, the default, is what a fresh file
     // already carries.
     const everyone = groupId("everyone") orelse return error.SkipZigTest;
-    const inside = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/tool", .{ch.h.prefix});
+    const inside = try a.print("{s}/Caskroom/box/1.2.3/tool", .{ch.h.prefix});
     try atomic.atomicWriteFile(c.io, inside, "tool");
-    const nested = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/lib/x", .{ch.h.prefix});
-    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(nested).?);
+    const nested = try a.print("{s}/Caskroom/box/1.2.3/lib/x", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.Io.Dir.path.dirname(nested).?);
     try atomic.atomicWriteFile(c.io, nested, "x");
-    const outside = try std.fs.path.join(a, &.{ ch.home, "outside" });
+    const outside = try std.Io.Dir.path.join(a, &.{ ch.home, "outside" });
     try atomic.atomicWriteFile(c.io, outside, "x");
 
     runSteps(c, try parseSteps(&ch.h,
@@ -6290,8 +6285,8 @@ test "set_ownership refuses a user or group it cannot resolve and honours non_re
     const a = ch.h.arena.allocator();
     const everyone = groupId("everyone") orelse return error.SkipZigTest;
 
-    const dir = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/d", .{ch.h.prefix});
-    const child = try std.fmt.allocPrint(a, "{s}/child", .{dir});
+    const dir = try a.print("{s}/Caskroom/box/1.2.3/d", .{ch.h.prefix});
+    const child = try a.print("{s}/child", .{dir});
     try std.Io.Dir.cwd().createDirPath(c.io, dir);
     try atomic.atomicWriteFile(c.io, child, "x");
 
@@ -6318,9 +6313,9 @@ test "mkdir fails when the parent is missing and mkdir_p creates it" {
         \\ {"type":"mkdir","path":{"base":"prefix","path":"flat"}},
         \\ {"type":"mkdir","path":{"base":"prefix","path":"missing/child"}}]
     ));
-    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/deep/leaf", .{h.keg})));
-    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/flat", .{h.keg})));
-    try testing.expect(!dirExists(c.io, try std.fmt.allocPrint(a, "{s}/missing", .{h.keg})));
+    try testing.expect(dirExists(c.io, try a.print("{s}/deep/leaf", .{h.keg})));
+    try testing.expect(dirExists(c.io, try a.print("{s}/flat", .{h.keg})));
+    try testing.expect(!dirExists(c.io, try a.print("{s}/missing", .{h.keg})));
     // A repeat on an existing dir is a no-op, as upstream's `Dir.mkdir` is;
     // a missing parent raises there, so it is fatal here.
     try testing.expect(h.flog.hasFatal());
@@ -6343,10 +6338,10 @@ test "move_children moves entries not the directory" {
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
 
-    const staged = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/a", .{staged}), "a");
-    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/sub", .{staged}));
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/sub/b", .{staged}), "b");
+    const staged = try a.print("{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/a", .{staged}), "a");
+    try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/sub", .{staged}));
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/sub/b", .{staged}), "b");
 
     // The chatty/quakespasm shape: fold the staged root into a subdirectory
     // of itself, so the target must be skipped as a child of the source.
@@ -6355,11 +6350,11 @@ test "move_children moves entries not the directory" {
         \\ {"type":"move_children","source":{"base":"staged_path","path":"Chatty/sub"},"target":{"base":"caskroom_path","path":"flat"}}]
     ));
     try testing.expect(!ch.h.flog.hasErrors());
-    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/a", .{staged})));
-    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/a", .{staged})));
-    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/sub", .{staged})));
-    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/sub/b", .{staged})));
-    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/flat/b", .{ch.h.prefix})));
+    try testing.expect(fileExists(c.io, try a.print("{s}/Chatty/a", .{staged})));
+    try testing.expect(!pathExists(c.io, try a.print("{s}/a", .{staged})));
+    try testing.expect(dirExists(c.io, try a.print("{s}/Chatty/sub", .{staged})));
+    try testing.expect(!pathExists(c.io, try a.print("{s}/Chatty/sub/b", .{staged})));
+    try testing.expect(fileExists(c.io, try a.print("{s}/Caskroom/box/flat/b", .{ch.h.prefix})));
 }
 
 test "move_contents refuses a source or target outside the confinement roots" {
@@ -6367,16 +6362,16 @@ test "move_contents refuses a source or target outside the confinement roots" {
     defer ch.deinit();
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
-    const outside = try std.fs.path.join(a, &.{ ch.home, "loose" });
+    const outside = try std.Io.Dir.path.join(a, &.{ ch.home, "loose" });
     try std.Io.Dir.cwd().createDirPath(c.io, outside);
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside}), "f");
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/f", .{outside}), "f");
 
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"move_contents","source":{"base":"home","path":"loose"},"target":{"base":"staged_path","path":"in"}}]
     ));
     try testing.expect(ch.h.flog.hasFatal());
-    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside})));
-    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/in", .{ch.h.prefix})));
+    try testing.expect(fileExists(c.io, try a.print("{s}/f", .{outside})));
+    try testing.expect(!pathExists(c.io, try a.print("{s}/Caskroom/box/1.2.3/in", .{ch.h.prefix})));
 }
 
 test "delete_keychain_certificate treats an absent certificate as success" {
@@ -6426,7 +6421,7 @@ test "checkSteps names what would be refused without touching the filesystem" {
         \\ {"type":"run","command":{"path":"/bin/echo"},"env":{"A":1}},
         \\ {"type":"frobnicate"}]
     ));
-    try testing.expect(!dirExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/never" })));
+    try testing.expect(!dirExists(c.io, try std.Io.Dir.path.join(a, &.{ ch.home, "Library/never" })));
     // A shape the executor cannot honour is reported by the plan, not
     // discovered at install time.
     const entries = ch.h.flog.entries();
@@ -6450,8 +6445,8 @@ test "a symlink declared with uninstall is placed on install and removed in unin
     );
     runSteps(c, declared);
     try testing.expect(!ch.h.flog.hasErrors());
-    const link = try std.fmt.allocPrint(a, "{s}/lib/libx.1.dylib", .{ch.h.prefix});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try a.print("{s}/lib/libx.1.dylib", .{ch.h.prefix});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(c.io, link, &buf);
 
     runUninstallSteps(c, declared);
@@ -6476,8 +6471,8 @@ test "a symlink whose source base is relative is written verbatim and removed th
         \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib"},"source_glob":true}]
     );
     runSteps(c, declared);
-    const link = try std.fmt.allocPrint(a, "{s}/lib/libx.1.dylib", .{ch.h.prefix});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try a.print("{s}/lib/libx.1.dylib", .{ch.h.prefix});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings("libx.1.2.3.dylib", buf[0..try std.Io.Dir.readLinkAbsolute(c.io, link, &buf)]);
     // A glob has nothing to expand against in link content.
     try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
@@ -6494,10 +6489,10 @@ test "uninstall mode leaves a repointed link and a plain file alone" {
     const a = ch.h.arena.allocator();
 
     // Whatever owns the target now, it is not the link this cask placed.
-    const link = try std.fmt.allocPrint(a, "{s}/lib/libx.1.dylib", .{ch.h.prefix});
-    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/lib", .{ch.h.prefix}));
+    const link = try a.print("{s}/lib/libx.1.dylib", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/lib", .{ch.h.prefix}));
     try std.Io.Dir.symLinkAbsolute(c.io, "/elsewhere/libx.dylib", link, .{});
-    const plain = try std.fmt.allocPrint(a, "{s}/lib/libx.2.dylib", .{ch.h.prefix});
+    const plain = try a.print("{s}/lib/libx.2.dylib", .{ch.h.prefix});
     try atomic.atomicWriteFile(c.io, plain, "not a link");
 
     runUninstallSteps(c, try parseSteps(&ch.h,
@@ -6507,7 +6502,7 @@ test "uninstall mode leaves a repointed link and a plain file alone" {
         \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.2.dylib"},"uninstall":true}]
     ));
     try testing.expect(!ch.h.flog.hasErrors());
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings("/elsewhere/libx.dylib", buf[0..try std.Io.Dir.readLinkAbsolute(c.io, link, &buf)]);
     try testing.expectEqualStrings("not a link", try fs_read.readFileAllAbsolute(c.io, a, plain, 64));
 }
@@ -6532,8 +6527,8 @@ test "uninstall mode is a no-op for every other step and for a symlink without u
     runUninstallSteps(c, declared);
     try testing.expect(!ch.h.flog.hasErrors());
     try testing.expectEqual(@as(usize, 0), ch.h.flog.total_top_level);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/keep" }), &buf);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.Io.Dir.path.join(a, &.{ ch.home, "Library/keep" }), &buf);
 }
 
 test "a glob symlink cannot also ask for removal: it is refused rather than half-honoured" {
@@ -6542,14 +6537,14 @@ test "a glob symlink cannot also ask for removal: it is refused rather than half
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
 
-    const staged = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/a.dylib", .{staged}), "a");
+    const staged = try a.print("{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/a.dylib", .{staged}), "a");
     const declared = try parseSteps(&ch.h,
         \\[{"type":"symlink","source":{"base":"staged_path","path":"*.dylib"},"target":{"path":"{{HOMEBREW_PREFIX}}/lib"},"source_glob":true,"uninstall":true}]
     );
     runSteps(c, declared);
     try testing.expectEqualStrings("symlink with source_glob and uninstall", ch.h.flog.entries()[0].detail);
-    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/lib/a.dylib", .{ch.h.prefix})));
+    try testing.expect(!pathExists(c.io, try a.print("{s}/lib/a.dylib", .{ch.h.prefix})));
     runUninstallSteps(c, declared);
     try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
 }
@@ -6573,12 +6568,12 @@ test "a recursive remove refuses $HOME/Library and its top-level children" {
 
     // `Keychains` stands in for every top-level dir the OS and other apps
     // share; the cask's own subtree under `Application Support` is fair game.
-    const keychains = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains" });
+    const keychains = try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Keychains" });
     try std.Io.Dir.cwd().createDirPath(c.io, keychains);
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/login", .{keychains}), "k");
-    const own = try std.fs.path.join(a, &.{ ch.home, "Library/Application Support/box" });
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/login", .{keychains}), "k");
+    const own = try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Application Support/box" });
     try std.Io.Dir.cwd().createDirPath(c.io, own);
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/state", .{own}), "s");
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/state", .{own}), "s");
 
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Application Support/box"}]},
@@ -6601,9 +6596,9 @@ test "a recursive remove refuses a credential tree under $HOME/Library at any de
     // Two levels down: past the top-level guard, yet still the user's
     // login keychain and never a cask's to remove. An app's own state under
     // `Application Support` stays fair game at the same depth.
-    const keychain = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains/login.keychain-db" });
+    const keychain = try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Keychains/login.keychain-db" });
     try std.Io.Dir.cwd().createDirPath(c.io, keychain);
-    const own = try std.fs.path.join(a, &.{ ch.home, "Library/Application Support/box/cache" });
+    const own = try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Application Support/box/cache" });
     try std.Io.Dir.cwd().createDirPath(c.io, own);
 
     runSteps(c, try parseSteps(&ch.h,
@@ -6625,17 +6620,17 @@ test "move and move_contents refuse to relocate $HOME/Library, and copy refuses 
     // Each shape passes confinement on its own: the roots admit `$HOME/Library`
     // itself. Only the shared-ground guard stands between them and the
     // user's whole Library being renamed aside and deleted.
-    const home_lib = try std.fs.path.join(a, &.{ ch.home, "Library" });
-    const marker = try std.fmt.allocPrint(a, "{s}/Preferences/keep.plist", .{home_lib});
-    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(marker).?);
+    const home_lib = try std.Io.Dir.path.join(a, &.{ ch.home, "Library" });
+    const marker = try a.print("{s}/Preferences/keep.plist", .{home_lib});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.Io.Dir.path.dirname(marker).?);
     try atomic.atomicWriteFile(c.io, marker, "p");
     const staged = c.subject.cask.staged_path;
-    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/empty", .{staged}));
+    try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/empty", .{staged}));
     // A copy into an existing directory lands as a child, so the replacing
     // shape is a source named like one: `Keychains` over the user's own.
-    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/Keychains", .{staged}));
-    const login = try std.fmt.allocPrint(a, "{s}/Keychains/login", .{home_lib});
-    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(login).?);
+    try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/Keychains", .{staged}));
+    const login = try a.print("{s}/Keychains/login", .{home_lib});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.Io.Dir.path.dirname(login).?);
     try atomic.atomicWriteFile(c.io, login, "k");
 
     runSteps(c, try parseSteps(&ch.h,
@@ -6646,7 +6641,7 @@ test "move and move_contents refuse to relocate $HOME/Library, and copy refuses 
     ));
     try testing.expect(pathExists(c.io, marker));
     try testing.expect(pathExists(c.io, login));
-    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/lib", .{staged})));
+    try testing.expect(!pathExists(c.io, try a.print("{s}/lib", .{staged})));
     try testing.expectEqual(@as(usize, 0), ch.h.flog.handled_top_level);
     try testing.expectEqual(@as(usize, 4), ch.h.flog.entries().len);
 }
@@ -6661,8 +6656,8 @@ test "move and copy may still create a new top-level dir under $HOME/Library" {
     // about replacing shared ground, not about where a cask may add to it.
     const staged = c.subject.cask.staged_path;
     for ([_][]const u8{ "a", "b" }) |n| {
-        try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/{s}", .{ staged, n }));
-        try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/{s}/f", .{ staged, n }), "x");
+        try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/{s}", .{ staged, n }));
+        try atomic.atomicWriteFile(c.io, try a.print("{s}/{s}/f", .{ staged, n }), "x");
     }
 
     runSteps(c, try parseSteps(&ch.h,
@@ -6670,8 +6665,8 @@ test "move and copy may still create a new top-level dir under $HOME/Library" {
         \\ {"type":"copy","source":{"base":"staged_path","path":"b"},"target":{"base":"home","path":"Library/Box Copied"}}]
     ));
     try testing.expect(!ch.h.flog.hasErrors());
-    try testing.expect(pathExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/Box Moved/f" })));
-    try testing.expect(pathExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/Box Copied/f" })));
+    try testing.expect(pathExists(c.io, try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Box Moved/f" })));
+    try testing.expect(pathExists(c.io, try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Box Copied/f" })));
 }
 
 test "a recursive remove refuses the applications dir itself but not one app in it" {
@@ -6679,10 +6674,10 @@ test "a recursive remove refuses the applications dir itself but not one app in 
     defer ch.deinit();
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
-    const appdir = try std.fmt.allocPrint(a, "{s}/Applications", .{ch.h.prefix});
-    const app = try std.fmt.allocPrint(a, "{s}/Box.app", .{appdir});
-    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/Contents", .{app}));
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/Contents/x", .{app}), "x");
+    const appdir = try a.print("{s}/Applications", .{ch.h.prefix});
+    const app = try a.print("{s}/Box.app", .{appdir});
+    try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/Contents", .{app}));
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/Contents/x", .{app}), "x");
 
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"remove","recursive":true,"paths":[{"base":"appdir","path":"."}]},
@@ -6715,9 +6710,9 @@ test "a degenerate appdir or home never becomes a confinement root" {
     var ch = try CaskHarness.init();
     defer ch.deinit();
     const a = ch.h.arena.allocator();
-    const outside = try std.fs.path.join(a, &.{ ch.home, "escaped" });
+    const outside = try std.Io.Dir.path.join(a, &.{ ch.home, "escaped" });
 
-    const step = try std.fmt.allocPrint(a, "[{{\"type\":\"touch\",\"path\":{{\"path\":\"{s}\"}}}}]", .{outside});
+    const step = try a.print("[{{\"type\":\"touch\",\"path\":{{\"path\":\"{s}\"}}}}]", .{outside});
 
     const degenerate = [_][]const u8{ "/", "//", "relative/apps", "" };
     for (degenerate) |bad| {
@@ -6736,12 +6731,12 @@ test "a degenerate appdir or home never becomes a confinement root" {
     // A sane appdir does admit its own tree, so the refusal above is the
     // root, not the step.
     var c = ch.ctx();
-    c.subject.cask.appdir = try std.fs.path.join(a, &.{ ch.home, "Apps" });
+    c.subject.cask.appdir = try std.Io.Dir.path.join(a, &.{ ch.home, "Apps" });
     try std.Io.Dir.cwd().createDirPath(c.io, c.subject.cask.appdir);
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"touch","path":{"base":"appdir","path":"ok"}}]
     ));
-    try testing.expect(fileExists(c.io, try std.fs.path.join(a, &.{ c.subject.cask.appdir, "ok" })));
+    try testing.expect(fileExists(c.io, try std.Io.Dir.path.join(a, &.{ c.subject.cask.appdir, "ok" })));
 }
 
 test "the temp base and template resolve inside the prefix so a cask can park data across an uninstall" {
@@ -6751,13 +6746,13 @@ test "the temp base and template resolve inside the prefix so a cask can park da
     defer ch.deinit();
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
-    const tmp = try std.fmt.allocPrint(a, "{s}/tmp", .{ch.h.prefix});
+    const tmp = try a.print("{s}/tmp", .{ch.h.prefix});
     try testing.expectEqualStrings(tmp, resolveBase(c, "temp", null).?);
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/box-envs", .{tmp}), try expandTemplates(c, "{{temp}}/{{token}}-envs"));
+    try testing.expectEqualStrings(try a.print("{s}/box-envs", .{tmp}), try expandTemplates(c, "{{temp}}/{{token}}-envs"));
 
-    const envs = try std.fmt.allocPrint(a, "{s}/Caskroom/box/base/envs", .{ch.h.prefix});
+    const envs = try a.print("{s}/Caskroom/box/base/envs", .{ch.h.prefix});
     try std.Io.Dir.cwd().createDirPath(c.io, envs);
-    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/py311", .{envs}), "env");
+    try atomic.atomicWriteFile(c.io, try a.print("{s}/py311", .{envs}), "env");
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"move","source":{"base":"caskroom_path","path":"base/envs"},"target":{"path":"{{temp}}/{{token}}-envs"},"overwrite":true,
         \\  "guards":[{"path":"{{caskroom_path}}/base/envs","condition":"if_exists"}]}]
@@ -6769,7 +6764,7 @@ test "the temp base and template resolve inside the prefix so a cask can park da
         \\  "guards":[{"path":"{{temp}}/{{token}}-envs","condition":"if_exists"}]}]
     ));
     try testing.expect(!ch.h.flog.hasErrors());
-    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/py311", .{envs})));
+    try testing.expect(fileExists(c.io, try a.print("{s}/py311", .{envs})));
 }
 
 test "a cask run command resolves the cask bases and still refuses a bare name" {
@@ -6780,16 +6775,16 @@ test "a cask run command resolves the cask bases and still refuses a bare name" 
     const cases = [_]struct { spec: []const u8, want: []const u8 }{
         .{ .spec =
         \\{"command":{"base":"appdir","path":"K.app/Contents/install"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/Applications/K.app/Contents/install", .{ch.h.prefix}) },
+        , .want = try a.print("{s}/Applications/K.app/Contents/install", .{ch.h.prefix}) },
         .{ .spec =
         \\{"command":{"base":"staged_path","path":"wrapper.sh"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/wrapper.sh", .{ch.h.prefix}) },
+        , .want = try a.print("{s}/Caskroom/box/1.2.3/wrapper.sh", .{ch.h.prefix}) },
         .{ .spec =
         \\{"command":{"base":"homebrew_prefix","path":"share/sdk/bin/tool"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/share/sdk/bin/tool", .{ch.h.prefix}) },
+        , .want = try a.print("{s}/share/sdk/bin/tool", .{ch.h.prefix}) },
         .{ .spec =
         \\{"command":{"path":"{{appdir}}/K.app/Contents/x"}}
-        , .want = try std.fmt.allocPrint(a, "{s}/Applications/K.app/Contents/x", .{ch.h.prefix}) },
+        , .want = try a.print("{s}/Applications/K.app/Contents/x", .{ch.h.prefix}) },
     };
     for (cases) |case| {
         const got = resolveCommandPath(c, try parseStep(&ch.h, case.spec)) orelse return error.TestUnexpectedResult;
@@ -6821,16 +6816,16 @@ test "a cask run step can write to the appdir and $HOME/Library the lint admits"
     rmrf(c.keg_path);
     // Exists up front: the fence only learns a root's resolved form once it is
     // on disk, and this prefix sits under the `/tmp` symlink.
-    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/tmp", .{ch.h.prefix}));
+    try std.Io.Dir.cwd().createDirPath(c.io, try a.print("{s}/tmp", .{ch.h.prefix}));
 
-    const support = try std.fmt.allocPrint(a, "{s}/Library/Application Support/box", .{ch.home});
-    runSteps(c, try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+    const support = try a.print("{s}/Library/Application Support/box", .{ch.home});
+    runSteps(c, try parseSteps(&ch.h, try a.print(
         \\[{{"type":"run","command":{{"path":"/bin/mkdir"}},"args":["-p","{{{{appdir}}}}/Probe.app","{s}","{{{{temp}}}}/parked"]}}]
     , .{support})));
     try testing.expect(!ch.h.flog.hasErrors());
-    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/Probe.app", .{c.subject.cask.appdir})));
+    try testing.expect(dirExists(c.io, try a.print("{s}/Probe.app", .{c.subject.cask.appdir})));
     try testing.expect(dirExists(c.io, support));
-    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/tmp/parked", .{ch.h.prefix})));
+    try testing.expect(dirExists(c.io, try a.print("{s}/tmp/parked", .{ch.h.prefix})));
 }
 
 test "a cask run step is fenced off the credential trees under $HOME/Library" {
@@ -6843,10 +6838,10 @@ test "a cask run step is fenced off the credential trees under $HOME/Library" {
     ch.h.io = threaded.io();
     const c = ch.ctx();
     const a = ch.h.arena.allocator();
-    const keychains = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains" });
+    const keychains = try std.Io.Dir.path.join(a, &.{ ch.home, "Library/Keychains" });
     try std.Io.Dir.cwd().createDirPath(c.io, keychains);
 
-    const steps = try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+    const steps = try parseSteps(&ch.h, try a.print(
         \\[{{"type":"run","command":{{"path":"/bin/mkdir"}},"args":["{s}/planted"]}}]
     , .{keychains}));
     {
@@ -6864,7 +6859,7 @@ test "a cask run step is fenced off the credential trees under $HOME/Library" {
         runSteps(c, steps);
     }
     try testing.expect(ch.h.flog.hasFatal());
-    try testing.expect(!dirExists(c.io, try std.fmt.allocPrint(a, "{s}/planted", .{keychains})));
+    try testing.expect(!dirExists(c.io, try a.print("{s}/planted", .{keychains})));
 }
 
 test "checkSteps names a run command it could not resolve" {
@@ -6890,7 +6885,7 @@ test "a fatal entry left by an earlier phase does not fail the next one" {
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"mkdir_p","path":{"base":"caskroom_path","path":"later"}}]
     ));
-    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(ch.h.arena.allocator(), "{s}/Caskroom/box/later", .{ch.h.prefix})));
+    try testing.expect(dirExists(c.io, try ch.h.arena.allocator().print("{s}/Caskroom/box/later", .{ch.h.prefix})));
     try testing.expect(!ch.h.flog.hasFatalSince(start));
 }
 
@@ -6936,11 +6931,11 @@ test "set_permissions walks past a symlink instead of failing the step on it" {
 
     // Kegs are full of their own symlinks. `chmod -R` skips them; treating one
     // as a confinement violation would fail an install over ordinary layout.
-    const tree = try std.fmt.allocPrint(a, "{s}/var/tree", .{h.prefix});
+    const tree = try a.print("{s}/var/tree", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, tree);
-    const real = try std.fmt.allocPrint(a, "{s}/real", .{tree});
+    const real = try a.print("{s}/real", .{tree});
     try atomic.atomicWriteFile(h.io, real, "x\n");
-    try std.Io.Dir.symLinkAbsolute(h.io, "/etc/hosts", try std.fmt.allocPrint(a, "{s}/link", .{tree}), .{});
+    try std.Io.Dir.symLinkAbsolute(h.io, "/etc/hosts", try a.print("{s}/link", .{tree}), .{});
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
         \\[{"type":"set_permissions","paths":[{"base":"var","path":"tree"}],"permissions":"0700"}]
@@ -6972,7 +6967,7 @@ test "move reports a source the bottle never shipped as a mismatch, not a violat
     // A sandbox_violation is fatal and would abort every following step; a
     // missing source is a formula/bottle mismatch, not an escape attempt.
     try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
-    try std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/var/after", .{h.prefix}), .{});
+    try std.Io.Dir.accessAbsolute(h.io, try h.arena.allocator().print("{s}/var/after", .{h.prefix}), .{});
 }
 
 test "a step carrying both a platform and an existence guard evaluates both" {
@@ -6992,13 +6987,13 @@ test "a step carrying both a platform and an existence guard evaluates both" {
     // The platform matched but the marker is absent, so the step stays unrun.
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/var/made", .{h.prefix}), .{}),
     );
 
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/var", .{h.prefix}));
-    (try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/marker", .{h.prefix}), .{})).close(h.io);
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/var", .{h.prefix}));
+    (try std.Io.Dir.createFileAbsolute(h.io, try a.print("{s}/var/marker", .{h.prefix}), .{})).close(h.io);
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h, json)));
-    try std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{});
+    try std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/var/made", .{h.prefix}), .{});
 }
 
 test "a recursive remove expands the glob a formula names its stale tree with" {
@@ -7008,9 +7003,9 @@ test "a recursive remove expands the glob a formula names its stale tree with" {
 
     // ruby retires `gems/bundler-*`; a literal path matches nothing, so the
     // superseded copy would survive every upgrade.
-    const gems = try std.fmt.allocPrint(a, "{s}/lib/gems", .{h.prefix});
-    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/bundler-2.6.9", .{gems}));
-    const keep = try std.fmt.allocPrint(a, "{s}/rake-13.2.1", .{gems});
+    const gems = try a.print("{s}/lib/gems", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/bundler-2.6.9", .{gems}));
+    const keep = try a.print("{s}/rake-13.2.1", .{gems});
     try std.Io.Dir.cwd().createDirPath(h.io, keep);
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -7019,7 +7014,7 @@ test "a recursive remove expands the glob a formula names its stale tree with" {
     try testing.expect(!h.flog.hasErrors());
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/bundler-2.6.9", .{gems}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/bundler-2.6.9", .{gems}), .{}),
     );
     // Neighbours the pattern does not name must survive.
     try std.Io.Dir.accessAbsolute(h.io, keep, .{});
@@ -7032,7 +7027,7 @@ test "a globbed recursive remove still refuses a shared prefix directory" {
 
     // Expansion happens before the shared-ground guard, so a pattern must not
     // be a way around it: `<prefix>/*` names every other package's ground.
-    const lib = try std.fmt.allocPrint(a, "{s}/lib", .{h.prefix});
+    const lib = try a.print("{s}/lib", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, lib);
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -7063,7 +7058,7 @@ test "a glob is refused when its root sits outside the keg and prefix" {
     }) |shape| {
         var fresh = try TestHarness.init();
         defer fresh.deinit();
-        const json = try std.fmt.allocPrint(a, shape, .{outside.base});
+        const json = try a.print(shape, .{outside.base});
         try testing.expect(execute(fresh.ctx(), try testFormulaJson(&fresh, json)));
         try testing.expectEqual(@as(usize, 1), fresh.flog.entries().len);
         try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, fresh.flog.entries()[0].reason);
@@ -7078,16 +7073,16 @@ test "configure_clang_system completes a set left half-written by an earlier run
 
     // An interrupted run leaves some of the six behind. The early exit only
     // fires on a complete set, so the rest must still be written.
-    const dir = try std.fmt.allocPrint(a, "{s}/etc/clang", .{h.prefix});
+    const dir = try a.print("{s}/etc/clang", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dir);
-    const present = try std.fmt.allocPrint(a, "{s}/arm64-apple-darwin25.cfg", .{dir});
+    const present = try a.print("{s}/arm64-apple-darwin25.cfg", .{dir});
     try atomic.atomicWriteFile(h.io, present, "stale\n");
 
     try testing.expect(writeClangConfigs(h.ctx(), 26, 25));
     try testing.expect(!h.flog.hasErrors());
 
     const want = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk\n";
-    const missing = try std.fmt.allocPrint(a, "{s}/x86_64-apple-macosx26.cfg", .{dir});
+    const missing = try a.print("{s}/x86_64-apple-macosx26.cfg", .{dir});
     try testing.expectEqualStrings(want, try fs_read.readFileAllAbsolute(h.io, a, missing, 4096));
     // The incomplete set is rewritten wholesale, matching upstream's all-or-none check.
     try testing.expectEqualStrings(want, try fs_read.readFileAllAbsolute(h.io, a, present, 4096));
@@ -7105,8 +7100,8 @@ test "configure_clang_system names its files from the host's own two versions" {
 
     const kernel = sysctlMajor("kern.osrelease").?;
     const macos = sysctlMajor("kern.osproductversion").?;
-    try std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/etc/clang/arm64-apple-darwin{d}.cfg", .{ h.prefix, kernel }), .{});
-    try std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/etc/clang/arm64-apple-macosx{d}.cfg", .{ h.prefix, macos }), .{});
+    try std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/etc/clang/arm64-apple-darwin{d}.cfg", .{ h.prefix, kernel }), .{});
+    try std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/etc/clang/arm64-apple-macosx{d}.cfg", .{ h.prefix, macos }), .{});
 }
 
 test "install_gzipped_executable refuses a source or target outside the prefix" {
@@ -7121,7 +7116,7 @@ test "install_gzipped_executable refuses a source or target outside the prefix" 
 
     // The step decompresses tap-controlled bytes and marks the result
     // executable, so both ends need the same boundary as every other write.
-    const escaping_source = try std.fmt.allocPrint(a,
+    const escaping_source = try a.print(
         \\[{{"type":"install_gzipped_executable","source":{{"path":"{s}/payload.gz"}},
         \\  "target":{{"base":"libexec","path":"bin/x"}}}}]
     , .{outside.base});
@@ -7129,15 +7124,15 @@ test "install_gzipped_executable refuses a source or target outside the prefix" 
     try testing.expect(h.flog.hasErrors());
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/libexec/bin/x", .{h.keg}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}/libexec/bin/x", .{h.keg}), .{}),
     );
 
     var h2 = try TestHarness.init();
     defer h2.deinit();
-    const src = try std.fmt.allocPrint(h2.arena.allocator(), "{s}/libexec/payload.gz", .{h2.keg});
-    try std.Io.Dir.cwd().createDirPath(h2.io, std.fs.path.dirname(src).?);
+    const src = try h2.arena.allocator().print("{s}/libexec/payload.gz", .{h2.keg});
+    try std.Io.Dir.cwd().createDirPath(h2.io, std.Io.Dir.path.dirname(src).?);
     try atomic.atomicWriteFile(h2.io, src, try gzipBytes(h2.arena.allocator(), "payload\n"));
-    const escaping_target = try std.fmt.allocPrint(h2.arena.allocator(),
+    const escaping_target = try h2.arena.allocator().print(
         \\[{{"type":"install_gzipped_executable","source":{{"base":"libexec","path":"payload.gz"}},
         \\  "target":{{"path":"{s}/planted"}}}}]
     , .{outside.base});
@@ -7154,10 +7149,10 @@ test "move honours force as upstream's alias for overwrite" {
     defer h.deinit();
     const a = h.arena.allocator();
 
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/html", .{h.keg});
+    const src = try a.print("{s}/libexec/html", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, src);
-    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(a, "{s}/index.html", .{src}), "new\n");
-    const dst = try std.fmt.allocPrint(a, "{s}/var/www", .{h.prefix});
+    try atomic.atomicWriteFile(h.io, try a.print("{s}/index.html", .{src}), "new\n");
+    const dst = try a.print("{s}/var/www", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, dst);
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -7166,12 +7161,12 @@ test "move honours force as upstream's alias for overwrite" {
     try testing.expect(!h.flog.hasErrors());
     try testing.expectEqualStrings(
         "new\n",
-        try fs_read.readFileAllAbsolute(h.io, a, try std.fmt.allocPrint(a, "{s}/index.html", .{dst}), 64),
+        try fs_read.readFileAllAbsolute(h.io, a, try a.print("{s}/index.html", .{dst}), 64),
     );
     // Nothing of the swap-aside scaffolding may survive in the prefix.
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}.malt-replaced", .{dst}), .{}),
+        std.Io.Dir.accessAbsolute(h.io, try a.print("{s}.malt-replaced", .{dst}), .{}),
     );
 }
 
@@ -7224,7 +7219,7 @@ test "a glob root cannot walk out of the prefix through a parent reference" {
     try std.Io.Dir.cwd().createDirPath(h.io, outside.base);
     try atomic.atomicWriteFile(h.io, outside.p("/secret"), "s\n");
 
-    const escape = try std.fmt.allocPrint(a, "{s}/..{s}", .{ h.prefix, outside.base });
+    const escape = try a.print("{s}/..{s}", .{ h.prefix, outside.base });
     inline for (.{
         \\[{{"type":"set_permissions","permissions":"0777","paths":[{{"path":"{s}/*"}}]}}]
         ,
@@ -7235,7 +7230,7 @@ test "a glob root cannot walk out of the prefix through a parent reference" {
     }) |shape| {
         var fresh = try TestHarness.init();
         defer fresh.deinit();
-        const json = try std.fmt.allocPrint(a, shape, .{escape});
+        const json = try a.print(shape, .{escape});
         try testing.expect(execute(fresh.ctx(), try testFormulaJson(&fresh, json)));
         try testing.expectEqual(@as(usize, 1), fresh.flog.entries().len);
         try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, fresh.flog.entries()[0].reason);
@@ -7249,13 +7244,13 @@ test "withinBounds refuses what validatePath refuses" {
     const a = h.arena.allocator();
     const c = h.ctx();
 
-    try testing.expect(withinBounds(c, try std.fmt.allocPrint(a, "{s}/lib", .{h.prefix})));
-    try testing.expect(withinBounds(c, try std.fmt.allocPrint(a, "{s}/bin", .{h.keg})));
+    try testing.expect(withinBounds(c, try a.print("{s}/lib", .{h.prefix})));
+    try testing.expect(withinBounds(c, try a.print("{s}/bin", .{h.keg})));
     // A parent reference, a relative path, and a sibling whose name merely
     // starts with the prefix all have to be refused.
-    try testing.expect(!withinBounds(c, try std.fmt.allocPrint(a, "{s}/../etc", .{h.prefix})));
+    try testing.expect(!withinBounds(c, try a.print("{s}/../etc", .{h.prefix})));
     try testing.expect(!withinBounds(c, "relative/path"));
-    try testing.expect(!withinBounds(c, try std.fmt.allocPrint(a, "{s}evil/lib", .{h.prefix})));
+    try testing.expect(!withinBounds(c, try a.print("{s}evil/lib", .{h.prefix})));
     try testing.expect(!withinBounds(c, "/etc"));
 }
 
@@ -7265,14 +7260,14 @@ test "resolveLink follows a chain, a relative hop, and gives up on a cycle" {
     const a = h.arena.allocator();
     const c = h.ctx();
 
-    const dir = try std.fmt.allocPrint(a, "{s}/lib", .{h.keg});
+    const dir = try a.print("{s}/lib", .{h.keg});
     try std.Io.Dir.cwd().createDirPath(h.io, dir);
-    const real = try std.fmt.allocPrint(a, "{s}/real", .{dir});
+    const real = try a.print("{s}/real", .{dir});
     try atomic.atomicWriteFile(h.io, real, "x\n");
 
     // Two hops, the second one relative — a keg's own link farm uses both.
-    const mid = try std.fmt.allocPrint(a, "{s}/mid", .{dir});
-    const top = try std.fmt.allocPrint(a, "{s}/top", .{dir});
+    const mid = try a.print("{s}/mid", .{dir});
+    const top = try a.print("{s}/top", .{dir});
     // Relative target, so not `symLinkAbsolute` — it asserts an absolute one.
     {
         var d = try std.Io.Dir.openDirAbsolute(h.io, dir, .{});
@@ -7284,12 +7279,12 @@ test "resolveLink follows a chain, a relative hop, and gives up on a cycle" {
 
     // A cycle must terminate rather than spin; the caller then refuses it
     // because what comes back is still a symlink.
-    const loop_a = try std.fmt.allocPrint(a, "{s}/loop_a", .{dir});
-    const loop_b = try std.fmt.allocPrint(a, "{s}/loop_b", .{dir});
+    const loop_a = try a.print("{s}/loop_a", .{dir});
+    const loop_b = try a.print("{s}/loop_b", .{dir});
     try std.Io.Dir.symLinkAbsolute(h.io, loop_b, loop_a, .{});
     try std.Io.Dir.symLinkAbsolute(h.io, loop_a, loop_b, .{});
     const settled = resolveLink(c, loop_a);
-    try testing.expect(std.mem.indexOf(u8, settled, "loop_") != null);
+    try testing.expect(std.mem.find(u8, settled, "loop_") != null);
 
     // A plain file resolves to itself.
     try testing.expectEqualStrings(real, resolveLink(c, real));
@@ -7303,14 +7298,14 @@ test "a glob descent does not cross a symlinked directory boundary" {
     // A linked prefix is full of directory symlinks pointing back at the
     // Cellar. Descending through one would apply a mode to a tree the pattern
     // never named, so `**` stops at the boundary — same rule `chmod -R` uses.
-    const root = try std.fmt.allocPrint(a, "{s}/var/tree", .{h.prefix});
-    const elsewhere = try std.fmt.allocPrint(a, "{s}/var/elsewhere", .{h.prefix});
+    const root = try a.print("{s}/var/tree", .{h.prefix});
+    const elsewhere = try a.print("{s}/var/elsewhere", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, root);
     try std.Io.Dir.cwd().createDirPath(h.io, elsewhere);
-    const hidden = try std.fmt.allocPrint(a, "{s}/hidden", .{elsewhere});
+    const hidden = try a.print("{s}/hidden", .{elsewhere});
     try atomic.atomicWriteFile(h.io, hidden, "x\n");
     try chmodPath(h.io, hidden, 0o600);
-    try std.Io.Dir.symLinkAbsolute(h.io, elsewhere, try std.fmt.allocPrint(a, "{s}/link", .{root}), .{});
+    try std.Io.Dir.symLinkAbsolute(h.io, elsewhere, try a.print("{s}/link", .{root}), .{});
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
         \\[{"type":"set_permissions","non_recursive":true,"permissions":"0755",
@@ -7394,8 +7389,8 @@ test "change_dylib_id rewrites the install name on a real Mach-O" {
     h.io = threaded.io();
     const a = h.arena.allocator();
 
-    const dylib = try std.fmt.allocPrint(a, "{s}/lib/libsynth.dylib", .{h.keg});
-    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(dylib).?);
+    const dylib = try a.print("{s}/lib/libsynth.dylib", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(dylib).?);
     try writeSynthDylib(h.io, dylib, "/placeholder/lib/libsynth.dylib");
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -7406,7 +7401,7 @@ test "change_dylib_id rewrites the install name on a real Mach-O" {
     // The substantive half: the new install name is on disk and the old one
     // is gone. Reading it back through malt's own Mach-O reader means a
     // wrong LC constant or a swapped argument cannot pass.
-    const want = try std.fmt.allocPrint(a, "{s}/opt/glow/lib/libsynth.dylib", .{h.prefix});
+    const want = try a.print("{s}/opt/glow/lib/libsynth.dylib", .{h.prefix});
     try testing.expectEqualStrings(want, (try readDylibId(h.io, a, dylib)).?);
 
     // The other half: on arm64 the rewrite invalidates the signature, so the
@@ -7416,7 +7411,7 @@ test "change_dylib_id rewrites the install name on a real Mach-O" {
     if (codesign.isArm64()) {
         try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
         try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, h.flog.entries()[0].reason);
-        try testing.expect(std.mem.indexOf(u8, h.flog.entries()[0].detail, "libsynth.dylib") != null);
+        try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, "libsynth.dylib") != null);
     } else {
         try testing.expect(!h.flog.hasErrors());
     }

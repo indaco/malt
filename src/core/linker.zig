@@ -61,7 +61,7 @@ pub const Linker = struct {
             if (leaves.items.len == 0) continue;
 
             var prefix_dir_buf: [512]u8 = undefined;
-            const prefix_subdir = std.fmt.bufPrint(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, subdir }) catch continue;
+            const prefix_subdir = std.mem.print(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, subdir }) catch continue;
 
             var prefix_dir = std.Io.Dir.openDirAbsolute(self.io, prefix_subdir, .{}) catch continue;
             defer prefix_dir.close(self.io);
@@ -71,11 +71,11 @@ pub const Linker = struct {
                 // slot is a dir): invisible to readLink, but linking would
                 // fail — flag it so the pre-check isn't falsely clean.
                 if (self.structuralConflict(prefix_dir, rel)) |clash| {
-                    var lp_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const link_path = std.fmt.bufPrint(&lp_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, clash }) catch continue;
+                    var lp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                    const link_path = std.mem.print(&lp_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, clash }) catch continue;
                     // Name the owning keg when the clashing node is a keg
                     // symlink; otherwise report the bare structural clash.
-                    var owner_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    var owner_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                     const owner: ?[]const u8 = if (prefix_dir.readLink(self.io, clash, &owner_buf)) |n|
                         (extractKegFromPath(owner_buf[0..n]) orelse owner_buf[0..n])
                     else |_|
@@ -111,12 +111,12 @@ pub const Linker = struct {
                     const rest = if (std.mem.startsWith(u8, target, root)) target[root.len..] else "";
                     const ours = rest.len > 0 and rest[0] == '/' and
                         std.mem.startsWith(u8, std.mem.trimStart(u8, rest, "/"), "Cellar/") and
-                        std.mem.indexOf(u8, rest, "/../") == null; // a climb leaves the Cellar
+                        std.mem.find(u8, rest, "/../") == null; // a climb leaves the Cellar
                     break :blk .{ extractKegFromPath(target) orelse target, true, ours };
                 };
 
-                var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
+                var link_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const link_path = std.mem.print(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
                 conflicts.append(self.allocator, .{
                     .link_path = self.allocator.dupe(u8, link_path) catch continue,
                     .existing_keg = self.allocator.dupe(u8, existing_keg) catch continue,
@@ -136,7 +136,7 @@ pub const Linker = struct {
     /// Caller owns and frees the returned paths.
     fn collectLeafPaths(self: *Linker, keg_path: []const u8, subdir: []const u8, out: *std.ArrayList([]u8)) void {
         var base_buf: [512]u8 = undefined;
-        const base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ keg_path, subdir }) catch return;
+        const base = std.mem.print(&base_buf, "{s}/{s}", .{ keg_path, subdir }) catch return;
 
         // BFS: `pending` holds dir paths relative to `base`; "" is the root.
         var pending: std.ArrayList([]u8) = .empty;
@@ -152,21 +152,21 @@ pub const Linker = struct {
             // Path buffers are sized to the OS path max: a leaf read from the
             // filesystem is a real path (≤ PATH_MAX), so composing it here
             // never truncates — no real leaf is silently dropped.
-            var lvl_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var lvl_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const lvl_path = if (rel.len == 0)
                 base
             else
-                std.fmt.bufPrint(&lvl_buf, "{s}/{s}", .{ base, rel }) catch continue;
+                std.mem.print(&lvl_buf, "{s}/{s}", .{ base, rel }) catch continue;
 
             var lvl = std.Io.Dir.openDirAbsolute(self.io, lvl_path, .{ .iterate = true }) catch continue;
             defer lvl.close(self.io);
             var it = lvl.iterate();
             while (it.next(self.io) catch null) |entry| {
-                var child_buf: [std.fs.max_path_bytes]u8 = undefined;
+                var child_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                 const child = if (rel.len == 0)
-                    std.fmt.bufPrint(&child_buf, "{s}", .{entry.name}) catch continue
+                    std.mem.print(&child_buf, "{s}", .{entry.name}) catch continue
                 else
-                    std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
+                    std.mem.print(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
                 const dup = self.allocator.dupe(u8, child) catch continue;
                 if (entry.kind == .directory) {
                     pending.append(self.allocator, dup) catch self.allocator.free(dup);
@@ -185,7 +185,7 @@ pub const Linker = struct {
     fn structuralConflict(self: *Linker, prefix_dir: std.Io.Dir, rel: []const u8) ?[]const u8 {
         var pos: usize = 0;
         while (pos < rel.len) {
-            const slash = std.mem.indexOfScalarPos(u8, rel, pos, '/');
+            const slash = std.mem.findScalarPos(u8, rel, pos, '/');
             const partial = rel[0 .. slash orelse rel.len]; // cumulative path so far
             const is_last = slash == null;
             const st = prefix_dir.statFile(self.io, partial, .{ .follow_symlinks = false }) catch
@@ -203,7 +203,7 @@ pub const Linker = struct {
     /// The keg walk uses absolute-only opens, which abort on a relative path;
     /// a damaged record must fail the call instead of the process.
     fn requireAbsolute(keg_path: []const u8) LinkError!void {
-        if (!std.fs.path.isAbsolute(keg_path)) return LinkError.LinkFailed;
+        if (!std.Io.Dir.path.isAbsolute(keg_path)) return LinkError.LinkFailed;
     }
 
     /// True when `target` lies inside `keg_path`. A bare prefix match is not
@@ -217,7 +217,7 @@ pub const Linker = struct {
     /// Extract "Cellar/<name>/<ver>" from a full path like "/opt/malt/Cellar/foo/1.0/bin/foo"
     fn extractKegFromPath(path: []const u8) ?[]const u8 {
         const cellar_marker = "Cellar/";
-        const idx = std.mem.indexOf(u8, path, cellar_marker) orelse return null;
+        const idx = std.mem.find(u8, path, cellar_marker) orelse return null;
         const after = path[idx + cellar_marker.len ..];
         // Find the slash between <name> and <ver>, then the slash after <ver>.
         const first_slash = std.mem.findScalar(u8, after, '/') orelse return after;
@@ -282,7 +282,7 @@ pub const Linker = struct {
         // Ensure the top-level prefix dir exists; nested parents are created
         // per-leaf below.
         var parent_buf: [512]u8 = undefined;
-        const parent = std.fmt.bufPrint(&parent_buf, "{s}/{s}", .{ self.prefix, subdir }) catch return;
+        const parent = std.mem.print(&parent_buf, "{s}/{s}", .{ self.prefix, subdir }) catch return;
         std.Io.Dir.createDirAbsolute(self.io, parent, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
@@ -298,7 +298,7 @@ pub const Linker = struct {
         for (leaves.items) |rel| {
             // `rel` is relative and may nest (e.g. "pkgconfig/foo.pc").
             // Create the leaf's prefix-side parent before linking.
-            const rel_parent = std.fs.path.dirname(rel);
+            const rel_parent = std.Io.Dir.path.dirname(rel);
             if (rel_parent) |rp| {
                 if (last_parent == null or !std.mem.eql(u8, last_parent.?, rp)) {
                     parent_dir.createDirPath(self.io, rp) catch continue;
@@ -308,8 +308,8 @@ pub const Linker = struct {
 
             // Path buffers sized to the OS path max so a real keg leaf never
             // truncates (see collectLeafPaths).
-            var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const target = std.fmt.bufPrint(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, rel }) catch continue;
+            var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const target = std.mem.print(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, rel }) catch continue;
 
             // An empty slot needs one syscall, not the three temp+rename cost.
             // Only an occupied slot needs atomic replacement; `replaceLink`
@@ -320,8 +320,8 @@ pub const Linker = struct {
             };
 
             // Build the full link path for DB recording
-            var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const link_path = std.fmt.bufPrint(&link_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
+            var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const link_path = std.mem.print(&link_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
 
             // Record the link. On DB failure, back out the symlink we just
             // made — a DB-less symlink is an orphan `unlink` can't find — and
@@ -337,11 +337,11 @@ pub const Linker = struct {
     /// Replace an occupied leaf slot without ever emptying it: symlink at a
     /// temp name in the same directory, then rename over the old entry.
     fn replaceLink(self: *Linker, dir: std.Io.Dir, target: []const u8, rel: []const u8) !void {
-        var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const tmp = if (std.fs.path.dirname(rel)) |rp|
-            try std.fmt.bufPrint(&tmp_buf, "{s}/.malt_tmp_{s}", .{ rp, std.fs.path.basename(rel) })
+        var tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const tmp = if (std.Io.Dir.path.dirname(rel)) |rp|
+            try std.mem.print(&tmp_buf, "{s}/.malt_tmp_{s}", .{ rp, std.Io.Dir.path.basename(rel) })
         else
-            try std.fmt.bufPrint(&tmp_buf, ".malt_tmp_{s}", .{rel});
+            try std.mem.print(&tmp_buf, ".malt_tmp_{s}", .{rel});
 
         // Stale tmp from a prior aborted link; symLink would otherwise EEXIST.
         dir.deleteFile(self.io, tmp) catch {};
@@ -408,7 +408,7 @@ pub const Linker = struct {
     /// propagate so the caller can surface them at install time.
     pub fn linkOpt(self: *Linker, name: []const u8, version: []const u8) !void {
         var opt_parent_buf: [512]u8 = undefined;
-        const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{self.prefix});
+        const opt_parent = try std.mem.print(&opt_parent_buf, "{s}/opt", .{self.prefix});
         std.Io.Dir.createDirAbsolute(self.io, opt_parent, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
@@ -418,7 +418,7 @@ pub const Linker = struct {
         defer opt_dir.close(self.io);
 
         var cellar_buf: [512]u8 = undefined;
-        const cellar_path = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ self.prefix, name, version });
+        const cellar_path = try std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ self.prefix, name, version });
 
         // Stale opt link from a prior version; symLink would otherwise EEXIST.
         // Best-effort: a directory at opt/<name> isn't removable here, and
@@ -455,10 +455,10 @@ pub const Linker = struct {
     /// succeeds on an empty dir, so a dir another keg still links into
     /// survives; the prefix itself is never touched.
     fn pruneEmptyParents(self: *Linker, link_path: []const u8) void {
-        var dir = std.fs.path.dirname(link_path) orelse return;
+        var dir = std.Io.Dir.path.dirname(link_path) orelse return;
         while (dir.len > self.prefix.len and std.mem.startsWith(u8, dir, self.prefix)) {
             std.Io.Dir.deleteDirAbsolute(self.io, dir) catch return;
-            dir = std.fs.path.dirname(dir) orelse return;
+            dir = std.Io.Dir.path.dirname(dir) orelse return;
         }
     }
 };
@@ -503,7 +503,7 @@ fn walkLinkDir(
     if (depth >= max_link_depth) return;
 
     var dir_buf: [512]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, rel }) catch return;
+    const dir_path = std.mem.print(&dir_buf, "{s}/{s}", .{ prefix, rel }) catch return;
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
@@ -513,7 +513,7 @@ fn walkLinkDir(
         // never leaves the prefix or loops.
         if (entry.kind == .directory) {
             var child_buf: [512]u8 = undefined;
-            const child = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
+            const child = std.mem.print(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
             walkLinkDir(io, prefix, child, depth + 1, context, visit);
             continue;
         }

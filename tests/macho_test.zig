@@ -603,8 +603,8 @@ test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
     var scratch = try Scratch.init("same_length_patch");
     defer scratch.deinit();
 
-    var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const full_path = try std.fmt.bufPrint(
+    var full_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const full_path = try std.mem.print(
         &full_path_buf,
         "{s}/fixture.bin",
         .{scratch.path},
@@ -729,8 +729,8 @@ fn patchCstringFixture(
     const buf = try buildSegmentFixture(testing.allocator, &.{sect}, blob);
     defer testing.allocator.free(buf);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/fixture.bin", .{scratch.path});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/fixture.bin", .{scratch.path});
     {
         const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
         defer f.close(io);

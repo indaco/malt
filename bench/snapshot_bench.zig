@@ -75,7 +75,7 @@ fn buildSyntheticEntries(
     const out = try arena.alloc(outdated.OutdatedEntry, count);
     for (out, 0..) |*e, i| {
         e.* = .{
-            .name = try std.fmt.allocPrint(arena, "{s}{d:0>4}", .{ name_prefix, i }),
+            .name = try arena.print("{s}{d:0>4}", .{ name_prefix, i }),
             .installed = try arena.dupe(u8, "1.0.0"),
             .latest = try arena.dupe(u8, "2.0.0"),
         };
@@ -91,7 +91,7 @@ fn buildDbRows(
     const out = try arena.alloc(outdated.KegRow, total);
     for (out, 0..) |*r, i| {
         r.* = .{
-            .name = try std.fmt.allocPrint(arena, "{s}{d:0>4}", .{ name_prefix, i }),
+            .name = try arena.print("{s}{d:0>4}", .{ name_prefix, i }),
             .version = "1.0.0",
         };
     }
@@ -103,7 +103,7 @@ pub fn main() !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

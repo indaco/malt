@@ -36,7 +36,7 @@ const TempDb = struct {
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -52,13 +52,13 @@ const TempDb = struct {
 
 fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     var api_buf: [512]u8 = undefined;
-    const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir});
+    const api_dir = try std.mem.print(&api_buf, "{s}/api", .{cache_dir});
     test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
+    const path = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, json);
@@ -271,14 +271,14 @@ test "resolve walks deps for JSON missing the name field" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
     var api_buf: [512]u8 = undefined;
-    const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir});
+    const api_dir = try std.mem.print(&api_buf, "{s}/api", .{cache_dir});
     try test_io.makeDirAbsolute(std.Options.debug_io, api_dir);
 
     // Minimal JSON — no `name` field. The cache cannot type-parse this,
     // but BFS still needs the dep list.
     const root_json = "{\"dependencies\":[\"leaf_one\",\"leaf_two\"]}";
     var root_buf: [512]u8 = undefined;
-    const root_path = try std.fmt.bufPrint(&root_buf, "{s}/api/formula_thin.json", .{cache_dir});
+    const root_path = try std.mem.print(&root_buf, "{s}/api/formula_thin.json", .{cache_dir});
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, root_path, .{});
         defer f.close(std.Options.debug_io);
@@ -287,7 +287,7 @@ test "resolve walks deps for JSON missing the name field" {
 
     inline for (.{ "leaf_one", "leaf_two" }) |leaf| {
         var leaf_buf: [512]u8 = undefined;
-        const leaf_path = try std.fmt.bufPrint(&leaf_buf, "{s}/api/formula_{s}.json", .{ cache_dir, leaf });
+        const leaf_path = try std.mem.print(&leaf_buf, "{s}/api/formula_{s}.json", .{ cache_dir, leaf });
         const f = try test_io.cwd().createFile(std.Options.debug_io, leaf_path, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, "{\"dependencies\":[]}");
@@ -542,7 +542,7 @@ fn collectFirst(
 /// Past the API cache TTL, so only an offline read may serve it.
 fn ageCacheEntry(cache_dir: []const u8, name: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
+    const path = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
     const f = try test_io.cwd().openFile(std.Options.debug_io, path, .{ .mode = .write_only });
     defer f.close(std.Options.debug_io);
     try f.setTimestamps(std.Options.debug_io, .{
@@ -566,7 +566,7 @@ fn freeJobs(alloc: std.mem.Allocator, jobs: *std.ArrayList(install_download.Down
 /// `json` with its empty dependency list replaced by `deps`.
 fn withDeps(comptime json: []const u8, comptime deps: []const u8) []const u8 {
     const empty = "\"dependencies\":[]";
-    const at = comptime std.mem.indexOf(u8, json, empty).?;
+    const at = comptime std.mem.find(u8, json, empty).?;
     return comptime json[0..at] ++ "\"dependencies\":[" ++ deps ++ "]" ++ json[at + empty.len ..];
 }
 
@@ -574,7 +574,7 @@ fn withDeps(comptime json: []const u8, comptime deps: []const u8) []const u8 {
 fn refusedRecord(comptime name: []const u8, comptime tag: []const u8) []const u8 {
     const valid = comptime bottleJsonUniqueSha(name, tag);
     const stable = "\"stable\":\"1.0\"";
-    const at = comptime std.mem.indexOf(u8, valid, stable).?;
+    const at = comptime std.mem.find(u8, valid, stable).?;
     return comptime valid[0..at] ++ "\"stable\":\"1.\\r\"" ++ valid[at + stable.len ..];
 }
 
@@ -596,9 +596,9 @@ fn expectParentRefused(tag: []const u8, seeds: []const Seed, refused: []const u8
     try testing.expectError(want, collectFirst(alloc, tag, seeds, .{}, &jobs));
 
     try testing.expectEqual(@as(usize, 0), jobs.items.len);
-    const line = try std.fmt.allocPrint(alloc, "Cannot install p: dependency {s} ", .{refused});
+    const line = try alloc.print("Cannot install p: dependency {s} ", .{refused});
     defer alloc.free(line);
-    try testing.expect(std.mem.indexOf(u8, captured.items, line) != null);
+    try testing.expect(std.mem.find(u8, captured.items, line) != null);
 }
 
 // `q_ok` is listed before the refused dep, so a check made while queueing
@@ -629,7 +629,7 @@ test "collectFormulaJobs names an out-of-memory prefetch instead of calling the 
         .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "e0"), "\"q_ok\"") },
         .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "e1") },
     }, .{ .offline = true, .worker_backing = std.testing.failing_allocator }, &jobs));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "dependency q_ok could not be fetched: OutOfMemory") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "dependency q_ok could not be fetched: OutOfMemory") != null);
 }
 
 test "collectFormulaJobs refuses the parent of a dependency with no bottle" {

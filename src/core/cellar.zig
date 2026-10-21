@@ -87,7 +87,7 @@ fn confined(name: []const u8, version: []const u8) bool {
 fn packageDirIsLink(io: std.Io, prefix: []const u8, name: []const u8) bool {
     var buf: [512]u8 = undefined;
     // Fail closed: a path we cannot format is not one we can clear.
-    const pkg_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return true;
+    const pkg_path = std.mem.print(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return true;
     return symlink.isSymlinkOrUnreadable(io, pkg_path);
 }
 
@@ -148,7 +148,7 @@ pub fn materializeWithCellar(
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
+    const cellar_path = std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.PathTooLong;
 
     // Warm-reinstall fast path: a prior successful materialize for this
@@ -197,7 +197,7 @@ pub fn materializeWithCellar(
     // formula version "10.47"). We first try an exact match, then scan for
     // a directory that starts with the version string followed by "_".
     var keg_src_buf: [512]u8 = undefined;
-    const keg_src = std.fmt.bufPrint(&keg_src_buf, "{s}/{s}/{s}", .{ store_entry, name, version }) catch
+    const keg_src = std.mem.print(&keg_src_buf, "{s}/{s}/{s}", .{ store_entry, name, version }) catch
         return CellarError.PathTooLong;
 
     // Try keg_src first (exact version match), then scan for a revision
@@ -209,7 +209,7 @@ pub fn materializeWithCellar(
         std.Io.Dir.accessAbsolute(io, keg_src, .{}) catch {
             // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
             var name_dir_buf: [512]u8 = undefined;
-            const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_entry, name }) catch return CellarError.PathTooLong;
+            const name_dir_path = std.mem.print(&name_dir_buf, "{s}/{s}", .{ store_entry, name }) catch return CellarError.PathTooLong;
             var name_dir = std.Io.Dir.openDirAbsolute(io, name_dir_path, .{ .iterate = true }) catch break :blk null;
             defer name_dir.close(io);
             var it = name_dir.iterate();
@@ -220,7 +220,7 @@ pub fn materializeWithCellar(
                     std.mem.eql(u8, entry.name[0..version.len], version) and
                     entry.name[version.len] == '_')
                 {
-                    const rev_path = std.fmt.bufPrint(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch return CellarError.PathTooLong;
+                    const rev_path = std.mem.print(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch return CellarError.PathTooLong;
                     break :blk rev_path;
                 }
             }
@@ -234,7 +234,7 @@ pub fn materializeWithCellar(
 
     // Ensure parent dir exists
     var parent_buf: [512]u8 = undefined;
-    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
+    const parent = std.mem.print(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
         return CellarError.PathTooLong;
     std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
@@ -311,7 +311,7 @@ fn walkMachOAndPatch(
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
 
-        const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
+        const full_path = std.Io.Dir.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
         defer allocator.free(full_path);
         try patchOneMachO(io, allocator, full_path, replacements, modified_out, unrelocatable_out);
     }
@@ -411,7 +411,7 @@ fn walkKegAndPatch(
     }) |entry| {
         if (entry.kind != .file) continue;
 
-        const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch return CellarError.OutOfMemory;
+        const full_path = std.Io.Dir.path.join(allocator, &.{ dir_path, entry.path }) catch return CellarError.OutOfMemory;
         var keep_path = false;
         defer if (!keep_path) allocator.free(full_path);
 
@@ -456,7 +456,7 @@ fn verifyMachOList(io: std.Io, allocator: std.mem.Allocator, paths: []const []co
 /// overwrite. Null when unreadable or malformed; relocation then walks.
 fn readBottleReceipt(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8) ?install_receipt.Receipt {
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return null;
+    const path = std.mem.print(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return null;
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch return null;
     defer allocator.free(text);
     return install_receipt.parseInstallReceipt(allocator, text) catch null;
@@ -479,7 +479,7 @@ fn walkMachOAndVerify(io: std.Io, allocator: std.mem.Allocator, dir_path: []cons
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
 
-        const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
+        const full_path = std.Io.Dir.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
         defer allocator.free(full_path);
 
         const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch continue;
@@ -508,7 +508,7 @@ fn walkMachOAndVerify(io: std.Io, allocator: std.mem.Allocator, dir_path: []cons
 /// in unchanged; an unreadable keg dir or file is simply "no link found".
 pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, needle: []const u8) bool {
     // A damaged relative record names no keg dir; the absolute open would abort.
-    if (!std.fs.path.isAbsolute(cellar_path)) return false;
+    if (!std.Io.Dir.path.isAbsolute(cellar_path)) return false;
     var dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch return false;
     defer dir.close(io);
 
@@ -517,7 +517,7 @@ pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []
 
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        const full_path = std.fs.path.join(allocator, &.{ cellar_path, entry.path }) catch continue;
+        const full_path = std.Io.Dir.path.join(allocator, &.{ cellar_path, entry.path }) catch continue;
         defer allocator.free(full_path);
         if (patch.fileLinksPath(io, allocator, full_path, needle)) return true;
     }
@@ -552,14 +552,14 @@ pub const reloc_version_marker = ".malt-reloc-version";
 
 fn writeKegMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, name: []const u8, value: u32) void {
     var buf: [16]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return;
+    const text = std.mem.print(&buf, "{d}", .{value}) catch return;
     writeKegMarkerText(io, allocator, cellar_path, name, text);
 }
 
 fn writeKegMarkerText(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, name: []const u8, text: []const u8) void {
-    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_path, name }) catch return;
+    const path = allocator.print("{s}/{s}", .{ cellar_path, name }) catch return;
     defer allocator.free(path);
-    const body = std.fmt.allocPrint(allocator, "{s}\n", .{text}) catch return;
+    const body = allocator.print("{s}\n", .{text}) catch return;
     defer allocator.free(body);
     // Best-effort: a failed write costs a doctor row, never the install.
     atomic.atomicWriteFile(io, path, body) catch {};
@@ -587,7 +587,7 @@ pub fn writeRelocStamp(io: std.Io, allocator: std.mem.Allocator, cellar_path: []
 /// coerced number would read as stale and send the user to reinstall.
 pub fn readRelocStamp(io: std.Io, cellar_path: []const u8) ?RelocStamp {
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cellar_path, reloc_version_marker }) catch return null;
+    const path = std.mem.print(&path_buf, "{s}/{s}", .{ cellar_path, reloc_version_marker }) catch return null;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
     var buf: [32]u8 = undefined;
@@ -606,7 +606,7 @@ pub const keg_markers = [_][]const u8{ unrelocated_marker, reloc_version_marker 
 pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
     for (keg_markers) |name| {
         var buf: [512]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ cellar_path, name }) catch continue;
+        const path = std.mem.print(&buf, "{s}/{s}", .{ cellar_path, name }) catch continue;
         std.Io.Dir.cwd().deleteFile(io, path) catch {};
     }
 }
@@ -623,7 +623,7 @@ fn perlReplacement(
     cellar_path: []const u8,
 ) patch.Replacement {
     // `<prefix>/Cellar/<name>/<version>` — both call sites build it that way.
-    const name = std.fs.path.basename(std.fs.path.dirname(cellar_path) orelse "");
+    const name = std.Io.Dir.path.basename(std.Io.Dir.path.dirname(cellar_path) orelse "");
 
     const ph = perlFromFormulaSource(io, allocator, buf, prefix, cellar_path, name) orelse
         formula.perlPlaceholder(buf, prefix, name, &.{});
@@ -717,7 +717,7 @@ fn resolveKegFiles(
     cellar_path: []const u8,
     lists: []const []const []const u8,
 ) CellarError!?[][]const u8 {
-    var keg_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var keg_real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const keg_real_len = std.Io.Dir.cwd().realPathFile(io, cellar_path, &keg_real_buf) catch return null;
     const keg_real = keg_real_buf[0..keg_real_len];
 
@@ -738,7 +738,7 @@ fn resolveKegFiles(
         if (seen.contains(rel)) continue;
         seen.insert(rel) catch return CellarError.OutOfMemory;
 
-        const full = std.fs.path.join(allocator, &.{ cellar_path, rel }) catch return CellarError.OutOfMemory;
+        const full = std.Io.Dir.path.join(allocator, &.{ cellar_path, rel }) catch return CellarError.OutOfMemory;
         errdefer allocator.free(full);
 
         const st = std.Io.Dir.cwd().statFile(io, full, .{ .follow_symlinks = false }) catch {
@@ -751,7 +751,7 @@ fn resolveKegFiles(
         }
         // A symlinked parent directory can point anywhere; only the
         // resolved path says whether the file is really in the keg.
-        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const real_len = std.Io.Dir.cwd().realPathFile(io, full, &real_buf) catch {
             allocator.free(full);
             continue;
@@ -784,7 +784,7 @@ fn relocateKegTree(
     const new_prefix = atomic.maltPrefixOrAbort();
 
     var new_cellar_buf: [256]u8 = undefined;
-    const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
+    const new_cellar = std.mem.print(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
     // `@@HOMEBREW_*@@` placeholders are patched for every bottle (they
     // appear even in `:any` bottles — zig, curl, rust, llvm@* all use
@@ -815,11 +815,11 @@ fn relocateKegTree(
     }
 
     var new_library_buf: [256]u8 = undefined;
-    const new_library = std.fmt.bufPrint(&new_library_buf, "{s}/Library", .{new_prefix}) catch new_prefix;
+    const new_library = std.mem.print(&new_library_buf, "{s}/Library", .{new_prefix}) catch new_prefix;
 
     // Resolved here rather than at each call site so install, upgrade, migrate
     // and rollback cannot drift apart on it.
-    var perl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var perl_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const perl = perlReplacement(io, allocator, &perl_buf, new_prefix, cellar_path);
 
     // Last on purpose: text replacements run in sequence per file, so
@@ -946,7 +946,7 @@ pub fn installBottleEtcVar(
     prefix: []const u8,
 ) void {
     for ([_][]const u8{ "etc", "var" }) |sub| {
-        const src_root = std.fs.path.join(allocator, &.{ cellar_path, ".bottle", sub }) catch continue;
+        const src_root = std.Io.Dir.path.join(allocator, &.{ cellar_path, ".bottle", sub }) catch continue;
         defer allocator.free(src_root);
 
         // Most bottles ship no overlay — a missing dir is the normal case.
@@ -960,7 +960,7 @@ pub fn installBottleEtcVar(
             if (entry.kind == .directory) {
                 // Bottles ship empty overlay dirs (dbus's `var/lib/dbus`)
                 // that hooks rely on; pour the tree shape, not just files.
-                const dst = std.fs.path.join(allocator, &.{ prefix, sub, entry.path }) catch continue;
+                const dst = std.Io.Dir.path.join(allocator, &.{ prefix, sub, entry.path }) catch continue;
                 defer allocator.free(dst);
                 std.Io.Dir.cwd().createDirPath(io, dst) catch |e| {
                     std.log.warn("bottle overlay {s}/{s} dir not created: {s}", .{ sub, entry.path, @errorName(e) });
@@ -988,9 +988,9 @@ fn pourOverlayFile(
     prefix: []const u8,
     sub: []const u8,
 ) !void {
-    const src_path = try std.fs.path.join(allocator, &.{ src_root, rel });
+    const src_path = try std.Io.Dir.path.join(allocator, &.{ src_root, rel });
     defer allocator.free(src_path);
-    const dst_path = try std.fs.path.join(allocator, &.{ prefix, sub, rel });
+    const dst_path = try std.Io.Dir.path.join(allocator, &.{ prefix, sub, rel });
     defer allocator.free(dst_path);
 
     const content = try readOverlayFile(io, allocator, src_path);
@@ -1003,7 +1003,7 @@ fn pourOverlayFile(
         defer allocator.free(default_path);
         try atomic.atomicReplaceFile(io, default_path, content);
     } else |_| {
-        if (std.fs.path.dirname(dst_path)) |parent| {
+        if (std.Io.Dir.path.dirname(dst_path)) |parent| {
             try std.Io.Dir.cwd().createDirPath(io, parent);
         }
         try atomic.atomicReplaceFile(io, dst_path, content);
@@ -1049,11 +1049,11 @@ pub fn materializeFromLocalCellar(
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
+    const cellar_path = std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.PathTooLong;
 
     var parent_buf: [512]u8 = undefined;
-    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
+    const parent = std.mem.print(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
         return CellarError.PathTooLong;
     std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
@@ -1116,7 +1116,7 @@ fn jsonEscapeInto(buf: []u8, s: []const u8) ?[]const u8 {
             w += e.len;
         } else if (byte < 0x20) {
             if (w + 6 > buf.len) return null;
-            _ = std.fmt.bufPrint(buf[w..], "\\u{x:0>4}", .{byte}) catch return null;
+            _ = std.mem.print(buf[w..], "\\u{x:0>4}", .{byte}) catch return null;
             w += 6;
         } else {
             if (w >= buf.len) return null;
@@ -1138,7 +1138,7 @@ pub fn writeInstallReceiptFull(
     is_direct: bool,
 ) void {
     var path_buf: [512]u8 = undefined;
-    const receipt_path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return;
+    const receipt_path = std.mem.print(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return;
 
     const file = std.Io.Dir.createFileAbsolute(io, receipt_path, .{}) catch return;
     defer file.close(io);
@@ -1155,7 +1155,7 @@ pub fn writeInstallReceiptFull(
     const version_str = jsonEscapeInto(&ver_scratch, version) orelse return;
 
     var buf: [2048]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf,
+    const json = std.mem.print(&buf,
         \\{{
         \\  "homebrew_version": null,
         \\  "used_options": [],
@@ -1185,7 +1185,7 @@ pub fn writeInstallReceiptFull(
         timestamp,
         tap_str,
         version_str,
-        if (@import("builtin").cpu.arch == .aarch64) "arm64" else "x86_64",
+        if (@import("builtin").target.cpu.arch == .aarch64) "arm64" else "x86_64",
         store_sha256,
     }) catch return;
 
@@ -1203,7 +1203,7 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
+    const cellar_path = std.mem.print(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.PathTooLong;
     std.Io.Dir.cwd().deleteTree(io, cellar_path) catch return CellarError.RemoveFailed;
 }
@@ -1272,7 +1272,7 @@ test "relocateUnbottledKeg rewrites a build-prefix dylib reference to the malt p
     const prefix = atomic.maltPrefixOrAbort();
     try testing.expect(std.mem.startsWith(u8, got, prefix));
     try testing.expect(std.mem.endsWith(u8, got, "/opt/flac/lib/libFLAC.14.dylib"));
-    try testing.expect(std.mem.indexOf(u8, got, "/opt/homebrew") == null);
+    try testing.expect(std.mem.find(u8, got, "/opt/homebrew") == null);
 
     // Relocation ran, so a future logic bump must be able to name this keg —
     // `not_applicable` would exempt it forever.
@@ -1479,7 +1479,7 @@ test "reloc stamp round-trips both states; anything unreadable is absent" {
     writeRelocStamp(io, testing.allocator, keg, .not_applicable);
     try testing.expectEqual(RelocStamp.not_applicable, readRelocStamp(io, keg).?);
 
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, reloc_version_marker });
+    const path = try testing.allocator.print("{s}/{s}", .{ keg, reloc_version_marker });
     defer testing.allocator.free(path);
     // Hand-edited spacing still reads.
     try atomic.atomicWriteFile(io, path, " 12 \r\n");
@@ -1505,7 +1505,7 @@ test "stripKegMarkers clears a marker the extracted archive supplied" {
     // about the keg — a high one silences it, a low one warns forever, since
     // the path that extracted it never relocates and so never restamps.
     for (keg_markers) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ keg, name });
         defer testing.allocator.free(p);
         try atomic.atomicWriteFile(io, p, "999\n");
     }
@@ -1518,10 +1518,10 @@ test "stripKegMarkers clears a marker the extracted archive supplied" {
 }
 
 test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {
-    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InsufficientHeaderPad), "-headerpad_max_install_names") != null);
-    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InstallNameToolMissing), "install_name_tool not found on PATH") != null);
-    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.UnsafeCellarLink), "symlink") != null);
-    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InvalidSha256), "64 lowercase hex") != null);
+    try std.testing.expect(std.mem.find(u8, describeError(CellarError.InsufficientHeaderPad), "-headerpad_max_install_names") != null);
+    try std.testing.expect(std.mem.find(u8, describeError(CellarError.InstallNameToolMissing), "install_name_tool not found on PATH") != null);
+    try std.testing.expect(std.mem.find(u8, describeError(CellarError.UnsafeCellarLink), "symlink") != null);
+    try std.testing.expect(std.mem.find(u8, describeError(CellarError.InvalidSha256), "64 lowercase hex") != null);
 
     const fallback_tags = [_]CellarError{
         CellarError.CloneFailed,
@@ -1553,8 +1553,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -1566,8 +1565,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1967,7 +1965,7 @@ fn dylibPathIsRelocated(io: std.Io, bin: []const u8) !bool {
 fn textIsRelocated(io: std.Io, path: []const u8) !bool {
     const got = try std.Io.Dir.cwd().readFileAlloc(io, path, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(got);
-    return std.mem.indexOf(u8, got, "@@HOMEBREW_PREFIX@@") == null;
+    return std.mem.find(u8, got, "@@HOMEBREW_PREFIX@@") == null;
 }
 
 test "relocateKegTree patches only listed files when the receipt carries lists" {

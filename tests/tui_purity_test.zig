@@ -61,21 +61,20 @@ fn scanContent(
     // The importing file's directory, repo-relative, so an import resolves the
     // same way the compiler sees it (`src/tui/json/list.zig` → `src/tui/json`).
     var dir_buf: [256]u8 = undefined;
-    const importer_dir = if (std.mem.lastIndexOfScalar(u8, rel_path, '/')) |slash|
-        std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ root, rel_path[0..slash] }) catch root
+    const importer_dir = if (std.mem.findScalarLast(u8, rel_path, '/')) |slash|
+        std.mem.print(&dir_buf, "{s}/{s}", .{ root, rel_path[0..slash] }) catch root
     else
         root;
 
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, content, cursor, import_prefix)) |start| {
+    while (std.mem.findPos(u8, content, cursor, import_prefix)) |start| {
         const path_start = start + import_prefix.len;
-        const end = std.mem.indexOfScalarPos(u8, content, path_start, '"') orelse break;
+        const end = std.mem.findScalarPos(u8, content, path_start, '"') orelse break;
         const import_path = content[path_start..end];
         cursor = end + 1;
 
         if (!importAllowed(importer_dir, import_path)) {
-            const msg = try std.fmt.allocPrint(
-                testing.allocator,
+            const msg = try testing.allocator.print(
                 "{s}/{s} imports forbidden \"{s}\"",
                 .{ root, rel_path, import_path },
             );
@@ -118,7 +117,7 @@ fn resolvePosix(buf: []u8, base: []const u8, rel: []const u8) ?[]const u8 {
     while (it.next()) |seg| {
         if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
         if (std.mem.eql(u8, seg, "..")) {
-            len = if (std.mem.lastIndexOfScalar(u8, buf[0..len], '/')) |slash| slash else 0;
+            len = if (std.mem.findScalarLast(u8, buf[0..len], '/')) |slash| slash else 0;
             continue;
         }
         if (len + 1 + seg.len > buf.len) return null;
@@ -196,7 +195,7 @@ const app_import = "@import(\"app.zig\")";
 /// `*_tab.zig` must import only downward. `app.zig` itself and the leaves it
 /// composes are exempt — the ban is on the upward edge into the hub, not the hub.
 fn antiCycleGuarded(rel_path: []const u8) bool {
-    const base = if (std.mem.lastIndexOfScalar(u8, rel_path, '/')) |slash|
+    const base = if (std.mem.findScalarLast(u8, rel_path, '/')) |slash|
         rel_path[slash + 1 ..]
     else
         rel_path;
@@ -223,9 +222,8 @@ fn scanAntiCycle(io: std.Io, root: []const u8, failures: *std.ArrayList([]const 
         defer testing.allocator.free(content);
         _ = try file.readPositionalAll(io, content, 0);
 
-        if (std.mem.indexOf(u8, content, app_import) != null) {
-            const msg = try std.fmt.allocPrint(
-                testing.allocator,
+        if (std.mem.find(u8, content, app_import) != null) {
+            const msg = try testing.allocator.print(
                 "{s}/{s} imports the hub \"app.zig\" (would form an import cycle)",
                 .{ root, entry.path },
             );
@@ -248,8 +246,8 @@ test "antiCycleGuarded covers the ctx/cmd sinks and every *_tab.zig, not the hub
 test "the anti-cycle scan detects an upward app.zig import edge" {
     const forbidden = "const app = @import(\"app.zig\");\n";
     const clean = "const term = @import(\"term.zig\");\n";
-    try testing.expect(std.mem.indexOf(u8, forbidden, app_import) != null);
-    try testing.expect(std.mem.indexOf(u8, clean, app_import) == null);
+    try testing.expect(std.mem.find(u8, forbidden, app_import) != null);
+    try testing.expect(std.mem.find(u8, clean, app_import) == null);
 }
 
 test "no tab or ctx/cmd sink imports app.zig" {
@@ -279,9 +277,9 @@ test "no tab or ctx/cmd sink imports app.zig" {
 /// not tabs, so a sink may name them (`cmd.zig` imports `tab_bar` for `MsgTag`).
 fn importsTabModule(content: []const u8) bool {
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, content, cursor, import_prefix)) |start| {
+    while (std.mem.findPos(u8, content, cursor, import_prefix)) |start| {
         const path_start = start + import_prefix.len;
-        const end = std.mem.indexOfScalarPos(u8, content, path_start, '"') orelse break;
+        const end = std.mem.findScalarPos(u8, content, path_start, '"') orelse break;
         const path = content[path_start..end];
         cursor = end + 1;
         if (std.mem.endsWith(u8, path, "_tab.zig")) return true;
@@ -334,9 +332,9 @@ test "the anti-cycle scan flags a guarded file that imports the hub, and only th
     defer test_io.deleteTreeAbsolute(io, base) catch {};
 
     const a = arena.allocator();
-    try writeFixture(io, try std.fmt.allocPrint(a, "{s}/evil_tab.zig", .{base}), "const app = @import(\"app.zig\");\n");
-    try writeFixture(io, try std.fmt.allocPrint(a, "{s}/ctx.zig", .{base}), "const term = @import(\"term.zig\");\n"); // clean sink
-    try writeFixture(io, try std.fmt.allocPrint(a, "{s}/list.zig", .{base}), "const app = @import(\"app.zig\");\n"); // not guarded → ignored
+    try writeFixture(io, try a.print("{s}/evil_tab.zig", .{base}), "const app = @import(\"app.zig\");\n");
+    try writeFixture(io, try a.print("{s}/ctx.zig", .{base}), "const term = @import(\"term.zig\");\n"); // clean sink
+    try writeFixture(io, try a.print("{s}/list.zig", .{base}), "const app = @import(\"app.zig\");\n"); // not guarded → ignored
 
     var failures: std.ArrayList([]const u8) = .empty;
     defer {
@@ -347,5 +345,5 @@ test "the anti-cycle scan flags a guarded file that imports the hub, and only th
     try scanAntiCycle(io, base, &failures);
 
     try testing.expectEqual(@as(usize, 1), failures.items.len);
-    try testing.expect(std.mem.indexOf(u8, failures.items[0], "evil_tab.zig") != null);
+    try testing.expect(std.mem.find(u8, failures.items[0], "evil_tab.zig") != null);
 }

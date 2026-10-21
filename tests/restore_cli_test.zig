@@ -53,7 +53,7 @@ const DryRunGuard = struct {
 };
 
 fn writeFile(path: []const u8, content: []const u8) !void {
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         test_io.cwd().createDirPath(std.Options.debug_io, dir) catch {};
     }
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
@@ -132,7 +132,7 @@ test "execute rejects unknown flags" {
 test "execute on an empty file warns and returns without error" {
     var s = try Scratch.init(testing.allocator, "empty");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/empty.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/empty.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "# only comments here\n");
 
@@ -145,7 +145,7 @@ test "execute on an empty file warns and returns without error" {
 test "execute --dry-run reports formula + cask entries without delegating" {
     var s = try Scratch.init(testing.allocator, "dry");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path,
         \\# malt backup
@@ -167,7 +167,7 @@ test "execute --dry-run routes tap-slug lines to the batch their kind names" {
     // a tap keg built from Casks/ must reach the cask batch to be rebuilt.
     var s = try Scratch.init(testing.allocator, "dry_tap");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path,
         \\formula acme/tools/foo
@@ -185,9 +185,9 @@ test "execute --dry-run routes tap-slug lines to the batch their kind names" {
     defer output.setDryRun(false);
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula acme/tools/foo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask    acme/tools/bar") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula acme/tools/foo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask    acme/tools/bar") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula wget") != null);
 }
 
 fn dryRunCapture(path: []const u8, captured: *std.ArrayList(u8)) !void {
@@ -203,7 +203,7 @@ test "execute --dry-run shows a recorded version beside the name it installs" {
     // of that literal name, so every pinned line failed to restore.
     var s = try Scratch.init(testing.allocator, "dry_versions");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path,
         \\formula wget 1.24
@@ -216,11 +216,11 @@ test "execute --dry-run shows a recorded version beside the name it installs" {
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget (1.24)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula postgresql@16 (16.4)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask    acme/tools/baz (3.0)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "wget@") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "installs the current release") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula wget (1.24)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula postgresql@16 (16.4)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask    acme/tools/baz (3.0)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "wget@") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "installs the current release") != null);
 }
 
 test "execute asks install for the bare name of a pinned line" {
@@ -228,7 +228,7 @@ test "execute asks install for the bare name of a pinned line" {
     // name restore forwarded.
     var s = try Scratch.init(testing.allocator, "real_versions");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula zzrestore 1.24\n");
 
@@ -241,8 +241,8 @@ test "execute asks install for the bare name of a pinned line" {
     ctx.offline = true;
     // Each failure is already printed, so main must exit without a trace.
     try testing.expectError(error.Aborted, restore.execute(&ctx, testing.allocator, &.{path}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "'zzrestore'") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "zzrestore@") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "'zzrestore'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "zzrestore@") == null);
 }
 
 test "execute warns once that an older backup's name@version lines need rewriting" {
@@ -250,7 +250,7 @@ test "execute warns once that an older backup's name@version lines need rewritin
     // versioned formulas like `postgresql@16`.
     var s = try Scratch.init(testing.allocator, "legacy_pins");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula wget@1.24.5\ncask firefox@120.0\nformula jq\n");
 
@@ -259,14 +259,14 @@ test "execute warns once that an older backup's name@version lines need rewritin
     try dryRunCapture(path, &captured);
 
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "rewrite"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "2 lines") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "wget@1.24.5") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "2 lines") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "wget@1.24.5") != null);
 }
 
 test "execute trusts `@` names in a backup written with separate version fields" {
     var s = try Scratch.init(testing.allocator, "current_format");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -278,13 +278,13 @@ test "execute trusts `@` names in a backup written with separate version fields"
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "rewrite") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "rewrite") == null);
 }
 
 test "execute --dry-run says nothing about versions for an unpinned backup" {
     var s = try Scratch.init(testing.allocator, "dry_unpinned");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula wget\n");
 
@@ -292,15 +292,15 @@ test "execute --dry-run says nothing about versions for an unpinned backup" {
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "installs the current release") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "installs the current release") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula wget\n") != null);
 }
 
 test "execute points each local note at its rebuild command, even with no entries" {
     // A local keg's recipe lives outside any tap; only the user can rebuild it.
     var s = try Scratch.init(testing.allocator, "local_note");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "# local lx /src/my dir/l'x.rb\n");
 
@@ -308,8 +308,8 @@ test "execute points each local note at its rebuild command, even with no entrie
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local '/src/my dir/l'\\''x.rb'") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "mt install --local '/src/my dir/l'\\''x.rb'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No entries found") != null);
 }
 
 test "execute names a local note holding a control byte instead of echoing it" {
@@ -317,7 +317,7 @@ test "execute names a local note holding a control byte instead of echoing it" {
     // UTF-8 C1, and install refuses that path anyway.
     var s = try Scratch.init(testing.allocator, "local_note_control");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "# local la /w/la.rb\r\n" ++
         "# local lx /w/x\xc2\x9b2Jy/lx.rb\r\n" ++
@@ -327,12 +327,12 @@ test "execute names a local note holding a control byte instead of echoing it" {
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2\x9b") == null);
-    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character; restore skips it") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "l\\x1by (/w/ly.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.findScalar(u8, captured.items, 0x1b) == null);
+    try testing.expect(std.mem.find(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character; restore skips it") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "l\\x1by (/w/ly.rb) is a local formula whose name or recipe path holds a control character") != null);
     // A clean note in the same CRLF file keeps its hint.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local '/w/la.rb'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "mt install --local '/w/la.rb'") != null);
 }
 
 test "execute never echoes a control byte from a formula or cask line" {
@@ -340,7 +340,7 @@ test "execute never echoes a control byte from a formula or cask line" {
     // restore prints comes from the file's author.
     var s = try Scratch.init(testing.allocator, "entry_control");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula foo 1.0\xc2\x9b2J\n" ++
         "formula bar@\xc2\x9d0;x\xc2\x9c\n" ++
@@ -350,10 +350,10 @@ test "execute never echoes a control byte from a formula or cask line" {
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "\xc2") == null);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, captured.items, "holds a control character"));
     // The clean line still restores.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget@1.2") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula wget@1.2") != null);
 }
 
 test "execute --dry-run leaves a path-shaped name out of the preview and the counts" {
@@ -361,7 +361,7 @@ test "execute --dry-run leaves a path-shaped name out of the preview and the cou
     // failing; restore now names the line and moves on.
     var s = try Scratch.init(testing.allocator, "path_shaped");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path,
         \\formula ../../etc
@@ -376,10 +376,10 @@ test "execute --dry-run leaves a path-shaped name out of the preview and the cou
     try dryRunCapture(path, &captured);
 
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, captured.items, "does not name a package"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Restoring 1 formula(e), 0 cask(s) and 0 service(s)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "  formula acme/tools/foo\n") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "  formula ../../etc\n") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, " ..\n") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Restoring 1 formula(e), 0 cask(s) and 0 service(s)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "  formula acme/tools/foo\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "  formula ../../etc\n") == null);
+    try testing.expect(std.mem.find(u8, captured.items, " ..\n") == null);
 }
 
 test "execute treats unknown kinds as comments and reports zero entries" {
@@ -389,7 +389,7 @@ test "execute treats unknown kinds as comments and reports zero entries" {
     // takes the "No entries found" warn-and-return path — not an error.
     var s = try Scratch.init(testing.allocator, "garbage");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/bad.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/bad.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "potato wget\n");
 
@@ -403,7 +403,7 @@ test "execute fails when every line was skipped, even under --quiet" {
     // `mt restore f || alert` must still see a file it could not restore.
     var s = try Scratch.init(testing.allocator, "all_skipped");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula ../../etc\nformula foo\x1b[2J\n# comment\npotato wget\n");
 
@@ -416,15 +416,15 @@ test "execute fails when every line was skipped, even under --quiet" {
 
     // Each skip is already printed, so main must exit without a trace.
     try testing.expectError(error.Aborted, restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--quiet", path }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "2 lines skipped, nothing to restore") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "2 lines skipped, nothing to restore") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No entries found") == null);
 }
 
 test "execute --dry-run still succeeds when every line was skipped" {
     // A preview never installs; the skip lines already name what was refused.
     var s = try Scratch.init(testing.allocator, "all_skipped_dry");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula ../../etc\n");
 
@@ -432,10 +432,10 @@ test "execute --dry-run still succeeds when every line was skipped" {
     defer captured.deinit(testing.allocator);
     try dryRunCapture(path, &captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "does not name a package") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "does not name a package") != null);
     // Same verdict as the real run, not an "empty backup".
-    try testing.expect(std.mem.indexOf(u8, captured.items, "1 line skipped, nothing to restore") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "1 line skipped, nothing to restore") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No entries found") == null);
 }
 
 test "execute does not count a refused local note as a skipped line" {
@@ -443,7 +443,7 @@ test "execute does not count a refused local note as a skipped line" {
     // backup of only such notes still restores cleanly.
     var s = try Scratch.init(testing.allocator, "refused_local_note");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "# local l\x1by /w/ly.rb\n# local lx /w/lx.rb\n");
 
@@ -453,17 +453,17 @@ test "execute does not count a refused local note as a skipped line" {
     defer output.endStderrCapture();
 
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "restore skips it") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "skipped") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "restore skips it") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "skipped") == null);
 }
 
 test "execute attempts every surviving line, then fails because one was skipped" {
     // A missing service is warn-and-continue, so the failure is the skip alone.
     var s = try Scratch.init(testing.allocator, "partly_skipped");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{s.path});
+    const db_dir = try testing.allocator.print("{s}/db", .{s.path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     try writeFile(path, "formula ../../etc\nservice ghost_service\n");
@@ -474,15 +474,15 @@ test "execute attempts every surviving line, then fails because one was skipped"
     defer output.endStderrCapture();
 
     try testing.expectError(error.Aborted, restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "service ghost_service skipped") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "1 line skipped") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "service ghost_service skipped") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "1 line skipped") != null);
 }
 
 test "execute still recaps skipped lines when an install batch also failed" {
     // The recap matters most when the failure output around it is longest.
     var s = try Scratch.init(testing.allocator, "skipped_and_failed");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "formula ../../etc\nformula malt\nformula zzrestore\n");
 
@@ -494,8 +494,8 @@ test "execute still recaps skipped lines when an install batch also failed" {
     var ctx = malt.app_ctx.debug_ctx;
     ctx.offline = true;
     try testing.expectError(error.Aborted, restore.execute(&ctx, testing.allocator, &.{path}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "'zzrestore'") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "2 lines skipped") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "'zzrestore'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "2 lines skipped") != null);
 }
 
 // --- service-entry dispatch ---------------------------------------------
@@ -506,7 +506,7 @@ test "execute summary line carries formula + cask + service counts in that order
     // formatting tweak.
     var s = try Scratch.init(testing.allocator, "summary");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path,
         \\formula wget
@@ -525,7 +525,7 @@ test "execute summary line carries formula + cask + service counts in that order
 
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 formula(e), 1 cask(s) and 1 service(s)") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "1 formula(e), 1 cask(s) and 1 service(s)") != null);
 }
 
 test "execute --dry-run buckets a service entry and prints it after formulas/casks" {
@@ -533,7 +533,7 @@ test "execute --dry-run buckets a service entry and prints it after formulas/cas
     // launchd bootstrap happens once the keg backing each service exists.
     var s = try Scratch.init(testing.allocator, "dry_services");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path,
         \\formula postgresql@16
@@ -552,11 +552,11 @@ test "execute --dry-run buckets a service entry and prints it after formulas/cas
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
 
     // Summary line counts services alongside formulae and casks.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 service(s)") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "1 service(s)") != null);
     // Per-entry dry-run line for the service surfaces with the full label.
-    const svc_line = std.mem.indexOf(u8, stderr_buf.items, "service postgresql@16") orelse
+    const svc_line = std.mem.find(u8, stderr_buf.items, "service postgresql@16") orelse
         return error.MissingServiceDryRunLine;
-    const formula_line = std.mem.indexOf(u8, stderr_buf.items, "formula postgresql@16") orelse
+    const formula_line = std.mem.find(u8, stderr_buf.items, "formula postgresql@16") orelse
         return error.MissingFormulaDryRunLine;
     // Services must come after kegs in dispatch order.
     try testing.expect(svc_line > formula_line);
@@ -569,10 +569,10 @@ test "execute warns-and-continues when a service entry can't be bootstrapped" {
     // success so the rest of the backup keeps applying.
     var s = try Scratch.init(testing.allocator, "missing_keg_service");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(path);
     // db/ must exist so services_cmd can open the DB and init the schema.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{s.path});
+    const db_dir = try testing.allocator.print("{s}/db", .{s.path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
@@ -586,5 +586,5 @@ test "execute warns-and-continues when a service entry can't be bootstrapped" {
     // Not dry-run — exercise the real dispatch arm.
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "ghost_service") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "ghost_service") != null);
 }

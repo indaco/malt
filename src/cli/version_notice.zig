@@ -20,7 +20,7 @@ pub fn print(latest_tag: []const u8, current_version: []const u8) void {
     const latest_no_v = release.stripVPrefix(latest_tag);
 
     var notice_buf: [4096]u8 = undefined;
-    const notice_msg = std.fmt.bufPrint(
+    const notice_msg = std.mem.print(
         &notice_buf,
         "A newer malt is available: {s} (you're on {s}).",
         .{ latest_no_v, current_version },

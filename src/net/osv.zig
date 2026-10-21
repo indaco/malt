@@ -71,7 +71,7 @@ pub fn queryBatch(
     if (targets.len == 0) return out;
 
     var url_buf: [512]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buf, "{s}/querybatch", .{base_url}) catch return error.RequestFailed;
+    const url = std.mem.print(&url_buf, "{s}/querybatch", .{base_url}) catch return error.RequestFailed;
 
     const lists = try arena.alloc(std.ArrayList([]const u8), targets.len);
     @memset(lists, .empty);
@@ -240,7 +240,7 @@ fn cvssBaseScore(vector: []const u8) ?f64 {
     if (!std.mem.eql(u8, prefix, "CVSS:3.0") and !std.mem.eql(u8, prefix, "CVSS:3.1")) return null;
     var letters: [8]?u8 = @splat(null);
     while (it.next()) |part| {
-        const colon = std.mem.indexOfScalar(u8, part, ':') orelse return null;
+        const colon = std.mem.findScalar(u8, part, ':') orelse return null;
         const m = metric_keys.get(part[0..colon]) orelse continue;
         if (part.len != colon + 2) return null;
         letters[@backingInt(m)] = part[colon + 1];
@@ -495,7 +495,7 @@ test "queryBatch follows a continuation for the one target that has more and kee
     defer arena_state.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     const ids = try queryBatch(&http, arena_state.allocator(), base, &.{
         .{ .repo_url = "https://github.com/o/a", .tag = "1" },
         .{ .repo_url = "https://github.com/o/b", .tag = "2" },

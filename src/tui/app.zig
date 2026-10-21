@@ -502,7 +502,7 @@ fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
     var mbuf: [64]u8 = undefined;
     var buf: [96]u8 = undefined;
     const icon: []const u8 = if (color.isEmojiEnabled()) "ⓘ " else "i ";
-    const msg = std.fmt.bufPrint(&buf, "{s}{s}", .{ icon, layout.tooSmallMessage(&mbuf) }) catch "terminal too small";
+    const msg = std.mem.print(&buf, "{s}{s}", .{ icon, layout.tooSmallMessage(&mbuf) }) catch "terminal too small";
     var rest = msg;
     var row: u16 = 1;
     while (rest.len > 0 and row <= rows) : (row += 1) {
@@ -553,7 +553,7 @@ fn loadingLine(buf: []u8, app: *const App) []const u8 {
     // The braille glyph for the current frame, ahead of the text, so a slow load
     // reads as working. Pure over `spinner_frame`, so the frame is deterministic.
     const glyph = spinner_frames.frames[app.spinner_frame % spinner_frames.count];
-    return std.fmt.bufPrint(buf, "{s} Loading {s}…", .{ glyph, activeTitle(app) }) catch "Loading…";
+    return std.mem.print(buf, "{s} Loading {s}…", .{ glyph, activeTitle(app) }) catch "Loading…";
 }
 
 /// The footer help line: while editing the filter, just the edit keys; otherwise
@@ -567,7 +567,7 @@ fn footerLine(buf: []u8, app: *const App) []const u8 {
         searchFooterHint(&hb, app.states.search.view, app.states.search.selected_count)
     else
         activeFooterHint(app);
-    return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ footerHelp(false), hint }) catch footerHelp(false);
+    return std.mem.print(buf, "{s}   ·   {s}", .{ footerHelp(false), hint }) catch footerHelp(false);
 }
 
 /// The Search footer hint for the active view, with the live basket count folded
@@ -577,7 +577,7 @@ fn footerLine(buf: []u8, app: *const App) []const u8 {
 fn searchFooterHint(buf: []u8, view: search.View, selected: usize) []const u8 {
     const base = search.footerHintFor(view);
     if (selected == 0) return base;
-    return std.fmt.bufPrint(buf, "{s} {d} selected", .{ base, selected }) catch base;
+    return std.mem.print(buf, "{s} {d} selected", .{ base, selected }) catch base;
 }
 
 fn footerHelp(editing: bool) []const u8 {
@@ -1206,8 +1206,8 @@ test "a data-free App renders the full chrome so the skeleton paint is real" {
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &app, 80, 24);
     for ([_][]const u8{ "Search", "Installed", "Outdated", "Services", "Doctor" }) |title|
-        try std.testing.expect(std.mem.indexOf(u8, out, title) != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null); // footer help present
+        try std.testing.expect(std.mem.find(u8, out, title) != null);
+    try std.testing.expect(std.mem.find(u8, out, "quit") != null); // footer help present
 }
 
 test "the tab-bar buffer holds every theme's fully styled bar, so only cols truncates" {
@@ -1225,7 +1225,7 @@ test "the tab-bar buffer holds every theme's fully styled bar, so only cols trun
             var tb: [tab_bar.buf_cap]u8 = undefined;
             const out = tab_bar.render(&tb, .doctor, tabTitles(), 1000); // cols far past the bar
             for (tabTitles()) |title|
-                try std.testing.expect(std.mem.indexOf(u8, out, title) != null);
+                try std.testing.expect(std.mem.find(u8, out, title) != null);
         }
     }
 }
@@ -1249,8 +1249,8 @@ test "renderActive covers its whole content rectangle so a self-drawn tab leaves
     // Rows 3..22 are the rectangle; the bottom rows neither the band nor the list
     // reaches are still addressed and erased in place — the invariant the dropped 2J
     // relies on. At HEAD the doctor emits no erase anywhere, so these are absent.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[18;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[22;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[18;1H\x1b[K") != null);
 }
 
 test "tab cycles and 1-5 jump to a tab" {
@@ -1304,12 +1304,12 @@ test "at the minimum height the armed uninstall prompt shows in the footer" {
     var buf: [8192]u8 = undefined;
     // The body has no rows here, so the in-tab banner has nowhere to draw.
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
-    const prompt = std.mem.indexOf(u8, out, "Uninstall curl? [y/N]").?;
+    const prompt = std.mem.find(u8, out, "Uninstall curl? [y/N]").?;
     // The prompt starts on the footer rule row (row 5 at 7 rows), and no other
     // cursor move sits between that row and the prompt.
     const move = "\x1b[5;1H";
-    const footer_text = std.mem.lastIndexOf(u8, out[0..prompt], move).?;
-    try std.testing.expect(std.mem.indexOf(u8, out[footer_text + move.len .. prompt], ";1H") == null);
+    const footer_text = std.mem.findLast(u8, out[0..prompt], move).?;
+    try std.testing.expect(std.mem.find(u8, out[footer_text + move.len .. prompt], ";1H") == null);
 }
 
 test "below the minimum size the armed uninstall prompt still shows" {
@@ -1318,9 +1318,9 @@ test "below the minimum size the armed uninstall prompt still shows" {
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
     var buf: [8192]u8 = undefined;
     const narrow = renderFrame(&buf, &a, layout.min_cols - 1, 24);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, narrow, "[y/N]") != null);
     const short = renderFrame(&buf, &a, 80, layout.min_rows - 1);
-    try std.testing.expect(std.mem.indexOf(u8, short, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, short, "[y/N]") != null);
 }
 
 test "below the minimum size a long name and a tiny terminal still show the whole prompt" {
@@ -1329,12 +1329,12 @@ test "below the minimum size a long name and a tiny terminal still show the whol
     var buf: [8192]u8 = undefined;
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("font-jetbrains-mono-nerd-font", .cask);
     const wide = renderFrame(&buf, &a, layout.min_cols - 10, 24);
-    try std.testing.expect(std.mem.indexOf(u8, wide, "font-jetbrains-mono-nerd-font?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, wide, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, wide, "font-jetbrains-mono-nerd-font?") != null);
+    try std.testing.expect(std.mem.find(u8, wide, "[y/N]") != null);
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
     const tiny = renderFrame(&buf, &a, 10, 24);
-    try std.testing.expect(std.mem.indexOf(u8, tiny, "curl?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tiny, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, tiny, "curl?") != null);
+    try std.testing.expect(std.mem.find(u8, tiny, "[y/N]") != null);
 }
 
 test "a prompt cancelled while the terminal is too small leaves no stale row" {
@@ -1346,7 +1346,7 @@ test "a prompt cancelled while the terminal is too small leaves no stale row" {
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
     const out = renderFrame(&buf, &a, 80, 5);
     // Row 5 held the prompt a frame ago; the notice no longer covers it, so it must be erased.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H" ++ term.seq.erase_line) != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[5;1H" ++ term.seq.erase_line) != null);
 }
 
 test "the header row is erased before it is painted" {
@@ -1355,7 +1355,7 @@ test "the header row is erased before it is painted" {
     var a: App = .{ .active = .installed };
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;1H" ++ term.seq.erase_line) != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[1;1H" ++ term.seq.erase_line) != null);
 }
 
 test "at the minimum height the armed prompt wins over a footer banner" {
@@ -1365,8 +1365,8 @@ test "at the minimum height the armed prompt wins over a footer banner" {
     a.shared.banner.set("refresh failed", "Boom");
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
+    try std.testing.expect(std.mem.find(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, out, "refresh failed") == null);
 }
 
 test "a banner set while the prompt is armed shows once the answer clears the prompt" {
@@ -1379,7 +1379,7 @@ test "a banner set while the prompt is armed shows once the answer clears the pr
         stepA(&a, answer);
         try std.testing.expect(a.states.installed.confirm_uninstall == null);
         const out = renderFrame(&buf, &a, 80, layout.min_rows);
-        try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") != null);
+        try std.testing.expect(std.mem.find(u8, out, "refresh failed") != null);
     }
 }
 
@@ -1392,7 +1392,7 @@ test "confirming the prompt keeps a banner set while it was armed" {
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
-    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") != null);
+    try std.testing.expect(std.mem.find(u8, out, "refresh failed") != null);
 }
 
 test "the next key after the prompt is answered dismisses the banner" {
@@ -1404,7 +1404,7 @@ test "the next key after the prompt is answered dismisses the banner" {
     stepA(&a, .down);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
-    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
+    try std.testing.expect(std.mem.find(u8, out, "refresh failed") == null);
 }
 
 test "a tab without a modal guard never holds the banner" {
@@ -1414,7 +1414,7 @@ test "a tab without a modal guard never holds the banner" {
     stepA(&a, .down);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
-    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
+    try std.testing.expect(std.mem.find(u8, out, "refresh failed") == null);
 }
 
 test "at the minimum size a long name still leaves [y/N] on screen" {
@@ -1423,8 +1423,8 @@ test "at the minimum size a long name still leaves [y/N] on screen" {
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init(&@as([45]u8, @splat('a')), .formula);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, layout.min_cols, layout.min_rows);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H─") == null); // the prompt owns the rule row
+    try std.testing.expect(std.mem.find(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[5;1H─") == null); // the prompt owns the rule row
 }
 
 test "the armed uninstall prompt is drawn once when the body has rows" {
@@ -1433,8 +1433,8 @@ test "the armed uninstall prompt is drawn once when the body has rows" {
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
-    const first = std.mem.indexOf(u8, out, "[y/N]").?;
-    try std.testing.expect(std.mem.indexOfPos(u8, out, first + 1, "[y/N]") == null);
+    const first = std.mem.find(u8, out, "[y/N]").?;
+    try std.testing.expect(std.mem.findPos(u8, out, first + 1, "[y/N]") == null);
 }
 
 test "a key that arms a modal guard drops the rest of the read" {
@@ -1461,12 +1461,12 @@ test "a flood that outlasts the drain cancels the prompt and says so" {
     try std.testing.expect(!activeModal(&a));
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
-    try std.testing.expect(std.mem.indexOf(u8, out, "prompt cancelled") != null);
+    try std.testing.expect(std.mem.find(u8, out, "prompt cancelled") != null);
     stepA(&a, ch('z')); // the flood's next key must not wipe the explanation
-    try std.testing.expect(std.mem.indexOf(u8, renderFrame(&buf, &a, 80, layout.min_rows + 1), "prompt cancelled") != null);
+    try std.testing.expect(std.mem.find(u8, renderFrame(&buf, &a, 80, layout.min_rows + 1), "prompt cancelled") != null);
     a.keep_banner = false;
     stepA(&a, ch('z'));
-    try std.testing.expect(std.mem.indexOf(u8, renderFrame(&buf, &a, 80, layout.min_rows + 1), "prompt cancelled") == null);
+    try std.testing.expect(std.mem.find(u8, renderFrame(&buf, &a, 80, layout.min_rows + 1), "prompt cancelled") == null);
 }
 
 test "a new prompt after a flood cancel hides the stale cancel banner" {
@@ -1478,8 +1478,8 @@ test "a new prompt after a flood cancel hides the stale cancel banner" {
     try std.testing.expect(activeModal(&a));
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "prompt cancelled") == null);
+    try std.testing.expect(std.mem.find(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.find(u8, out, "prompt cancelled") == null);
 }
 
 test "x on an empty list arms nothing, so the read is kept" {
@@ -1741,8 +1741,8 @@ test "a wheel notch scrolls the rendered viewport, not just the cursor" {
     try std.testing.expectEqual(@as(usize, 30), activeChrome(&a).view.selected);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pkg030") != null); // the selection is on screen
-    try std.testing.expect(std.mem.indexOf(u8, out, "pkg000") == null); // the top scrolled off — offset followed
+    try std.testing.expect(std.mem.find(u8, out, "pkg030") != null); // the selection is on screen
+    try std.testing.expect(std.mem.find(u8, out, "pkg000") == null); // the top scrolled off — offset followed
 }
 
 test "the wheel scrolls the filtered list while the filter is being edited" {
@@ -2142,8 +2142,8 @@ test "renderFrame shows the committed filter and the editing footer" {
     try std.testing.expect(!a.quit);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "filter: jq_") != null); // filter line with caret
-    try std.testing.expect(std.mem.indexOf(u8, out, "accept") != null); // editing footer
+    try std.testing.expect(std.mem.find(u8, out, "filter: jq_") != null); // filter line with caret
+    try std.testing.expect(std.mem.find(u8, out, "accept") != null); // editing footer
 }
 
 test "renderFrame self-erases the filter row so a shrinking query drops its caret" {
@@ -2158,7 +2158,7 @@ test "renderFrame self-erases the filter row so a shrinking query drops its care
     stepA(&a, ch('q'));
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[Kfilter: jq") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[Kfilter: jq") != null);
 }
 
 test "the Search tab labels its input box as a query, not a filter" {
@@ -2168,25 +2168,25 @@ test "the Search tab labels its input box as a query, not a filter" {
     stepA(&a, ch('g'));
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "search: rg_") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "filter:") == null);
+    try std.testing.expect(std.mem.find(u8, out, "search: rg_") != null);
+    try std.testing.expect(std.mem.find(u8, out, "filter:") == null);
 }
 
 test "renderFrame draws a footer rule above a dimmed help line" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H─") != null); // the footer rule, not the content rule
-    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // dimmed help: muted role == dim on the basic tier
-    try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[22;1H─") != null); // the footer rule, not the content rule
+    try std.testing.expect(std.mem.find(u8, out, color.Style.dim.code()) != null); // dimmed help: muted role == dim on the basic tier
+    try std.testing.expect(std.mem.find(u8, out, "quit") != null);
 }
 
 test "the footer carries the active tab's keys next to the global keys" {
     var a: App = .{ .active = .services };
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "s: start") != null); // the active tab's keys
-    try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // and the global keys
+    try std.testing.expect(std.mem.find(u8, out, "s: start") != null); // the active tab's keys
+    try std.testing.expect(std.mem.find(u8, out, "switch") != null); // and the global keys
 }
 
 test "the Search footer folds in the basket count so i's batch is never a surprise" {
@@ -2199,15 +2199,15 @@ test "the Search footer folds in the basket count so i's batch is never a surpri
     search.syncSelected(&a.states.search, &store.search); // mirror the basket onto the leaf
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 120, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "i: install 2 selected") != null);
+    try std.testing.expect(std.mem.find(u8, out, "i: install 2 selected") != null);
 }
 
 test "the Search footer drops the count when the basket is empty" {
     var a: App = .{ .active = .search }; // empty basket → selected_count 0
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 120, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "i: install") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "selected") == null); // no count when empty
+    try std.testing.expect(std.mem.find(u8, out, "i: install") != null);
+    try std.testing.expect(std.mem.find(u8, out, "selected") == null); // no count when empty
 }
 
 test "the footer wraps a long hint so the tab's action keys survive a narrow terminal" {
@@ -2216,8 +2216,8 @@ test "the footer wraps a long hint so the tab's action keys survive a narrow ter
     // 70 cols is too narrow for the composed help+hint line on one row; truncating
     // would drop the tail (the tab's action keys), wrapping keeps them.
     const out = renderFrame(&buf, &a, 70, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "u: upgrade") != null); // the action key survives
-    try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // global keys still present
+    try std.testing.expect(std.mem.find(u8, out, "u: upgrade") != null); // the action key survives
+    try std.testing.expect(std.mem.find(u8, out, "switch") != null); // global keys still present
 }
 
 test "renderFooterText wraps into the row cap and drops any overflow below it" {
@@ -2227,12 +2227,12 @@ test "renderFooterText wraps into the row cap and drops any overflow below it" {
     // must not paint, or the footer would bleed into the content region.
     renderFooterText(&f, "aaaa bbbb cccc dddd eeee", color.roleCode(.muted), 6, 2, 8);
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H") != null); // first text row
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[7;1H") != null); // second text row
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H") == null); // capped — no third row
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[6;1H") != null); // first text row
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[7;1H") != null); // second text row
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[8;1H") == null); // capped — no third row
     // Text already fills both rows, so no remainder blanking is emitted and
     // nothing self-erases past the second row.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H\x1b[K") == null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[8;1H\x1b[K") == null);
 }
 
 test "renderFooterText blanks the rows it leaves unpainted up to the cap" {
@@ -2242,9 +2242,9 @@ test "renderFooterText blanks the rows it leaves unpainted up to the cap" {
     // and must be self-erased, or it ghosts once the whole-screen clear is gone.
     renderFooterText(&f, "hi", color.roleCode(.muted), 6, 2, 40);
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H") != null); // the painted line
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[7;1H\x1b[K") != null); // the unused row, self-erased
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H") == null); // never past the cap
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[6;1H") != null); // the painted line
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[7;1H\x1b[K") != null); // the unused row, self-erased
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[8;1H") == null); // never past the cap
 }
 
 test "renderFooterText self-erases each painted line so a shorter hint drops its tail" {
@@ -2255,25 +2255,25 @@ test "renderFooterText self-erases each painted line so a shorter hint drops its
     // painted row owns its line from col 1, so it erases to EOL as it lands.
     renderFooterText(&f, "hi", color.roleCode(.muted), 6, 1, 40);
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H\x1b[K") != null); // painted line self-erased
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[6;1H\x1b[K") != null); // painted line self-erased
 }
 
 test "a too-small terminal shows a wrapped, styled notice (width alone trips it)" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 10, 24); // width below the minimum, height fine
-    try std.testing.expect(std.mem.indexOf(u8, out, "terminal") != null); // the notice shows
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;1H") != null); // wrapped onto a 2nd row
-    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.reset.code()) != null); // info colour applied + reset
+    try std.testing.expect(std.mem.find(u8, out, "terminal") != null); // the notice shows
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[2;1H") != null); // wrapped onto a 2nd row
+    try std.testing.expect(std.mem.find(u8, out, color.Style.reset.code()) != null); // info colour applied + reset
 }
 
 test "the footer shows a per-tab loading status during a blocking refetch" {
     var a: App = .{ .active = .doctor, .loading = true };
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Loading Doctor") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Loading Doctor") != null);
     // Loading takes precedence over the help line so the freeze reads as intentional.
-    try std.testing.expect(std.mem.indexOf(u8, out, "switch") == null);
+    try std.testing.expect(std.mem.find(u8, out, "switch") == null);
 }
 
 test "the loading footer paints the spinner glyph ahead of the Loading text" {
@@ -2282,7 +2282,7 @@ test "the loading footer paints the spinner glyph ahead of the Loading text" {
     const out = renderFrame(&buf, &a, 100, 24);
     // The braille glyph for frame 0, immediately before the loading text.
     const expected = spinner_frames.frames[0] ++ " Loading Outdated";
-    try std.testing.expect(std.mem.indexOf(u8, out, expected) != null);
+    try std.testing.expect(std.mem.find(u8, out, expected) != null);
 }
 
 test "a different spinner_frame paints a different glyph (the animation advances)" {
@@ -2294,7 +2294,7 @@ test "a different spinner_frame paints a different glyph (the animation advances
     const f1 = renderFrame(&b, &a, 100, 24);
     // Distinct frames render distinct bytes, so a repaint per tick visibly ticks.
     try std.testing.expect(!std.mem.eql(u8, f0, f1));
-    try std.testing.expect(std.mem.indexOf(u8, f1, spinner_frames.frames[1]) != null);
+    try std.testing.expect(std.mem.find(u8, f1, spinner_frames.frames[1]) != null);
 }
 
 test "the loading glyph is deterministic per (state, cols, rows)" {
@@ -2314,8 +2314,8 @@ test "the header paints a spinner on the outdated slot while the background audi
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
     const glyph = spinner_frames.frames[0];
-    try std.testing.expect(std.mem.indexOf(u8, out, glyph ++ " outdated") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "7 kegs") != null); // the cheap count is live at launch
+    try std.testing.expect(std.mem.find(u8, out, glyph ++ " outdated") != null);
+    try std.testing.expect(std.mem.find(u8, out, "7 kegs") != null); // the cheap count is live at launch
 }
 
 test "a tab entered mid-fetch reads as Loading in the footer, not an empty list" {
@@ -2325,7 +2325,7 @@ test "a tab entered mid-fetch reads as Loading in the footer, not an empty list"
     a.shared.tab_loading.insert(.doctor);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Loading Doctor") != null);
+    try std.testing.expect(std.mem.find(u8, out, "Loading Doctor") != null);
 }
 
 test "a background fetch on an inactive tab leaves the active footer alone" {
@@ -2335,7 +2335,7 @@ test "a background fetch on an inactive tab leaves the active footer alone" {
     a.shared.tab_loading.insert(.doctor);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Loading") == null);
+    try std.testing.expect(std.mem.find(u8, out, "Loading") == null);
 }
 
 // A pipe stands in for an fd; a held-open write end is a "slow" source with no
@@ -2756,8 +2756,8 @@ test "a child refusing a newer database banners the upgrade hint, not ChildFaile
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // last-good kept
     const b = app.shared.banner.slice();
-    try std.testing.expect(std.mem.indexOf(u8, b, "newer") != null);
-    try std.testing.expect(std.mem.indexOf(u8, b, "ChildFailed") == null);
+    try std.testing.expect(std.mem.find(u8, b, "newer") != null);
+    try std.testing.expect(std.mem.find(u8, b, "ChildFailed") == null);
 }
 
 test "the doctor fetch tolerates a severity exit (≤2) as success" {
@@ -2791,7 +2791,7 @@ test "a background fetch accumulates a payload spanning multiple reads" {
     for (0..rows) |i| {
         if (i != 0) try doc.append(std.testing.allocator, ',');
         var rb: [128]u8 = undefined;
-        const row = try std.fmt.bufPrint(&rb, "{{\"name\":\"pkg{d}\",\"installed\":\"1.0.0\",\"latest\":\"2.0.0\",\"type\":\"formula\",\"pinned\":false}}", .{i});
+        const row = try std.mem.print(&rb, "{{\"name\":\"pkg{d}\",\"installed\":\"1.0.0\",\"latest\":\"2.0.0\",\"type\":\"formula\",\"pinned\":false}}", .{i});
         try doc.appendSlice(std.testing.allocator, row);
     }
     try doc.appendSlice(std.testing.allocator, "]}");
@@ -2841,8 +2841,8 @@ test "renderFrame uses cursor positioning and never emits a raw newline" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Installed") != null);
+    try std.testing.expect(std.mem.findScalar(u8, out, '\n') == null);
+    try std.testing.expect(std.mem.find(u8, out, "Installed") != null);
 }
 
 test "renderFrame emits no whole-screen clear: the frame repaints in place" {
@@ -2852,7 +2852,7 @@ test "renderFrame emits no whole-screen clear: the frame repaints in place" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J") == null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[2J") == null);
 }
 
 test "renderFrame brackets every frame in synchronized output" {
@@ -2903,9 +2903,9 @@ test "a recoverable banner renders in the footer in place of the help line" {
     a.shared.banner.set("info for jq failed", "BadJson");
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "info for jq failed: BadJson") != null);
+    try std.testing.expect(std.mem.find(u8, out, "info for jq failed: BadJson") != null);
     // The banner takes the help line's slot, so the help text is not shown.
-    try std.testing.expect(std.mem.indexOf(u8, out, "q: quit") == null);
+    try std.testing.expect(std.mem.find(u8, out, "q: quit") == null);
 }
 
 test "a banner truncates width-aware to the terminal columns" {
@@ -2914,7 +2914,7 @@ test "a banner truncates width-aware to the terminal columns" {
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 24, 24); // narrow terminal
     // The full message cannot have been painted verbatim into 24 columns.
-    try std.testing.expect(std.mem.indexOf(u8, out, "info for some-very-long-package-name failed: ChildFailed") == null);
+    try std.testing.expect(std.mem.find(u8, out, "info for some-very-long-package-name failed: ChildFailed") == null);
 }
 
 test "any keypress clears a transient banner when no modal guard is armed" {
@@ -2929,7 +2929,7 @@ test "renderFrame falls back cleanly on a too-small terminal" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 2); // wide enough to read the message, too few rows
-    try std.testing.expect(std.mem.indexOf(u8, out, "too small") != null);
+    try std.testing.expect(std.mem.find(u8, out, "too small") != null);
 }
 
 test "renderFrame reflows on resize from the same state" {
@@ -3000,8 +3000,8 @@ test "a newline in a child-derived op cannot inject an extra footer frame line" 
     a.shared.banner.set("info for ev\nil failed", "BadJson");
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "evil failed: BadJson") != null); // \n stripped, text joined
+    try std.testing.expect(std.mem.findScalar(u8, out, '\n') == null);
+    try std.testing.expect(std.mem.find(u8, out, "evil failed: BadJson") != null); // \n stripped, text joined
 }
 
 /// True when `out` paints a dim separator at `row`: the cursor move to that row,
@@ -3009,7 +3009,7 @@ test "a newline in a child-derived op cannot inject an extra footer frame line" 
 /// Doctor's muted "No findings." hint at the same row doesn't read as a rule.
 fn hasSeparatorAtRow(out: []const u8, comptime row: u16) bool {
     const cup = std.fmt.comptimePrint("\x1b[{d};1H", .{row});
-    const at = std.mem.indexOf(u8, out, cup) orelse return false;
+    const at = std.mem.find(u8, out, cup) orelse return false;
     const after = out[at + cup.len ..];
     const muted = color.roleCode(.muted);
     if (!std.mem.startsWith(u8, after, muted)) return false;
@@ -3038,7 +3038,7 @@ test "the hub imports no json/* parser — the dissolved-hub invariant" {
     // source never contains the contiguous marker it searches for.
     const src = @embedFile("app.zig");
     const needle = "@import(\"" ++ "json/";
-    try std.testing.expect(std.mem.indexOf(u8, src, needle) == null);
+    try std.testing.expect(std.mem.find(u8, src, needle) == null);
 }
 
 test "the keg-count read stays cheap — list --json, no --size/--linked walk" {
@@ -3088,8 +3088,8 @@ test "the Search footer switches to the basket-view keys when the basket view is
     a.states.search.view = .basket;
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 120, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "remove") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "l: results") != null);
+    try std.testing.expect(std.mem.find(u8, out, "remove") != null);
+    try std.testing.expect(std.mem.find(u8, out, "l: results") != null);
 }
 
 test "committing the filter fires a search on the Search tab but no domain key elsewhere" {

@@ -548,7 +548,7 @@ fn writeSizeField(w: *std.Io.Writer, extras: Extras, dir: []const u8) !void {
     const bytes = if (dir.len == 0) 0 else dirsize.dirSizeBytes(extras.io, dir);
     // 40 > label (14) + max u64 (20 digits) — bufPrint cannot run out.
     var buf: [40]u8 = undefined;
-    try w.writeAll(std.fmt.bufPrint(&buf, ",\"size_bytes\":{d}", .{bytes}) catch return);
+    try w.writeAll(std.mem.print(&buf, ",\"size_bytes\":{d}", .{bytes}) catch return);
 }
 
 fn writeFormulaRows(
@@ -649,13 +649,13 @@ fn writeCaskSizeField(w: *std.Io.Writer, extras: Extras, token: []const u8, app_
     if (!extras.size) return;
     var total: u64 = 0;
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}", .{ extras.prefix, token })) |caskroom| {
+    if (std.mem.print(&buf, "{s}/Caskroom/{s}", .{ extras.prefix, token })) |caskroom| {
         total +|= dirsize.dirSizeBytes(extras.io, caskroom);
     } else |_| {}
     if (app_path.len > 0) total +|= dirsize.dirSizeBytes(extras.io, app_path);
     // 40 > label (14) + max u64 (20 digits) — bufPrint cannot run out.
     var nb: [40]u8 = undefined;
-    try w.writeAll(std.fmt.bufPrint(&nb, ",\"size_bytes\":{d}", .{total}) catch return);
+    try w.writeAll(std.mem.print(&nb, ",\"size_bytes\":{d}", .{total}) catch return);
 }
 
 /// `linked` source per kind: a formula keg consults the `links` table

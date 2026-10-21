@@ -131,7 +131,7 @@ fn checkPath(
     const owned = if (rel.len == 0)
         try allocator.dupe(u8, prefix)
     else
-        try std.fs.path.join(allocator, &.{ prefix, rel });
+        try std.Io.Dir.path.join(allocator, &.{ prefix, rel });
     findings.append(allocator, .{ .path = owned, .report = report }) catch |e| {
         allocator.free(owned);
         return e;
@@ -158,7 +158,7 @@ pub fn privilegeIdsMatch(uid: std.posix.uid_t, euid: std.posix.uid_t, gid: std.p
 test "isGone: true only when the entry no longer exists" {
     const io = std.Options.debug_io;
     var buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&buf, "/tmp/malt_isgone_{d}", .{std.c.getpid()});
+    const base = try std.mem.print(&buf, "/tmp/malt_isgone_{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
     try std.Io.Dir.cwd().createDirPath(io, base);
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
@@ -175,7 +175,7 @@ test "isGone: true only when the entry no longer exists" {
 // Re-exports for non-macOS callers that want the type-level surface
 // without pulling in the walker.
 comptime {
-    if (builtin.os.tag != .macos) {
+    if (builtin.target.os.tag != .macos) {
         @compileError("perms.zig is macOS-only for now");
     }
 }

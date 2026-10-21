@@ -234,7 +234,7 @@ test "fixKindFromId rejects unknown, none, and empty ids" {
 
 test "fix_ids_csv lists every safe-fix id" {
     inline for (std.meta.tags(FixKind)) |kind| {
-        try testing.expect(std.mem.indexOf(u8, fix_ids_csv, fixClassTag(kind)) != null);
+        try testing.expect(std.mem.find(u8, fix_ids_csv, fixClassTag(kind)) != null);
     }
 }
 
@@ -293,8 +293,8 @@ test "writeChecksJson: an in-progress finding serializes severity info, non-fixa
         },
     };
     const out = try checksToBuf(&findings, &buf);
-    try testing.expect(std.mem.indexOf(u8, out, "\"severity\":\"info\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"fixable\":false") != null);
+    try testing.expect(std.mem.find(u8, out, "\"severity\":\"info\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"fixable\":false") != null);
 }
 
 test "writeChecksJson: comma-separates multiple findings" {
@@ -304,8 +304,8 @@ test "writeChecksJson: comma-separates multiple findings" {
         .{ .id = "b", .severity = .err_status, .title = "B" },
     };
     const out = try checksToBuf(&findings, &buf);
-    try testing.expect(std.mem.indexOf(u8, out, "},{") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"severity\":\"err\"") != null);
+    try testing.expect(std.mem.find(u8, out, "},{") != null);
+    try testing.expect(std.mem.find(u8, out, "\"severity\":\"err\"") != null);
 }
 
 test "writeChecksJson: detail with quotes is JSON-escaped" {
@@ -314,5 +314,5 @@ test "writeChecksJson: detail with quotes is JSON-escaped" {
         .{ .id = "x", .severity = .warn_status, .title = "X", .detail = "needs \"quotes\"" },
     };
     const out = try checksToBuf(&findings, &buf);
-    try testing.expect(std.mem.indexOf(u8, out, "\\\"quotes\\\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\\\"quotes\\\"") != null);
 }

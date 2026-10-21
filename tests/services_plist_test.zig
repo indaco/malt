@@ -65,10 +65,10 @@ test "render full spec with env and working_dir" {
     };
     try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "<key>WorkingDirectory</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "<key>EnvironmentVariables</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "<key>PGDATA</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "<string>en_US.UTF-8</string>") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "<key>WorkingDirectory</key>") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "<key>EnvironmentVariables</key>") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "<key>PGDATA</key>") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "<string>en_US.UTF-8</string>") != null);
 }
 
 test "XML-escapes special characters" {
@@ -83,8 +83,8 @@ test "XML-escapes special characters" {
     };
     try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "&lt;ampersand&amp;test&gt;") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "a&quot;b.log") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "&lt;ampersand&amp;test&gt;") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "a&quot;b.log") != null);
 }
 
 test "render interval schedule emits StartInterval and RunAtLoad false" {
@@ -233,7 +233,7 @@ test "keep_alive false omits KeepAlive dict" {
     };
     try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "KeepAlive") == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "KeepAlive") == null);
 }
 
 test "stop_timeout renders ExitTimeOut so launchd waits before SIGKILL" {
@@ -249,7 +249,7 @@ test "stop_timeout renders ExitTimeOut so launchd waits before SIGKILL" {
     };
     try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "    <key>ExitTimeOut</key>\n    <integer>120</integer>\n") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "    <key>ExitTimeOut</key>\n    <integer>120</integer>\n") != null);
 }
 
 test "absent stop_timeout leaves ExitTimeOut to launchd's default" {
@@ -264,7 +264,7 @@ test "absent stop_timeout leaves ExitTimeOut to launchd's default" {
     };
     try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "ExitTimeOut") == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "ExitTimeOut") == null);
 }
 
 test "an API service's environment_variables reach the rendered plist" {
@@ -293,7 +293,7 @@ test "an API service's environment_variables reach the rendered plist" {
         \\    <key>StandardOutPath</key>
         \\
     ;
-    try testing.expect(std.mem.indexOf(u8, aw.written(), want) != null);
+    try testing.expect(std.mem.find(u8, aw.written(), want) != null);
 }
 
 test "a NUL smuggled into an API environment value fails validation" {
@@ -331,14 +331,14 @@ const WarnLog = struct {
 fn writeOverride(io: std.Io, dir: std.Io.Dir, buf: []u8, services: []const u8, name: []const u8, body: []const u8) ![]const u8 {
     try dir.createDirPath(io, services);
     var sub_buf: [128]u8 = undefined;
-    try dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&sub_buf, "{s}/{s}.env", .{ services, name }), .data = body });
+    try dir.writeFile(io, .{ .sub_path = try std.mem.print(&sub_buf, "{s}/{s}.env", .{ services, name }), .data = body });
     return buf[0..try std.Io.Dir.realPath(dir, io, buf)];
 }
 
 /// An environ carrying only `XDG_CONFIG_HOME=<root>`, owned by `aa`.
 fn xdgEnviron(aa: std.mem.Allocator, root: []const u8) !std.process.Environ {
     const entries = try aa.allocSentinel(?[*:0]const u8, 1, null);
-    entries[0] = (try std.fmt.allocPrintSentinel(aa, "XDG_CONFIG_HOME={s}", .{root}, 0)).ptr;
+    entries[0] = (try aa.printSentinel("XDG_CONFIG_HOME={s}", .{root}, 0)).ptr;
     return .{ .block = .{ .slice = entries } };
 }
 
@@ -356,7 +356,7 @@ test "a user's service .env override lands in the rendered plist over the formul
     const io = std.Options.debug_io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = try writeOverride(io, tmp.dir, &root_buf, "malt/services", "postgresql@17", "# survives upgrades\nPGPORT=5433\nLC_ALL=C\n");
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -382,14 +382,14 @@ test "a user's service .env override lands in the rendered plist over the formul
         \\    </dict>
         \\
     ;
-    try testing.expect(std.mem.indexOf(u8, aw.written(), want) != null);
+    try testing.expect(std.mem.find(u8, aw.written(), want) != null);
 }
 
 test "without XDG_CONFIG_HOME the override is read from ~/.config" {
     const io = std.Options.debug_io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const home = try writeOverride(io, tmp.dir, &root_buf, ".config/malt/services", "redis", "REDIS_PORT=6380\n");
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -397,7 +397,7 @@ test "without XDG_CONFIG_HOME the override is read from ~/.config" {
     const aa = arena.allocator();
     // A relative XDG_CONFIG_HOME is invalid per the spec and must be ignored.
     const xdg = "XDG_CONFIG_HOME=relative/cfg";
-    const home_kv = try std.fmt.allocPrintSentinel(aa, "HOME={s}", .{home}, 0);
+    const home_kv = try aa.printSentinel("HOME={s}", .{home}, 0);
     const entries = [_:null]?[*:0]const u8{ xdg, home_kv.ptr };
     const environ: std.process.Environ = .{ .block = .{ .slice = entries[0..2 :null] } };
 
@@ -413,7 +413,7 @@ test "a refused override file warns with its line and asks the caller to keep th
     const io = std.Options.debug_io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // The good line must not half-apply once a later line is refused.
     const root = try writeOverride(io, tmp.dir, &root_buf, "malt/services", "postgresql@17", "PGPORT=5433\nDYLD_INSERT_LIBRARIES=/tmp/x.dylib\n");
 
@@ -425,8 +425,8 @@ test "a refused override file warns with its line and asks the caller to keep th
     var log: WarnLog = .{};
     // Null, not the formula spec: rewriting would drop overrides already live.
     try testing.expect(malt.install_service.withEnvOverrides(io, aa, environ, try postgresSpec(aa), "postgresql@17", log.sink()) == null);
-    try testing.expect(std.mem.indexOf(u8, log.text(), "postgresql@17.env:2") != null);
-    try testing.expect(std.mem.indexOf(u8, log.text(), "DYLD_") != null);
+    try testing.expect(std.mem.find(u8, log.text(), "postgresql@17.env:2") != null);
+    try testing.expect(std.mem.find(u8, log.text(), "DYLD_") != null);
 }
 
 test "no override file and no HOME leave the spec untouched and silent" {
@@ -456,20 +456,20 @@ test "an oversized override file is refused whole rather than applied truncated"
     const body = try aa.alloc(u8, malt.services_env_override.max_bytes + 1);
     @memset(body, '#');
     @memcpy(body[0..7], "PGPORT=");
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = try writeOverride(io, tmp.dir, &root_buf, "malt/services", "postgresql@17", body);
     const environ = try xdgEnviron(aa, root);
 
     var log: WarnLog = .{};
     try testing.expect(malt.install_service.withEnvOverrides(io, aa, environ, try postgresSpec(aa), "postgresql@17", log.sink()) == null);
-    try testing.expect(std.mem.indexOf(u8, log.text(), "larger than") != null);
+    try testing.expect(std.mem.find(u8, log.text(), "larger than") != null);
 }
 
 test "a service name that is not a path component never reaches the filesystem" {
     const io = std.Options.debug_io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // A file the traversal would land on if the name were joined blindly.
     const root = try writeOverride(io, tmp.dir, &root_buf, "malt", "escape", "PGPORT=1\n");
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -488,7 +488,7 @@ test "an override path that is not a readable file warns instead of passing sile
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "malt/services/postgresql@17.env");
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &root_buf)];
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -498,7 +498,7 @@ test "an override path that is not a readable file warns instead of passing sile
     var log: WarnLog = .{};
     const base = try postgresSpec(aa);
     try testing.expect(malt.install_service.withEnvOverrides(io, aa, environ, base, "postgresql@17", log.sink()) == null);
-    try testing.expect(std.mem.indexOf(u8, log.text(), "ignored") != null);
+    try testing.expect(std.mem.find(u8, log.text(), "ignored") != null);
 }
 
 extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
@@ -509,17 +509,17 @@ test "a FIFO at the override path is refused without blocking" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "malt/services");
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &root_buf)];
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
-    const fifo = try std.fmt.allocPrintSentinel(aa, "{s}/malt/services/postgresql@17.env", .{root}, 0);
+    const fifo = try aa.printSentinel("{s}/malt/services/postgresql@17.env", .{root}, 0);
     try testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o600));
 
     var log: WarnLog = .{};
     try testing.expect(malt.install_service.withEnvOverrides(io, aa, try xdgEnviron(aa, root), try postgresSpec(aa), "postgresql@17", log.sink()) == null);
-    try testing.expect(std.mem.indexOf(u8, log.text(), "not a regular file") != null);
+    try testing.expect(std.mem.find(u8, log.text(), "not a regular file") != null);
 }
 
 test "an override file other users can write is refused" {
@@ -527,19 +527,19 @@ test "an override file other users can write is refused" {
     const io = std.Options.debug_io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = try writeOverride(io, tmp.dir, &root_buf, "malt/services", "postgresql@17", "PGPORT=5433\n");
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(aa, "{s}/malt/services/postgresql@17.env", .{root}, 0);
+    const path = try aa.printSentinel("{s}/malt/services/postgresql@17.env", .{root}, 0);
     const environ = try xdgEnviron(aa, root);
 
     for ([_]std.c.mode_t{ 0o666, 0o620 }) |mode| {
         try testing.expectEqual(@as(c_int, 0), std.c.chmod(path, mode));
         var log: WarnLog = .{};
         try testing.expect(malt.install_service.withEnvOverrides(io, aa, environ, try postgresSpec(aa), "postgresql@17", log.sink()) == null);
-        try testing.expect(std.mem.indexOf(u8, log.text(), "writable by other users") != null);
+        try testing.expect(std.mem.find(u8, log.text(), "writable by other users") != null);
     }
     // Owner-only write is the normal case and applies.
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(path, 0o644));
@@ -552,7 +552,7 @@ test "an override file reached through a symlink still applies" {
     const io = std.Options.debug_io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = try writeOverride(io, tmp.dir, &root_buf, "dotfiles", "postgresql@17", "PGPORT=5433\n");
     try tmp.dir.createDirPath(io, "malt/services");
     try tmp.dir.symLink(io, "../../dotfiles/postgresql@17.env", "malt/services/postgresql@17.env", .{});

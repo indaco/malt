@@ -25,12 +25,12 @@ fn isBanned(line: []const u8) bool {
         "/bin/ksh",     "/usr/bin/sh",  "/usr/bin/bash",
         "/usr/bin/zsh", "/usr/bin/ksh",
     };
-    for (banned) |b| if (std.mem.indexOf(u8, line, b) != null) return true;
+    for (banned) |b| if (std.mem.find(u8, line, b) != null) return true;
     return false;
 }
 
 fn stripLineComment(line: []const u8) []const u8 {
-    const idx = std.mem.indexOf(u8, line, "//") orelse return line;
+    const idx = std.mem.find(u8, line, "//") orelse return line;
     return line[0..idx];
 }
 
@@ -41,10 +41,10 @@ fn allowedContext(path: []const u8, line: []const u8) bool {
     if (std.mem.endsWith(u8, path, "core/services/plist.zig")) {
         // forbidden_heads declaration + error docstrings — both live in
         // that file by design. Any other usage still has to pass.
-        if (std.mem.indexOf(u8, line, "forbidden_heads") != null) return true;
+        if (std.mem.find(u8, line, "forbidden_heads") != null) return true;
         // Quoted-string list entries: `"/bin/sh",`
-        if (std.mem.indexOf(u8, line, "\"/bin/") != null) return true;
-        if (std.mem.indexOf(u8, line, "\"/usr/bin/") != null) return true;
+        if (std.mem.find(u8, line, "\"/bin/") != null) return true;
+        if (std.mem.find(u8, line, "\"/usr/bin/") != null) return true;
     }
     return false;
 }
@@ -77,8 +77,7 @@ test "no shell-invocation patterns anywhere under src/" {
             const stripped = stripLineComment(line);
             if (!isBanned(stripped)) continue;
             if (allowedContext(entry.path, stripped)) continue;
-            const buf = try std.fmt.allocPrint(
-                alloc,
+            const buf = try alloc.print(
                 "src/{s}:{d}: {s}\n",
                 .{ entry.path, lineno, line },
             );

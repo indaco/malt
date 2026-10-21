@@ -182,7 +182,7 @@ fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
         } else if (byte < 0x20) {
             if (i > start) try w.writeAll(s[start..i]);
             var hex_buf: [6]u8 = undefined;
-            const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{byte}) catch unreachable;
+            const hex = std.mem.print(&hex_buf, "\\u{x:0>4}", .{byte}) catch unreachable;
             try w.writeAll(hex);
             start = i + 1;
         }
@@ -400,9 +400,9 @@ test "writeJsonString escapes unnamed control bytes as \\uXXXX and round-trips" 
     try emitJson(m1, &aw.writer);
 
     // The two unnamed controls must appear as \u0001 / \u001f, not raw bytes.
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "\\u0001") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "\\u001f") != null);
-    try testing.expect(std.mem.indexOfScalar(u8, aw.written(), 0x01) == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "\\u0001") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "\\u001f") != null);
+    try testing.expect(std.mem.findScalar(u8, aw.written(), 0x01) == null);
 
     var m2 = try parseJson(testing.allocator, aw.written());
     defer m2.deinit();

@@ -127,7 +127,7 @@ test "default sink routes the failure line to ui/output" {
     // No sink supplied → InstallAllOpts defaults to the terminal sink, so
     // the per-keg error must land on the global stderr exactly as today.
     try runUnresolvable(install_sink.terminal, "default", &out_buf);
-    try testing.expect(std.mem.indexOf(u8, out_buf.items, "zz_nonexistent_formula_xyz") != null);
+    try testing.expect(std.mem.find(u8, out_buf.items, "zz_nonexistent_formula_xyz") != null);
 }
 
 test "silent sink quiets the failure line but the install still fails" {

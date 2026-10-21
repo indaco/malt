@@ -56,7 +56,7 @@ test "renderFrame is a pure function of size — a resize re-renders from cached
     const after = app.renderFrame(&b2, &a, 100, 40);
     // No key was fed; the same state reflows to a different frame on resize.
     try testing.expect(!std.mem.eql(u8, before, after));
-    try testing.expect(std.mem.indexOfScalar(u8, after, '\n') == null);
+    try testing.expect(std.mem.findScalar(u8, after, '\n') == null);
 }
 
 test "the SIGWINCH resized flag is consumed exactly once" {
@@ -82,37 +82,37 @@ test "a recoverable banner is painted in the footer and a keypress dismisses it"
     a.shared.banner.set("info for jq failed", "BadJson");
     var buf: [8192]u8 = undefined;
     const shown = app.renderFrame(&buf, &a, 80, 24);
-    try testing.expect(std.mem.indexOf(u8, shown, "info for jq failed: BadJson") != null);
+    try testing.expect(std.mem.find(u8, shown, "info for jq failed: BadJson") != null);
 
     stepA(&a, .down); // any key clears the transient banner
     try testing.expect(!a.shared.banner.isSet());
     const cleared = app.renderFrame(&buf, &a, 80, 24);
-    try testing.expect(std.mem.indexOf(u8, cleared, "info for jq failed") == null);
-    try testing.expect(std.mem.indexOf(u8, cleared, "quit") != null); // help line is back
+    try testing.expect(std.mem.find(u8, cleared, "info for jq failed") == null);
+    try testing.expect(std.mem.find(u8, cleared, "quit") != null); // help line is back
 }
 
 test "the header bar paints name, version and prefix on row 1 above the tab bar" {
     var a: app.App = .{ .version = "0.1.0", .prefix = "/opt/malt" };
     var buf: [8192]u8 = undefined;
     const out = app.renderFrame(&buf, &a, 80, 24);
-    const hdr = std.mem.indexOf(u8, out, "mt 0.1.0").?;
-    try testing.expect(std.mem.indexOf(u8, out, "/opt/malt") != null);
+    const hdr = std.mem.find(u8, out, "mt 0.1.0").?;
+    try testing.expect(std.mem.find(u8, out, "/opt/malt") != null);
     // Painted before the tab bar, which moves the cursor to row 2.
-    try testing.expect(hdr < std.mem.indexOf(u8, out, "\x1b[2;1H").?);
+    try testing.expect(hdr < std.mem.find(u8, out, "\x1b[2;1H").?);
 }
 
 test "header counts are an em-dash before their stores load, the numbers after" {
     var a: app.App = .{ .version = "0.1.0", .prefix = "/opt/malt" };
     var buf: [8192]u8 = undefined;
     const empty = app.renderFrame(&buf, &a, 120, 24);
-    try testing.expect(std.mem.indexOf(u8, empty, "\xe2\x80\x94 kegs") != null); // em-dash
-    try testing.expect(std.mem.indexOf(u8, empty, "\xe2\x80\x94 outdated") != null);
+    try testing.expect(std.mem.find(u8, empty, "\xe2\x80\x94 kegs") != null); // em-dash
+    try testing.expect(std.mem.find(u8, empty, "\xe2\x80\x94 outdated") != null);
 
     a.shared.installed_count = 192;
     a.shared.outdated_count = 17;
     const loaded = app.renderFrame(&buf, &a, 120, 24);
-    try testing.expect(std.mem.indexOf(u8, loaded, "192 kegs") != null);
-    try testing.expect(std.mem.indexOf(u8, loaded, "17 outdated") != null);
+    try testing.expect(std.mem.find(u8, loaded, "192 kegs") != null);
+    try testing.expect(std.mem.find(u8, loaded, "17 outdated") != null);
 }
 
 test "refusalReason refuses a non-interactive terminal and allows a clean tty" {
@@ -124,9 +124,9 @@ test "refusalReason refuses a non-interactive terminal and allows a clean tty" {
 
 test "tui is listed in help and in all three completion shells" {
     try testing.expect(!std.mem.eql(u8, help.helpFor("tui"), "No help available.\n"));
-    try testing.expect(std.mem.indexOf(u8, help.helpFor("tui"), "dashboard") != null);
+    try testing.expect(std.mem.find(u8, help.helpFor("tui"), "dashboard") != null);
 
-    try testing.expect(std.mem.indexOf(u8, completions.scriptFor(.bash), " tui ") != null);
-    try testing.expect(std.mem.indexOf(u8, completions.scriptFor(.zsh), "'tui:") != null);
-    try testing.expect(std.mem.indexOf(u8, completions.scriptFor(.fish), "-a tui") != null);
+    try testing.expect(std.mem.find(u8, completions.scriptFor(.bash), " tui ") != null);
+    try testing.expect(std.mem.find(u8, completions.scriptFor(.zsh), "'tui:") != null);
+    try testing.expect(std.mem.find(u8, completions.scriptFor(.fish), "-a tui") != null);
 }

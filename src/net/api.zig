@@ -40,7 +40,7 @@ pub const ApiError = error{
 /// Allowed characters: [a-z0-9@._+-]
 pub fn validateName(name: []const u8) ApiError!void {
     if (name.len == 0 or name.len > 128) return ApiError.InvalidName;
-    if (std.mem.indexOf(u8, name, "..") != null) return ApiError.InvalidName;
+    if (std.mem.find(u8, name, "..") != null) return ApiError.InvalidName;
     for (name) |ch| {
         switch (ch) {
             'a'...'z', '0'...'9', '@', '.', '_', '+', '-' => {},
@@ -105,7 +105,7 @@ pub fn extractNames(
 
 /// Key of the bottle-digest side-car. The tags kept are this arch's, so two
 /// Macs of different arch sharing a cache each get their own file.
-pub const bottles_key = if (@import("builtin").cpu.arch == .aarch64) "formula.arm64" else "formula.x86_64";
+pub const bottles_key = if (@import("builtin").target.cpu.arch == .aarch64) "formula.arm64" else "formula.x86_64";
 
 /// From the formula bulk dump: `<name>\t<tag>=<sha256>,...` per formula,
 /// keeping only the tags this arch can place (plus `all`), so doctor can map
@@ -154,7 +154,7 @@ fn fieldObject(v: ?std.json.Value, key: []const u8) ?std.json.Value {
 /// The bottle-digest side-car at any age, without a client. Caller owns it.
 pub fn readBottlesIndex(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) error{OutOfMemory}!?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const p = std.fmt.bufPrint(&path_buf, "{s}/api/bottles_{s}.txt", .{ cache_dir, bottles_key }) catch return null;
+    const p = std.mem.print(&path_buf, "{s}/api/bottles_{s}.txt", .{ cache_dir, bottles_key }) catch return null;
     return readCacheFile(io, allocator, p);
 }
 
@@ -302,7 +302,7 @@ fn appendVersionLine(
     // [24]u8 holds any i64 ("-9223372036854775808" is 20 chars), so the
     // bufPrint can't fail — unreachable is a provable bound, not a guess.
     var rbuf: [24]u8 = undefined;
-    const rstr = std.fmt.bufPrint(&rbuf, "{d}", .{rev}) catch unreachable;
+    const rstr = std.mem.print(&rbuf, "{d}", .{rev}) catch unreachable;
     try out.appendSlice(allocator, rstr);
     try out.append(allocator, '\n');
 }
@@ -332,7 +332,7 @@ pub fn findNameMatches(
     var it = std.mem.splitScalar(u8, index, '\n');
     while (it.next()) |name| {
         if (name.len == 0) continue;
-        if (std.mem.indexOf(u8, name, qlower) != null) {
+        if (std.mem.find(u8, name, qlower) != null) {
             try out.append(allocator, name);
         }
     }
@@ -343,7 +343,7 @@ pub fn findNameMatches(
 /// verbs that only consult the cache never need HTTP. Caller owns the bytes.
 pub fn readFreshCache(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) error{OutOfMemory}!?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
+    const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
 
     const stat = std.Io.Dir.cwd().statFile(io, cache_path, .{}) catch return null;
     const now = std.Io.Clock.real.now(io).toSeconds();
@@ -378,7 +378,7 @@ fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u
 /// callers that must never dial out. Caller owns the bytes.
 pub fn readCacheAt(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) error{OutOfMemory}!?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
+    const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
     return readCacheFile(io, allocator, cache_path);
 }
 
@@ -408,13 +408,13 @@ pub const BrewApi = struct {
     /// Build the formula JSON URL for `name`. Pure — `pub` so tests
     /// can pin the override-honouring shape without driving the cache.
     pub fn buildFormulaUrl(buf: []u8, base: []const u8, name: []const u8) ApiError![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/formula/{s}.json", .{ base, name }) catch
+        return std.mem.print(buf, "{s}/formula/{s}.json", .{ base, name }) catch
             ApiError.OutOfMemory;
     }
 
     /// Build the cask JSON URL for `token`. Pure — see `buildFormulaUrl`.
     pub fn buildCaskUrl(buf: []u8, base: []const u8, token: []const u8) ApiError![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/cask/{s}.json", .{ base, token }) catch
+        return std.mem.print(buf, "{s}/cask/{s}.json", .{ base, token }) catch
             ApiError.OutOfMemory;
     }
 
@@ -424,7 +424,7 @@ pub const BrewApi = struct {
             .formula => "/formula.json",
             .cask => "/cask.json",
         };
-        return std.fmt.bufPrint(buf, "{s}{s}", .{ base, suffix }) catch
+        return std.mem.print(buf, "{s}{s}", .{ base, suffix }) catch
             ApiError.OutOfMemory;
     }
 
@@ -487,7 +487,7 @@ pub const BrewApi = struct {
     pub fn cachedExists(self: *BrewApi, name: []const u8, kind: Kind) bool {
         const prefix = prefixForKind(kind);
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, name }) catch return false;
+        const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, name }) catch return false;
         _ = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
         return true;
     }
@@ -496,7 +496,7 @@ pub const BrewApi = struct {
     /// TTL rule as `readCache`, but without reading the body.
     fn cachedFresh(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return false;
+        const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return false;
         const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
         const now = std.Io.Clock.real.now(self.io).toSeconds();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
@@ -520,7 +520,7 @@ pub const BrewApi = struct {
         if (kind != .cask) return key;
         var host_buf: [32]u8 = undefined;
         const variation = CaskHost.running(&host_buf).variation_key orelse return key;
-        return std.fmt.bufPrint(buf, "{s}.{s}", .{ key, variation }) catch key;
+        return std.mem.print(buf, "{s}.{s}", .{ key, variation }) catch key;
     }
 
     /// Both side-cars from one bulk parse; caller owns both slices.
@@ -647,19 +647,19 @@ pub const BrewApi = struct {
 
     fn writeBottlesIndex(self: *const BrewApi, data: []const u8) void {
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        const dir = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/bottles_{s}.txt", .{ self.cache_dir, bottles_key }) catch return;
+        const p = std.mem.print(&path_buf, "{s}/api/bottles_{s}.txt", .{ self.cache_dir, bottles_key }) catch return;
         atomic.atomicWriteFile(self.io, p, data) catch {};
     }
 
     fn indexFileExists(self: *const BrewApi, infix: []const u8, key: []const u8) bool {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return false;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return false;
         _ = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return false;
         return true;
     }
@@ -670,7 +670,7 @@ pub const BrewApi = struct {
     /// miss / read error.
     fn readIndexFile(self: *BrewApi, infix: []const u8, key: []const u8, ttl: ?i64) ?[]const u8 {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return null;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return null;
 
         if (ttl) |limit| {
             const stat = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return null;
@@ -696,14 +696,14 @@ pub const BrewApi = struct {
 
     fn writeIndexFile(self: *const BrewApi, infix: []const u8, key: []const u8, data: []const u8) void {
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        const dir = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
 
         const f = std.Io.Dir.cwd().createFile(self.io, p, .{}) catch return;
         defer f.close(self.io);
@@ -719,7 +719,7 @@ pub const BrewApi = struct {
     /// if absent / unreadable / implausibly large. Caller owns the bytes.
     fn readIndexEtag(self: *BrewApi, key: []const u8) ?[]const u8 {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return null;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return null;
         const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
         defer file.close(self.io);
         const s = file.stat(self.io) catch return null;
@@ -743,13 +743,13 @@ pub const BrewApi = struct {
     fn writeIndexEtag(self: *const BrewApi, key: []const u8, etag: ?[]const u8) void {
         const e = etag orelse return self.deleteIndexEtag(key);
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        const dir = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
         };
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
         // Best-effort: a failed write just means the next fetch is
         // unconditional, never wrong — the side-cars are already on disk.
         atomic.atomicWriteFile(self.io, p, e) catch {};
@@ -758,7 +758,7 @@ pub const BrewApi = struct {
     /// Remove the stored ETag for `key`; best-effort.
     fn deleteIndexEtag(self: *const BrewApi, key: []const u8) void {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
         // A leftover ETag at worst triggers one needless conditional GET;
         // a delete failure is harmless, so swallow it.
         std.Io.Dir.cwd().deleteFile(self.io, p) catch {};
@@ -768,7 +768,7 @@ pub const BrewApi = struct {
     /// without rewriting the bytes already on disk.
     fn touchIndex(self: *const BrewApi, infix: []const u8, key: []const u8) void {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
+        const p = std.mem.print(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
         const file = std.Io.Dir.cwd().openFile(self.io, p, .{ .mode = .write_only }) catch return;
         defer file.close(self.io);
         // If the touch fails the side-car just looks stale next time and we
@@ -779,7 +779,7 @@ pub const BrewApi = struct {
     /// Invalidate all cached API responses.
     pub fn invalidateCache(self: *BrewApi) void {
         var api_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const api_path = std.fmt.bufPrint(&api_path_buf, "{s}/api", .{self.cache_dir}) catch return;
+        const api_path = std.mem.print(&api_path_buf, "{s}/api", .{self.cache_dir}) catch return;
         // Cache dir absent on first-ever run; wipe is purely opportunistic.
         std.Io.Dir.cwd().deleteTree(self.io, api_path) catch {};
     }
@@ -837,14 +837,14 @@ pub const BrewApi = struct {
 
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        const dir_path = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return;
+        const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return;
 
         // Atomic write so a crash mid-`writeAll` can't leave a
         // truncated JSON file that breaks the next install until the
@@ -862,7 +862,7 @@ pub const BrewApi = struct {
     /// returning 200.
     pub fn readNotFoundCache(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
+        const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
 
         const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
         const now = std.Io.Clock.real.now(self.io).toSeconds();
@@ -877,14 +877,14 @@ pub const BrewApi = struct {
     /// missing cache dir never breaks an install.
     pub fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        const dir_path = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return;
+        const cache_path = std.mem.print(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return;
 
         const file = std.Io.Dir.cwd().createFile(self.io, cache_path, .{}) catch return;
         file.close(self.io);
@@ -897,7 +897,7 @@ pub const BrewApi = struct {
     /// Called by `malt cleanup` and `malt doctor`.
     pub fn evictCache(self: *BrewApi) u32 {
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
+        const api_path = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, api_path, .{ .iterate = true }) catch return 0;
         defer dir.close(self.io);
@@ -942,7 +942,7 @@ pub const BrewApi = struct {
     /// Return total cache size in bytes. Used by `malt doctor` for warnings.
     pub fn cacheSize(self: *BrewApi) u64 {
         var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
+        const api_path = std.mem.print(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, api_path, .{ .iterate = true }) catch return 0;
         defer dir.close(self.io);
@@ -997,7 +997,7 @@ test "buildFormulaUrl returns OutOfMemory when the buffer can't hold the URL" {
 // ── extractBottles: the doctor digest side-car ────────────────────────
 
 test "extractBottles keeps each formula's placeable tags with their digests" {
-    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "";
     const other = if (arch.len == 0) "arm64_" else "";
     const a = &@as([64]u8, @splat('a'));
     const b = &@as([64]u8, @splat('b'));
@@ -1021,7 +1021,7 @@ test "extractBottles keeps each formula's placeable tags with their digests" {
 
 test "extractBottles drops entries the install path would refuse to pour" {
     // Doctor would otherwise promise `mt reinstall` for a bottle install rejects.
-    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "";
     const body = "[{\"name\":\"jq\",\"bottle\":{\"stable\":{\"files\":{" ++
         "\"" ++ arch ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat('A')) ++ "\"}," ++
         "\"" ++ arch ++ "sonoma\":{\"sha256\":\"" ++ &@as([64]u8, @splat('a')) ++ "\"}}}}}]";
@@ -1032,7 +1032,7 @@ test "extractBottles drops entries the install path would refuse to pour" {
 
 test "extractBottles drops what could break the line format or a cache path" {
     // Third-party JSON: a malformed digest or name must not reach the file.
-    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "";
     const body = "[{\"name\":\"jq\",\"bottle\":{\"stable\":{\"files\":{" ++
         "\"" ++ arch ++ "tahoe\":{\"sha256\":\"," ++ &@as([63]u8, @splat('a')) ++ "\"}," ++
         "\"" ++ arch ++ "sonoma\":{}}}}}," ++
@@ -1057,7 +1057,7 @@ test "extractVersions emits name<TAB>stable<TAB>revision per formula entry" {
 
 test "extractVersions omits a formula whose bottles all need a newer macOS" {
     // Listing it would offer an upgrade the host refuses on every run.
-    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "";
     const body = "[{\"name\":\"wget\",\"versions\":{\"stable\":\"1.25\"},\"bottle\":{\"stable\":{\"files\":{\"" ++ arch ++ "tahoe\":{}}}}}," ++
         "{\"name\":\"tree\",\"versions\":{\"stable\":\"2.2\"},\"bottle\":{\"stable\":{\"files\":{\"" ++ arch ++ "sonoma\":{}}}}}," ++
         "{\"name\":\"unbottled\",\"versions\":{\"stable\":\"1.0\"}}]";

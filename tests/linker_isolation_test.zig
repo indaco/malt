@@ -24,19 +24,18 @@ fn makeKegWithFiles(
     subdirs: []const []const u8,
     file_name: []const u8,
 ) ![]u8 {
-    const keg = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg = try testing.allocator.print(
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },
     );
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
     for (subdirs) |subdir| {
-        const sub = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, subdir });
+        const sub = try testing.allocator.print("{s}/{s}", .{ keg, subdir });
         defer testing.allocator.free(sub);
         try test_io.makeDirAbsolute(std.Options.debug_io, sub);
 
-        const file = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ sub, file_name });
+        const file = try testing.allocator.print("{s}/{s}", .{ sub, file_name });
         defer testing.allocator.free(file);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, file, .{});
         try f.writeStreamingAll(std.Options.debug_io, "x\n");
@@ -91,15 +90,15 @@ test "link with bin_isolated=true skips bin and sbin but links lib" {
     try linker.link(keg, "depkeg", keg_id, true);
 
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/tool", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/tool", .{prefix});
     try testing.expect(!pathExists(bin_link));
 
     var sbin_buf: [512]u8 = undefined;
-    const sbin_link = try std.fmt.bufPrint(&sbin_buf, "{s}/sbin/tool", .{prefix});
+    const sbin_link = try std.mem.print(&sbin_buf, "{s}/sbin/tool", .{prefix});
     try testing.expect(!pathExists(sbin_link));
 
     var lib_buf: [512]u8 = undefined;
-    const lib_link = try std.fmt.bufPrint(&lib_buf, "{s}/lib/tool", .{prefix});
+    const lib_link = try std.mem.print(&lib_buf, "{s}/lib/tool", .{prefix});
     try testing.expect(pathExists(lib_link));
 
     var count = try db.prepare("SELECT COUNT(*) FROM links WHERE keg_id = ?1;");
@@ -130,15 +129,15 @@ test "link with bin_isolated=false links bin and sbin (default behaviour)" {
     try linker.link(keg, "directkeg", keg_id, false);
 
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/tool", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/tool", .{prefix});
     try testing.expect(pathExists(bin_link));
 
     var sbin_buf: [512]u8 = undefined;
-    const sbin_link = try std.fmt.bufPrint(&sbin_buf, "{s}/sbin/tool", .{prefix});
+    const sbin_link = try std.mem.print(&sbin_buf, "{s}/sbin/tool", .{prefix});
     try testing.expect(pathExists(sbin_link));
 
     var lib_buf: [512]u8 = undefined;
-    const lib_link = try std.fmt.bufPrint(&lib_buf, "{s}/lib/tool", .{prefix});
+    const lib_link = try std.mem.print(&lib_buf, "{s}/lib/tool", .{prefix});
     try testing.expect(pathExists(lib_link));
 
     var count = try db.prepare("SELECT COUNT(*) FROM links WHERE keg_id = ?1;");

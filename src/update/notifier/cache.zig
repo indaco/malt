@@ -45,9 +45,9 @@ pub fn cacheDirFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
 }
 
 fn resolveDir(env: EnvOverride, buf: []u8) ?[]const u8 {
-    if (env.malt_cache) |v| if (v.len > 0) return std.fmt.bufPrint(buf, "{s}", .{v}) catch null;
-    if (env.xdg_cache_home) |v| if (v.len > 0) return std.fmt.bufPrint(buf, "{s}/malt", .{v}) catch null;
-    if (env.home) |v| if (v.len > 0) return std.fmt.bufPrint(buf, "{s}/.cache/malt", .{v}) catch null;
+    if (env.malt_cache) |v| if (v.len > 0) return std.mem.print(buf, "{s}", .{v}) catch null;
+    if (env.xdg_cache_home) |v| if (v.len > 0) return std.mem.print(buf, "{s}/malt", .{v}) catch null;
+    if (env.home) |v| if (v.len > 0) return std.mem.print(buf, "{s}/.cache/malt", .{v}) catch null;
     return null;
 }
 
@@ -64,9 +64,9 @@ pub fn cacheDir(environ: std.process.Environ, buf: []u8) ?[]const u8 {
 }
 
 pub fn cachePathFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = cacheDirFrom(env, &dir_buf) orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, cache_filename }) catch null;
+    return std.mem.print(buf, "{s}/{s}", .{ dir, cache_filename }) catch null;
 }
 
 pub fn cachePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
@@ -80,14 +80,14 @@ pub fn encodeState(buf: []u8, state: State) ![]u8 {
     var w = std.Io.Writer.fixed(buf);
     try w.writeAll("{\"checked_at\":");
     var num_buf: [32]u8 = undefined;
-    const num = try std.fmt.bufPrint(&num_buf, "{d}", .{state.checked_at});
+    const num = try std.mem.print(&num_buf, "{d}", .{state.checked_at});
     try w.writeAll(num);
     try w.writeAll(",\"latest_tag\":");
     try json_escape.jsonStr(&w, state.latest_tag);
     try w.writeAll(",\"current_seen\":");
     try json_escape.jsonStr(&w, state.current_seen);
     try w.writeAll(",\"last_attempt\":");
-    const att = try std.fmt.bufPrint(&num_buf, "{d}", .{state.last_attempt});
+    const att = try std.mem.print(&num_buf, "{d}", .{state.last_attempt});
     try w.writeAll(att);
     try w.writeAll("}\n");
     return w.buffered();
@@ -165,7 +165,7 @@ pub fn readCache(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?S
 /// `atomicWriteFile` so a SIGKILL or concurrent writer can never publish
 /// a torn JSON — readers see either the old cache or the new one.
 pub fn writeCache(io: std.Io, path: []const u8, state: State) !void {
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     }
     var buf: [1024]u8 = undefined;
@@ -192,8 +192,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -205,8 +204,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -330,7 +328,7 @@ test "encodeState: escapes JSON special characters in tag/version strings" {
         .latest_tag = "v\"X",
         .current_seen = "ok",
     });
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, encoded, "\\\"") != null);
 }
 
 test "writeCache + readCache round-trip on a real file" {

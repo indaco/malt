@@ -53,7 +53,7 @@ pub const seq = struct {
 /// `progress.zig` no-hidden-writer convention. `error.NoSpaceLeft` only when the
 /// buffer is undersized — a 32-byte buffer always suffices.
 pub fn cursorMove(buf: []u8, row: u16, col: u16) error{NoSpaceLeft}![]const u8 {
-    return std.fmt.bufPrint(buf, "\x1b[{d};{d}H", .{ row, col });
+    return std.mem.print(buf, "\x1b[{d};{d}H", .{ row, col });
 }
 
 pub const TermError = error{ NotATty, WriteFailed, TermiosFailed };

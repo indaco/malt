@@ -17,7 +17,7 @@ const output = malt.output;
 const api = malt.api;
 
 const io = std.Options.debug_io;
-const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+const arch = if (builtin.target.cpu.arch == .aarch64) "arm64_" else "";
 const newer_tag = arch ++ "golden_gate";
 const host_tag = arch ++ "tahoe";
 const host_major: u32 = 26;
@@ -34,15 +34,15 @@ const Scratch = struct {
         const path = try test_io.uniqueTempPath(allocator, "doctor_bottle_host", tag);
         errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(io, path) catch {};
-        const cache = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        const cache = try allocator.print("{s}/cache", .{path});
         errdefer allocator.free(cache);
         for ([_][]const u8{ "db", "cache/api" }) |sd| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, sd });
+            const dir = try allocator.print("{s}/{s}", .{ path, sd });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(io, dir);
         }
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -60,23 +60,22 @@ const Scratch = struct {
     /// formula document carrying `files` as the bottle map.
     fn seed(self: *Scratch, name: []const u8, tap: ?[]const u8, sha: []const u8, files: ?[]const u8) !void {
         var sql_buf: [1024]u8 = undefined;
-        const tap_sql = if (tap) |t| try std.fmt.allocPrint(testing.allocator, "'{s}'", .{t}) else try testing.allocator.dupe(u8, "NULL");
+        const tap_sql = if (tap) |t| try testing.allocator.print("'{s}'", .{t}) else try testing.allocator.dupe(u8, "NULL");
         defer testing.allocator.free(tap_sql);
-        const sql = try std.fmt.bufPrintSentinel(&sql_buf,
+        const sql = try std.mem.printSentinel(&sql_buf,
             \\INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path)
             \\VALUES ('{s}', '{s}', '1.0', 0, {s}, '{s}', '{s}/Cellar/{s}/1.0');
         , .{ name, name, tap_sql, sha, self.path, name }, 0);
         try self.db.exec(sql);
 
         const body = files orelse return;
-        const doc = try std.fmt.allocPrint(
-            testing.allocator,
+        const doc = try testing.allocator.print(
             "{{\"name\":\"{s}\",\"full_name\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}},\"revision\":0,\"bottle\":{{\"stable\":{{\"root_url\":\"https://x\",\"files\":{{{s}}}}}}}}}",
             .{ name, name, body },
         );
         defer testing.allocator.free(doc);
         var path_buf: [512]u8 = undefined;
-        const doc_path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.cache, name });
+        const doc_path = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ self.cache, name });
         try test_io.cwd().writeFile(io, .{ .sub_path = doc_path, .data = doc });
     }
 };
@@ -84,7 +83,7 @@ const Scratch = struct {
 /// The bulk-dump side-car `mt outdated` leaves behind.
 fn writeBottlesIndex(s: *const Scratch, body: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "{s}/api/bottles_" ++ api.bottles_key ++ ".txt", .{s.cache});
+    const path = try std.mem.print(&buf, "{s}/api/bottles_" ++ api.bottles_key ++ ".txt", .{s.cache});
     try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = body });
 }
 
@@ -100,7 +99,7 @@ fn writeKegBinary(s: *const Scratch, name: []const u8, rel: []const u8, minos_ma
 
     var buf: [64 + thin.len]u8 = @splat(0);
     const bytes: []const u8 = if (fat) blk: {
-        const cpu: macho.cpu_type_t = if (builtin.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+        const cpu: macho.cpu_type_t = if (builtin.target.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
         std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
         std.mem.writeInt(u32, buf[4..8], 1, .big);
         std.mem.writeInt(i32, buf[8..12], cpu, .big);
@@ -111,8 +110,8 @@ fn writeKegBinary(s: *const Scratch, name: []const u8, rel: []const u8, minos_ma
     } else &thin;
 
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/1.0/{s}", .{ s.path, name, rel });
-    try test_io.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+    const path = try std.mem.print(&path_buf, "{s}/Cellar/{s}/1.0/{s}", .{ s.path, name, rel });
+    try test_io.cwd().createDirPath(io, std.Io.Dir.path.dirname(path).?);
     try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
@@ -220,7 +219,7 @@ test "a formula document with no bottle at all still lets the binaries decide" {
     try s.seed("unbottled", null, sha_a, null);
     var buf: [512]u8 = undefined;
     try test_io.cwd().writeFile(io, .{
-        .sub_path = try std.fmt.bufPrint(&buf, "{s}/api/formula_unbottled.json", .{s.cache}),
+        .sub_path = try std.mem.print(&buf, "{s}/api/formula_unbottled.json", .{s.cache}),
         .data = "{\"name\":\"unbottled\",\"full_name\":\"unbottled\",\"versions\":{\"stable\":\"1.0\"},\"revision\":0}",
     });
     try writeKegBinary(&s, "unbottled", "bin/tool", 27, false);
@@ -239,17 +238,17 @@ test "collect keeps cache reads inside the API cache and survives a corrupt docu
     // `x/../../escaped` would resolve to `<cache>/escaped.json`; plant a damning
     // document there so only the name check keeps it unread.
     var buf: [512]u8 = undefined;
-    try test_io.cwd().createDirPath(io, try std.fmt.bufPrint(&buf, "{s}/api/formula_x", .{s.cache}));
+    try test_io.cwd().createDirPath(io, try std.mem.print(&buf, "{s}/api/formula_x", .{s.cache}));
     try s.seed("x/../../escaped", null, sha_a, null);
     try test_io.cwd().writeFile(io, .{
-        .sub_path = try std.fmt.bufPrint(&buf, "{s}/escaped.json", .{s.cache}),
+        .sub_path = try std.mem.print(&buf, "{s}/escaped.json", .{s.cache}),
         .data = "{\"name\":\"escaped\",\"full_name\":\"escaped\",\"versions\":{\"stable\":\"1.0\"},\"revision\":0," ++
             "\"bottle\":{\"stable\":{\"root_url\":\"https://x\",\"files\":{" ++ comptime bottle(newer_tag, sha_a) ++ "}}}}",
     });
 
     try s.seed("corrupt", null, sha_a, null);
     try test_io.cwd().writeFile(io, .{
-        .sub_path = try std.fmt.bufPrint(&buf, "{s}/api/formula_corrupt.json", .{s.cache}),
+        .sub_path = try std.mem.print(&buf, "{s}/api/formula_corrupt.json", .{s.cache}),
         .data = "{not json",
     });
 
@@ -275,7 +274,7 @@ test "a keg whose digest no bottle carries any more is judged by its binaries" {
     try writeKegBinary(&s, "rebuilt_ok", "bin/tool", host_major, false);
     try s.seed("scripts_only", null, sha_a, rebuilt);
     var dir_buf: [512]u8 = undefined;
-    try test_io.cwd().createDirPath(io, try std.fmt.bufPrint(&dir_buf, "{s}/Cellar/scripts_only/1.0/bin", .{s.path}));
+    try test_io.cwd().createDirPath(io, try std.mem.print(&dir_buf, "{s}/Cellar/scripts_only/1.0/bin", .{s.path}));
     // A conclusive digest is never second-guessed by a header read.
     try s.seed("digest_ok", null, sha_c, rebuilt);
     try writeKegBinary(&s, "digest_ok", "bin/tool", 27, false);
@@ -293,7 +292,7 @@ test "a fat64 binary pointing its slice past the file is skipped, not a crash" {
     var s = try Scratch.init(allocator, "fat64");
     defer s.deinit(allocator);
     const rebuilt = comptime bottle(host_tag, sha_c);
-    const cpu: std.macho.cpu_type_t = if (builtin.cpu.arch == .aarch64) std.macho.CPU_TYPE_ARM64 else std.macho.CPU_TYPE_X86_64;
+    const cpu: std.macho.cpu_type_t = if (builtin.target.cpu.arch == .aarch64) std.macho.CPU_TYPE_ARM64 else std.macho.CPU_TYPE_X86_64;
     for ([_]struct { name: []const u8, offset: u64 }{
         .{ .name = "past_eof", .offset = 0x10_0000 },
         // Reached pread as a negative offset and aborted Debug builds.
@@ -306,8 +305,8 @@ test "a fat64 binary pointing its slice past the file is skipped, not a crash" {
         std.mem.writeInt(u64, fat[16..24], c.offset, .big);
         try s.seed(c.name, null, sha_a, rebuilt);
         var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/1.0/bin/tool", .{ s.path, c.name });
-        try test_io.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+        const path = try std.mem.print(&path_buf, "{s}/Cellar/{s}/1.0/bin/tool", .{ s.path, c.name });
+        try test_io.cwd().createDirPath(io, std.Io.Dir.path.dirname(path).?);
         try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = &fat });
     }
 

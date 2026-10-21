@@ -55,10 +55,10 @@ pub fn matchesAssetName(name: []const u8, arch_str: []const u8) bool {
     if (name.len > lower_buf.len) return false;
     const lower = std.ascii.lowerString(lower_buf[0..name.len], name);
 
-    if (std.mem.indexOf(u8, lower, "darwin") == null) return false;
-    if (std.mem.indexOf(u8, lower, arch_str) != null) return true;
-    if (std.mem.indexOf(u8, lower, "_all") != null) return true;
-    if (std.mem.indexOf(u8, lower, "universal") != null) return true;
+    if (std.mem.find(u8, lower, "darwin") == null) return false;
+    if (std.mem.find(u8, lower, arch_str) != null) return true;
+    if (std.mem.find(u8, lower, "_all") != null) return true;
+    if (std.mem.find(u8, lower, "universal") != null) return true;
     return false;
 }
 
@@ -83,9 +83,9 @@ pub fn findReleaseBinary(
 
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        const base = std.fs.path.basename(entry.path);
+        const base = std.Io.Dir.path.basename(entry.path);
         if (!std.mem.eql(u8, base, "malt") and !std.mem.eql(u8, base, "mt")) continue;
-        const full = std.fmt.bufPrint(out_buf, "{s}/{s}", .{ tmp_dir, entry.path }) catch return null;
+        const full = std.mem.print(out_buf, "{s}/{s}", .{ tmp_dir, entry.path }) catch return null;
         return full;
     }
     return null;
@@ -124,7 +124,7 @@ pub fn order(a: []const u8, b: []const u8) std.math.Order {
 }
 
 fn coreTriple(tag: []const u8) ?[3]u64 {
-    const core = if (std.mem.indexOfScalar(u8, tag, '-')) |i| tag[0..i] else tag;
+    const core = if (std.mem.findScalar(u8, tag, '-')) |i| tag[0..i] else tag;
     var it = std.mem.splitScalar(u8, core, '.');
     var out: [3]u64 = undefined;
     inline for (0..3) |i| {

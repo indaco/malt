@@ -28,7 +28,7 @@ pub fn checkPrefixSane(prefix: []const u8) PrefixError!void {
 /// path segment (with optional `.rb` stripped) is matched against the
 /// binary names. `mt update` is the supported upgrade channel.
 pub fn isSelfInstall(arg: []const u8) bool {
-    const tail = if (std.mem.lastIndexOfScalar(u8, arg, '/')) |i| arg[i + 1 ..] else arg;
+    const tail = if (std.mem.findScalarLast(u8, arg, '/')) |i| arg[i + 1 ..] else arg;
     const stem = if (std.mem.endsWith(u8, tail, ".rb")) tail[0 .. tail.len - 3] else tail;
     return std.mem.eql(u8, stem, "malt") or std.mem.eql(u8, stem, "mt");
 }
@@ -64,7 +64,7 @@ pub fn tapSiblingSlug(buf: []u8, tap_label: []const u8, dep: []const u8) ?[]cons
     // path and a URL, so it has to clear both bars before we act on it.
     if (!path_component.isPathComponent(dep)) return null;
     if (!isFormulaNameCharset(dep)) return null;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ tap_label, dep }) catch null;
+    return std.mem.print(buf, "{s}/{s}", .{ tap_label, dep }) catch null;
 }
 
 /// Label a `--local` install records; not a tap.
@@ -176,10 +176,10 @@ pub fn isAllowedArchiveUrl(url: []const u8) bool {
 /// will then fail fast if the server serves a different asset.
 pub fn interpolateVersion(buf: []u8, url: []const u8, version: []const u8) []const u8 {
     const version_needle = "#" ++ "{version}";
-    if (std.mem.indexOf(u8, url, version_needle)) |pos| {
+    if (std.mem.find(u8, url, version_needle)) |pos| {
         const before = url[0..pos];
         const after = url[pos + version_needle.len ..];
-        return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ before, version, after }) catch url;
+        return std.mem.print(buf, "{s}{s}{s}", .{ before, version, after }) catch url;
     }
     return url;
 }
@@ -199,8 +199,8 @@ pub fn interpolateUrl(
 ) []const u8 {
     const version_needle = "#" ++ "{version}";
     const arch_needle = "#" ++ "{arch}";
-    const has_version = std.mem.indexOf(u8, url, version_needle) != null;
-    const has_arch = std.mem.indexOf(u8, url, arch_needle) != null;
+    const has_version = std.mem.find(u8, url, version_needle) != null;
+    const has_arch = std.mem.find(u8, url, arch_needle) != null;
     if (!has_version and !has_arch) return url;
 
     // Walk the URL once and copy verbatim, expanding either needle at
@@ -238,7 +238,7 @@ pub fn interpolateUrl(
 pub fn expandTildePath(ctx: *const AppCtx, buf: []u8, arg: []const u8) ?[]const u8 {
     if (arg.len < 2 or arg[0] != '~' or arg[1] != '/') return arg;
     const home = std.process.Environ.getPosix(ctx.environ, "HOME") orelse return null;
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ home, arg[1..] }) catch null;
+    return std.mem.print(buf, "{s}{s}", .{ home, arg[1..] }) catch null;
 }
 
 /// The eleven install modes as one typed value object. Populated from

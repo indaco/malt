@@ -28,7 +28,7 @@ const Scratch = struct {
         errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -60,7 +60,7 @@ fn ctxWithSink() malt.app_ctx.AppCtx {
 
 fn seedTap(prefix: []const u8, name: []const u8, sha: ?[]const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -134,7 +134,7 @@ test "execute on an empty taps table prints \"No taps registered\"" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -161,7 +161,7 @@ test "execute on an invalid tap name returns Aborted" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -182,7 +182,7 @@ test "executeUntap with no args returns Aborted with a usage hint" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -226,8 +226,8 @@ test "executeUntap on a typo'd slug fails and leaves the real tap registered" {
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/rpeo"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Untapped") == null);
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
@@ -245,7 +245,7 @@ test "executeUntap matches the homebrew- spelling and names the canonical slug w
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-nope"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/nope") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap user/nope") != null);
 
     try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-repo"});
     try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
@@ -256,7 +256,7 @@ test "executeUntap --refresh is rejected (refresh is tap-only)" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -273,7 +273,7 @@ test "executeUntap --refresh is rejected (refresh is tap-only)" {
 
 fn tapRowCount(prefix: []const u8, name: []const u8) !i64 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("SELECT COUNT(*) FROM taps WHERE name = ?1;");
@@ -297,7 +297,7 @@ test "execute refuses an unknown flag instead of listing taps and exiting clean"
         error.Aborted,
         tap.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--nope"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--nope") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--nope") != null);
 }
 
 test "executeUntap refuses an unknown flag and leaves the tap registered" {
@@ -349,7 +349,7 @@ test "--dry-run untap previews the removal and keeps the tap registered" {
         defer endDryRun();
         try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap user/repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would untap user/repo") != null);
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 
     // Control: the same argv without the preview does remove it.
@@ -374,8 +374,8 @@ test "--dry-run untap refuses an unregistered slug instead of previewing a remov
             tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"nosuch/tap"}),
         );
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap nosuch/tap") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap nosuch/tap") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would untap") == null);
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
@@ -383,7 +383,7 @@ test "--dry-run untap refuses an unregistered slug instead of previewing a remov
 
 fn seedInstalled(prefix: []const u8, sql: [:0]const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try db.exec(sql);
@@ -412,9 +412,9 @@ test "executeUntap refuses a tap that installed packages still come from, and na
             tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-repo"}),
         );
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 2 installed packages come from it (uninstall them first, or pass --force to keep them)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "  foo\n") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "  bar\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Refusing to untap user/repo: 2 installed packages come from it (uninstall them first, or pass --force to keep them)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "  foo\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "  bar\n") != null);
     // Dropping the row would lose the host and pin those packages upgrade from.
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 
@@ -446,13 +446,13 @@ test "executeUntap --quiet still says how many packages block the untap" {
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 1 installed package comes from it (uninstall it first, or pass --force to keep it)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "  foo\n") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Refusing to untap user/repo: 1 installed package comes from it (uninstall it first, or pass --force to keep it)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "  foo\n") == null);
 }
 
 fn installedRowCount(prefix: []const u8) !i64 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("SELECT (SELECT COUNT(*) FROM kegs) + (SELECT COUNT(*) FROM casks);");
@@ -478,9 +478,9 @@ test "executeUntap --force drops the tap but keeps its packages, and says so" {
     }
     try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
     try testing.expectEqual(@as(i64, 2), try installedRowCount(s.path));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "2 installed packages from it stay installed") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "    foo\n") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped user/repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "2 installed packages from it stay installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "    foo\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Untapped user/repo") != null);
 }
 
 test "executeUntap --force still refuses a tap that was never registered" {
@@ -496,7 +496,7 @@ test "executeUntap --force still refuses a tap that was never registered" {
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "user/rpeo", "--force" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap user/rpeo") != null);
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
@@ -516,8 +516,8 @@ test "--dry-run untap refuses a tap that installed packages still come from" {
             tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
         );
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Refusing to untap user/repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would untap") == null);
 }
 
 test "executeUntap of a registered core tap ignores the packages installed from the API" {
@@ -550,7 +550,7 @@ test "executeUntap waits on the install lock instead of racing a running install
     defer s.deinit(testing.allocator);
     try seedTap(s.path, "user/repo", null);
 
-    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{s.path});
+    const lock_path = try testing.allocator.print("{s}/db/malt.lock", .{s.path});
     defer testing.allocator.free(lock_path);
     var held = try malt.lock.LockFile.acquire(std.Options.debug_io, lock_path, 1000);
     defer held.release(std.Options.debug_io);
@@ -583,8 +583,8 @@ test "executeUntap scrubs control bytes from the package names it lists" {
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
     );
-    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
-    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x07) == null);
+    try testing.expect(std.mem.findScalar(u8, captured.items, 0x1b) == null);
+    try testing.expect(std.mem.findScalar(u8, captured.items, 0x07) == null);
 }
 
 test "executeUntap on an unregistered tap with leftover installs says it is unknown" {
@@ -602,8 +602,8 @@ test "executeUntap on an unregistered tap with leftover installs says it is unkn
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/repo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap user/repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Refusing") == null);
 }
 
 // --- pin -------------------------------------------------------------
@@ -624,7 +624,7 @@ test "pin under a homebrew- spelling targets the registered tap, not a second ro
             "--pin", "User/homebrew-repo", "0123456789abcdef0123456789abcdef01234567",
         }));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not verify user/repo @ 0123456") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not verify user/repo @ 0123456") != null);
 }
 
 // --- refresh ---------------------------------------------------------
@@ -646,8 +646,8 @@ test "refresh of an unregistered tap fails before any HEAD lookup" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try refreshOffline(&captured, "user/rpeo");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve") == null);
 }
 
 test "refresh finds a registered tap under its homebrew- spelling" {
@@ -659,8 +659,8 @@ test "refresh finds a registered tap under its homebrew- spelling" {
     defer captured.deinit(testing.allocator);
     try refreshOffline(&captured, "user/homebrew-repo");
     // Past the registration check: only the offline HEAD lookup stops it.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve user/repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve user/repo") != null);
 }
 
 test "refresh and pin prefer an exact stored name over its folded spelling" {
@@ -674,7 +674,7 @@ test "refresh and pin prefer an exact stored name over its folded spelling" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try refreshOffline(&captured, "u/homebrew-x");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve u/homebrew-x") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve u/homebrew-x") != null);
 
     captured.clearRetainingCapacity();
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
@@ -685,7 +685,7 @@ test "refresh and pin prefer an exact stored name over its folded spelling" {
             "--pin", "u/homebrew-x", "0123456789abcdef0123456789abcdef01234567",
         }));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not verify u/homebrew-x @ 0123456") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not verify u/homebrew-x @ 0123456") != null);
 }
 
 test "--dry-run tap reports the pin it would keep without claiming it tapped" {
@@ -701,14 +701,14 @@ test "--dry-run tap reports the pin it would keep without claiming it tapped" {
         defer endDryRun();
         try tap.execute(&ctx, testing.allocator, &.{"user/repo"});
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would tap user/repo @ 0123456") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Tapped") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would tap user/repo @ 0123456") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Tapped") == null);
 }
 
 test "--dry-run tap on a prefix without db/ creates nothing" {
     var s = try Scratch.init(testing.allocator, "tap_dry_run_fresh");
     defer s.deinit(testing.allocator);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{s.path});
+    const db_dir = try testing.allocator.print("{s}/db", .{s.path});
     defer testing.allocator.free(db_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
 
@@ -721,7 +721,7 @@ test "--dry-run tap on a prefix without db/ creates nothing" {
         // Offline, the HEAD lookup fails exactly as the real run's would.
         try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{"user/repo"}));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve") != null);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, db_dir, .{}));
 }
 
@@ -738,8 +738,8 @@ test "--dry-run register previews a non-GitHub tap without the refresh hint" {
         defer endDryRun();
         try tap.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "acme/tools", "--host", "gitlab.com", "--repo", "acme/tools" });
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would register acme/tools") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--refresh") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would register acme/tools") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--refresh") == null);
     try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "acme/tools"));
 }
 
@@ -749,7 +749,7 @@ test "--dry-run refresh --all ends in a preview summary" {
     try seedTap(s.path, "seed/only", null);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("DELETE FROM taps;");
@@ -763,7 +763,7 @@ test "--dry-run refresh --all ends in a preview summary" {
         defer endDryRun();
         try tap.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" });
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would refresh 0 taps") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would refresh 0 taps") != null);
 }
 
 // --- unusable database ------------------------------------------------
@@ -789,7 +789,7 @@ const unusable_db_intents = [_][]const []const u8{
 
 fn seedRaw(prefix: []const u8, sql: [:0]const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     test_io.deleteFileAbsolute(std.Options.debug_io, db_path) catch {};
     var db = try sqlite.Database.open(db_path);
     defer db.close();
@@ -798,7 +798,7 @@ fn seedRaw(prefix: []const u8, sql: [:0]const u8) !void {
 
 fn queryInt(prefix: []const u8, sql: [:0]const u8) !i64 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare(sql);
@@ -829,26 +829,26 @@ fn expectRefusalOn(want: anyerror, needle: []const u8, argv: []const []const u8)
         std.debug.print("argv={any} stderr={s}\n", .{ argv, captured.items });
         return e;
     };
-    try testing.expect(std.mem.indexOf(u8, captured.items, needle) != null);
+    try testing.expect(std.mem.find(u8, captured.items, needle) != null);
     // `output.info` writes to stderr, so only this capture can catch a regression.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No taps registered") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No taps registered") == null);
 }
 
 // The caller restores 0o600 so Scratch.deinit can delete the file.
 fn seedUnreadable(prefix: []const u8) !void {
     try seedRaw(prefix, "CREATE TABLE t(x);");
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(db_path, 0o000));
 }
 
 fn seedNotADatabase(prefix: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrint(&buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.mem.print(&buf, "{s}/db/malt.db", .{prefix});
     // Sidecars from a healthy open would change how SQLite reads the file.
     for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
         var p_buf: [520]u8 = undefined;
-        const p = try std.fmt.bufPrint(&p_buf, "{s}{s}", .{ db_path, suffix });
+        const p = try std.mem.print(&p_buf, "{s}{s}", .{ db_path, suffix });
         test_io.deleteFileAbsolute(std.Options.debug_io, p) catch {};
     }
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{});
@@ -858,7 +858,7 @@ fn seedNotADatabase(prefix: []const u8) !void {
 
 fn restoreDbMode(prefix: []const u8) void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
     _ = std.c.chmod(db_path, 0o600);
 }
 
@@ -942,7 +942,7 @@ test "tap intents on an unreadable db directory abort instead of listing no taps
     var s = try Scratch.init(testing.allocator, "open_unreadable_dir");
     defer s.deinit(testing.allocator);
     var dir_buf: [512]u8 = undefined;
-    const db_dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/db", .{s.path}, 0);
+    const db_dir = try std.mem.printSentinel(&dir_buf, "{s}/db", .{s.path}, 0);
     defer _ = std.c.chmod(db_dir, 0o755);
     for (unusable_db_intents) |argv| {
         _ = std.c.chmod(db_dir, 0o755);

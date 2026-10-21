@@ -21,9 +21,9 @@ pub fn isAllowedNameByte(b: u8) bool {
 pub fn isPathComponent(s: []const u8) bool {
     if (s.len == 0) return false;
     if (std.mem.eql(u8, s, ".")) return false;
-    if (std.mem.indexOf(u8, s, "..") != null) return false; // also rejects ".."
-    if (std.mem.indexOfScalar(u8, s, '/') != null) return false;
-    if (std.mem.indexOfScalar(u8, s, 0) != null) return false;
+    if (std.mem.find(u8, s, "..") != null) return false; // also rejects ".."
+    if (std.mem.findScalar(u8, s, '/') != null) return false;
+    if (std.mem.findScalar(u8, s, 0) != null) return false;
     return true;
 }
 
@@ -52,7 +52,7 @@ pub fn hasControlByte(s: []const u8) bool {
 pub fn isRelativeSubpath(s: []const u8) bool {
     if (s.len == 0) return false;
     if (s[0] == '/') return false;
-    if (std.mem.indexOfScalar(u8, s, 0) != null) return false;
+    if (std.mem.findScalar(u8, s, 0) != null) return false;
     var it = std.mem.splitScalar(u8, s, '/');
     while (it.next()) |comp| {
         if (comp.len == 0) return false; // leading, trailing, or doubled '/'

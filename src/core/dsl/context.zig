@@ -141,7 +141,7 @@ pub const ExecContext = struct {
     ) DslError!ExecContext {
         // pkg_version, not version: the keg dir carries the `_<revision>`
         // suffix, so raw-version bindings point beside the real keg.
-        const cellar_path = std.fmt.allocPrint(arena, "{s}/Cellar/{s}/{s}", .{
+        const cellar_path = arena.print("{s}/Cellar/{s}/{s}", .{
             malt_prefix, ref.name, ref.pkg_version,
         }) catch malt_prefix;
 
@@ -153,12 +153,12 @@ pub const ExecContext = struct {
         paths.set(.libexec, joinPath(arena, cellar_path, "libexec"));
         paths.set(.include, joinPath(arena, cellar_path, "include"));
         paths.set(.share, joinPath(arena, cellar_path, "share"));
-        paths.set(.pkgshare, std.fmt.allocPrint(arena, "{s}/share/{s}", .{ cellar_path, ref.name }) catch cellar_path);
+        paths.set(.pkgshare, arena.print("{s}/share/{s}", .{ cellar_path, ref.name }) catch cellar_path);
         paths.set(.etc, joinPath(arena, malt_prefix, "etc"));
         // pkgetc: bare identifier in homebrew core (gnutls, openssl@3 …).
-        paths.set(.pkgetc, std.fmt.allocPrint(arena, "{s}/etc/{s}", .{ malt_prefix, ref.name }) catch malt_prefix);
+        paths.set(.pkgetc, arena.print("{s}/etc/{s}", .{ malt_prefix, ref.name }) catch malt_prefix);
         paths.set(.var_dir, joinPath(arena, malt_prefix, "var"));
-        paths.set(.opt_prefix, std.fmt.allocPrint(arena, "{s}/opt/{s}", .{ malt_prefix, ref.name }) catch malt_prefix);
+        paths.set(.opt_prefix, arena.print("{s}/opt/{s}", .{ malt_prefix, ref.name }) catch malt_prefix);
         paths.set(.homebrew_prefix, malt_prefix);
         paths.set(.homebrew_cellar, joinPath(arena, malt_prefix, "Cellar"));
 
@@ -236,7 +236,7 @@ pub const ExecContext = struct {
 };
 
 pub fn joinPath(allocator: std.mem.Allocator, base: []const u8, sub: []const u8) []const u8 {
-    return std.fs.path.join(allocator, &.{ base, sub }) catch base;
+    return std.Io.Dir.path.join(allocator, &.{ base, sub }) catch base;
 }
 
 // The on-disk keg dir is named by pkg_version (`<version>_<revision>`

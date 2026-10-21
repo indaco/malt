@@ -47,17 +47,17 @@ test "a failed copy leaves the previous destination intact" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prefix = path_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &path_buf)];
 
     // node's shape: the new npm in the keg, the installed one in the prefix.
-    const keg = try std.fmt.allocPrint(a, "{s}/Cellar/node/1.0", .{prefix});
-    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm", .{keg});
+    const keg = try a.print("{s}/Cellar/node/1.0", .{prefix});
+    const src = try a.print("{s}/libexec/lib/node_modules/npm", .{keg});
     try std.Io.Dir.cwd().createDirPath(io, src);
-    try writeFile(io, try std.fmt.allocPrint(a, "{s}/version.txt", .{src}), "new\n");
+    try writeFile(io, try a.print("{s}/version.txt", .{src}), "new\n");
 
     // A mode-000 child makes clonefile(2) fail with EACCES and write nothing.
-    const blocked = try std.fmt.allocPrint(a, "{s}/blocked", .{src});
+    const blocked = try a.print("{s}/blocked", .{src});
     try std.Io.Dir.cwd().createDirPath(io, blocked);
     var bd = try std.Io.Dir.openDirAbsolute(io, blocked, .{});
     defer bd.close(io);
@@ -67,10 +67,10 @@ test "a failed copy leaves the previous destination intact" {
     defer bf.setPermissions(io, .fromMode(0o755)) catch {};
     try bf.setPermissions(io, .fromMode(0o000));
 
-    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{prefix});
-    const dest = try std.fmt.allocPrint(a, "{s}/npm", .{dstdir});
+    const dstdir = try a.print("{s}/lib/node_modules", .{prefix});
+    const dest = try a.print("{s}/npm", .{dstdir});
     try std.Io.Dir.cwd().createDirPath(io, dest);
-    const installed = try std.fmt.allocPrint(a, "{s}/version.txt", .{dest});
+    const installed = try a.print("{s}/version.txt", .{dest});
     try writeFile(io, installed, "old\n");
 
     var flog = steps.FallbackLog.init(std.testing.allocator);
@@ -110,7 +110,7 @@ test "a failed copy leaves the previous destination intact" {
 
     // The staging and aside paths are internal; neither may outlive the step.
     for ([_][]const u8{ ".malt-incoming", ".malt-replaced" }) |suffix| {
-        const leftover = try std.fmt.allocPrint(a, "{s}{s}", .{ dest, suffix });
+        const leftover = try a.print("{s}{s}", .{ dest, suffix });
         if (std.Io.Dir.accessAbsolute(io, leftover, .{})) |_| {
             std.debug.print("left {s} behind in the prefix\n", .{leftover});
             return error.ScratchPathLeaked;

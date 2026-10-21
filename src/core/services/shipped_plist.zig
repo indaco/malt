@@ -79,7 +79,7 @@ const Scanner = struct {
         _ = self.eat("\xEF\xBB\xBF");
         self.skipTrivia();
         try self.expect("<plist");
-        self.pos = (std.mem.indexOfScalarPos(u8, self.src, self.pos, '>') orelse return error.Malformed) + 1;
+        self.pos = (std.mem.findScalarPos(u8, self.src, self.pos, '>') orelse return error.Malformed) + 1;
         self.skipTrivia();
         const root: []const Entry = if (self.eat("<dict/>")) &.{} else blk: {
             try self.expect("<dict>");
@@ -95,9 +95,9 @@ const Scanner = struct {
     /// Whitespace, the XML declaration, the DOCTYPE and comments.
     fn skipTrivia(self: *Scanner) void {
         while (true) {
-            self.pos = std.mem.indexOfNonePos(u8, self.src, self.pos, " \t\r\n") orelse self.src.len;
+            self.pos = std.mem.findNonePos(u8, self.src, self.pos, " \t\r\n") orelse self.src.len;
             const close: []const u8 = if (self.startsWith("<?")) "?>" else if (self.startsWith("<!--")) "-->" else if (self.startsWith("<!")) ">" else return;
-            self.pos = (std.mem.indexOfPos(u8, self.src, self.pos, close) orelse self.src.len) + close.len;
+            self.pos = (std.mem.findPos(u8, self.src, self.pos, close) orelse self.src.len) + close.len;
             if (self.pos > self.src.len) self.pos = self.src.len;
         }
     }
@@ -167,11 +167,11 @@ const Scanner = struct {
     /// five entities `plist.render` escapes; a borrowed slice when there
     /// are none.
     fn text(self: *Scanner, close: []const u8) Error![]const u8 {
-        const end = std.mem.indexOfScalarPos(u8, self.src, self.pos, '<') orelse return error.Malformed;
+        const end = std.mem.findScalarPos(u8, self.src, self.pos, '<') orelse return error.Malformed;
         const raw = self.src[self.pos..end];
         self.pos = end;
         try self.expect(close);
-        if (std.mem.indexOfScalar(u8, raw, '&') == null) return raw;
+        if (std.mem.findScalar(u8, raw, '&') == null) return raw;
 
         var out: std.ArrayList(u8) = .empty;
         var i: usize = 0;
@@ -257,12 +257,12 @@ fn toSpec(
     var plist_label: ?[]const u8 = null;
     var program_args: []const []const u8 = &.{};
     var spec: plist.ServiceSpec = .{
-        .label = try std.fmt.allocPrint(aa, "com.malt.{s}", .{name}),
+        .label = try aa.print("com.malt.{s}", .{name}),
         .program_args = &.{},
         // Real shipped plists log under /tmp; malt logs every service it
         // owns under var/log, and `validate` would refuse /tmp anyway.
-        .stdout_path = try std.fmt.allocPrint(aa, "{s}/var/log/{s}.out", .{ prefix, name }),
-        .stderr_path = try std.fmt.allocPrint(aa, "{s}/var/log/{s}.err", .{ prefix, name }),
+        .stdout_path = try aa.print("{s}/var/log/{s}.out", .{ prefix, name }),
+        .stderr_path = try aa.print("{s}/var/log/{s}.err", .{ prefix, name }),
     };
 
     for (root) |e| {
@@ -556,7 +556,7 @@ test "lift refuses every launchd key outside the allowlist and names it" {
     const aa = arena.allocator();
     for ([_][]const u8{ "MachServices", "UserName", "LaunchOnlyOnce", "Program", "ProcessType", "Umask" }) |key| {
         var diag: Diag = .{};
-        const extra = try std.fmt.allocPrint(aa, "  <key>{s}</key>\n  <string>x</string>\n", .{key});
+        const extra = try aa.print("  <key>{s}</key>\n  <string>x</string>\n", .{key});
         try testing.expectError(error.UnknownKey, liftFixture(aa, extra, &diag));
         try testing.expectEqualStrings(key, diag.key);
     }

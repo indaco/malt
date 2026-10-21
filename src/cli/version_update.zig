@@ -196,7 +196,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // --- resolve all three URLs up front so we fail fast if the
     //     release is malformed (missing checksums is a workflow bug,
     //     not a soft condition to route around). ---
-    const arch_str = if (builtin.cpu.arch == .aarch64) "arm64" else "x86_64";
+    const arch_str = if (builtin.target.cpu.arch == .aarch64) "arm64" else "x86_64";
     const tarball_url = release.pickAssetUrl(assets, arch_str) orelse {
         output.err("No matching binary found for darwin {s}", .{arch_str});
         return error.Aborted;
@@ -205,11 +205,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("Release is missing {s}", .{checksums_name});
         return error.Aborted;
     };
-    const archive_name = std.fs.path.basename(tarball_url);
+    const archive_name = std.Io.Dir.path.basename(tarball_url);
 
     // --- scratch dir under $TMPDIR, pid-tagged so concurrent invocations
     //     don't collide and `rm -rf` of a stale dir never hits /tmp root. ---
-    var scratch_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var scratch_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const scratch = try buildScratchDir(ctx.environ, &scratch_buf);
     // Pre-clean any leftover scratch from an aborted prior run; createDirAbsolute below surfaces real errors.
     std.Io.Dir.cwd().deleteTree(ctx.io, scratch) catch {};
@@ -241,7 +241,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     });
 
     // --- extract + find binary ---
-    const extract_dir_buf = try std.fmt.allocPrint(allocator, "{s}/extract", .{scratch});
+    const extract_dir_buf = try allocator.print("{s}/extract", .{scratch});
     defer allocator.free(extract_dir_buf);
     std.Io.Dir.createDirAbsolute(ctx.io, extract_dir_buf, .default_dir) catch {
         output.err("Cannot create extract dir", .{});
@@ -252,21 +252,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
 
-    var new_binary_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var new_binary_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_binary = release.findReleaseBinary(ctx.io, allocator, extract_dir_buf, &new_binary_buf) orelse {
         output.err("Binary 'malt' not found in release archive", .{});
         return error.Aborted;
     };
 
     // Separate stack buffer so `executablePath` doesn't overwrite `new_binary`.
-    var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var self_exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.process.executablePath(ctx.io, &self_exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
         return error.Aborted;
     };
     // `mt` is a symlink to `malt`; resolve through it so atomicReplace
     // rewrites the real binary instead of clobbering the symlink.
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var resolved_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const self_exe = if (std.Io.Dir.cwd().realPathFile(ctx.io, self_exe_buf[0..n], &resolved_buf)) |m|
         resolved_buf[0..m]
     else |_|
@@ -274,7 +274,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Legacy installs shipped both names as regular files; the sibling
     // still needs its own swap. Symlink layouts return null here.
-    var twin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var twin_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const twin_path: ?[]const u8 = resolveTwinRegularFile(ctx.io, self_exe, &twin_buf);
 
     // --- confirm with the user unless --yes. TTY-only by design: CI
@@ -282,9 +282,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (!opts.yes) {
         var prompt_buf: [320]u8 = undefined;
         const prompt = if (twin_path) |tp|
-            std.fmt.bufPrint(&prompt_buf, "Replace {s} and {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, tp, latest }) catch "Type 'yes' to confirm: "
+            std.mem.print(&prompt_buf, "Replace {s} and {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, tp, latest }) catch "Type 'yes' to confirm: "
         else
-            std.fmt.bufPrint(&prompt_buf, "Replace {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, latest }) catch "Type 'yes' to confirm: ";
+            std.mem.print(&prompt_buf, "Replace {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, latest }) catch "Type 'yes' to confirm: ";
         if (!output.confirmTyped("yes", prompt)) {
             output.info("Aborted", .{});
             return;
@@ -314,7 +314,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.err("Failed to replace {s}: {s}", .{ tp, @errorName(e) });
             output.warn("{s} is now {s} but {s} is still the previous version.", .{ self_exe, latest, tp });
             output.info("Finish manually: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, tp });
-            output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.fs.path.basename(self_exe), self_exe });
+            output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.Io.Dir.path.basename(self_exe), self_exe });
             // Self is on the new version even though twin lagged — dismiss the nag.
             notifier.markUpdatedTo(ctx.io, ctx.environ, tag, latest);
             return;
@@ -355,7 +355,7 @@ fn replaceBinary(
     }
     swap.atomicReplace(ctx.io, target, new_binary) catch |e| switch (e) {
         error.PermissionDenied => {
-            output.warn("Cannot write to {s}; escalating with sudo.", .{std.fs.path.dirname(target) orelse target});
+            output.warn("Cannot write to {s}; escalating with sudo.", .{std.Io.Dir.path.dirname(target) orelse target});
             try installBinaryViaSudo(ctx, new_binary, target);
             return .sudo;
         },
@@ -395,9 +395,9 @@ fn migrateTwinToSymlink(
 ) !void {
     // `mt` is always the symlink, `malt` is always the real binary —
     // pick the right path regardless of which name the user invoked.
-    const dir = std.fs.path.dirname(self_exe) orelse return error.NoInstallDir;
-    var mt_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const mt_path = try std.fmt.bufPrint(&mt_buf, "{s}/mt", .{dir});
+    const dir = std.Io.Dir.path.dirname(self_exe) orelse return error.NoInstallDir;
+    var mt_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const mt_path = try std.mem.print(&mt_buf, "{s}/mt", .{dir});
 
     const argv: []const []const u8 = if (mode == .sudo)
         &.{ system_tools.sudo, system_tools.ln, "-sfn", "malt", mt_path }
@@ -417,17 +417,17 @@ fn migrateTwinToSymlink(
 /// track their target automatically after a swap, so we skip those.
 /// Returned slice points into `buf`.
 pub fn resolveTwinRegularFile(io: std.Io, self_exe: []const u8, buf: []u8) ?[]const u8 {
-    const base = std.fs.path.basename(self_exe);
+    const base = std.Io.Dir.path.basename(self_exe);
     const twin_base: []const u8 =
         if (std.mem.eql(u8, base, "malt")) "mt" else if (std.mem.eql(u8, base, "mt")) "malt" else return null;
-    const dir = std.fs.path.dirname(self_exe) orelse return null;
+    const dir = std.Io.Dir.path.dirname(self_exe) orelse return null;
 
-    const twin_path = std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, twin_base }) catch return null;
+    const twin_path = std.mem.print(buf, "{s}/{s}", .{ dir, twin_base }) catch return null;
 
     // `readLinkAbsolute` is the cheapest lstat here: success = symlink
     // (skip), `error.NotLink` = regular file to update, anything else
     // (missing, permission) = nothing we can usefully replace.
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.Io.Dir.readLinkAbsolute(io, twin_path, &link_buf)) |_| {
         return null;
     } else |err| switch (err) {
@@ -442,7 +442,7 @@ fn buildScratchDir(environ: std.process.Environ, buf: []u8) ![]const u8 {
     const base: []const u8 = std.process.Environ.getPosix(environ, "TMPDIR") orelse "/tmp";
     const trimmed = std.mem.trimEnd(u8, base, "/");
     const pid = std.c.getpid();
-    return std.fmt.bufPrint(buf, "{s}/malt-update-{d}", .{ trimmed, pid });
+    return std.mem.print(buf, "{s}/malt-update-{d}", .{ trimmed, pid });
 }
 
 /// Download `url` into `dir/name`, return the absolute path.
@@ -477,7 +477,7 @@ pub fn writeResponseBody(
     name: []const u8,
     body: []const u8,
 ) ![]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+    const path = try allocator.print("{s}/{s}", .{ dir, name });
     errdefer allocator.free(path);
     const f = std.Io.Dir.createFileAbsolute(io, path, .{}) catch {
         output.err("Cannot create {s}", .{path});
@@ -573,7 +573,7 @@ fn runVerification(rv: RunVerification) !void {
 /// Remove `<self_exe>.old` and any orphaned `.malt-update-*` staging
 /// files next to the running binary. Idempotent - a clean tree exits 0.
 fn runCleanup(ctx: *const AppCtx) !void {
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.process.executablePath(ctx.io, &exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
         return error.Aborted;
@@ -593,9 +593,9 @@ fn runCleanup(ctx: *const AppCtx) !void {
 /// classify the install. Failure to resolve degrades to `.direct`, so
 /// a transient FS error never locks the updater out.
 fn detectOrigin(io: std.Io) origin.Origin {
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.process.executablePath(io, &exe_buf) catch return .direct;
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var resolved_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return origin.classifyResolved(io, &resolved_buf, exe_buf[0..n]);
 }
 
@@ -618,8 +618,8 @@ test "reportReplaceFailure emits the loud mv-recovery only for RollbackFailed an
     const swap_res = reportReplaceFailure(error.SwapFailed, "/tmp/malt.new", self_exe);
     output.endStderrCapture();
     try testing.expectError(error.Aborted, swap_res);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "sudo install -m 0755 -b -B .old") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "sudo mv") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "sudo install -m 0755 -b -B .old") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "sudo mv") == null);
 
     // RollbackFailed: previous binary stranded at `.old`, so the loud recovery
     // hint must name the exact `mv` that puts it back.
@@ -628,5 +628,5 @@ test "reportReplaceFailure emits the loud mv-recovery only for RollbackFailed an
     const rollback_res = reportReplaceFailure(error.RollbackFailed, "/tmp/malt.new", self_exe);
     output.endStderrCapture();
     try testing.expectError(error.Aborted, rollback_res);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "sudo mv /opt/malt/bin/malt.old /opt/malt/bin/malt") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "sudo mv /opt/malt/bin/malt.old /opt/malt/bin/malt") != null);
 }

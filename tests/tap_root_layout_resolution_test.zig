@@ -52,8 +52,8 @@ fn serveProbes(fx: *Fixture) void {
         var srv = std.http.Server.init(&reader.interface, &writer.interface);
         var req = srv.receiveHead() catch return;
         const target = req.head.target;
-        const is_subdir = std.mem.indexOf(u8, target, "/Formula/") != null or
-            std.mem.indexOf(u8, target, "/Casks/") != null;
+        const is_subdir = std.mem.find(u8, target, "/Formula/") != null or
+            std.mem.find(u8, target, "/Casks/") != null;
         if (is_subdir) {
             req.respond("not found\n", .{ .status = .not_found, .keep_alive = false }) catch return;
         } else {
@@ -81,7 +81,7 @@ test "tap probe selection: Formula/ + Casks/ double-404 falls back to the root-l
     defer server_thread.join();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, .empty, testing.allocator);
@@ -111,6 +111,6 @@ test "tap probe selection: Formula/ + Casks/ double-404 falls back to the root-l
     // The resolving URL is the no-subdir root tail — the URL the old
     // two-probe chain never built.
     var exp_buf: [256]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&exp_buf, "http://127.0.0.1:{d}/{s}/yabai.rb", .{ port, fixture_sha });
+    const expected = try std.mem.print(&exp_buf, "http://127.0.0.1:{d}/{s}/yabai.rb", .{ port, fixture_sha });
     try testing.expectEqualStrings(expected, root_url);
 }

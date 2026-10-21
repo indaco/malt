@@ -29,7 +29,7 @@ fn makePrefix(prefix_buf: *[128]u8, label: []const u8) ![]const u8 {
     var scratch: [512]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
     const unique = try test_io.uniqueTempPath(fba.allocator(), "doctor_fix", label);
-    const prefix = try std.fmt.bufPrint(prefix_buf, "{s}", .{unique});
+    const prefix = try std.mem.print(prefix_buf, "{s}", .{unique});
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, prefix);
     return prefix;
@@ -66,11 +66,11 @@ test "fixStaleLock: dead PID lock is truncated in place, not unlinked" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -108,11 +108,11 @@ test "fixStaleLock: a holder we cannot signal is left alone" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, "1"); // launchd: live, never signalable by us
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -136,11 +136,11 @@ test "fixStaleLock: a corrupt zero PID is stale, not an endless operation" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, "0");
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -157,14 +157,14 @@ test "fixStaleLock: live PID is left alone" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
 
     var pid_buf: [16]u8 = undefined;
-    const pid_str = try std.fmt.bufPrint(&pid_buf, "{d}", .{std.c.getpid()});
+    const pid_str = try std.mem.print(&pid_buf, "{d}", .{std.c.getpid()});
     try writeFile(lock_path, pid_str);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -197,12 +197,12 @@ test "fixBrokenSymlinks: dangling links are unlinked, valid links survive" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
     // valid target lives next to the link directory
     var anchor_buf: [256]u8 = undefined;
-    const anchor = try std.fmt.bufPrint(&anchor_buf, "{s}/anchor", .{prefix});
+    const anchor = try std.mem.print(&anchor_buf, "{s}/anchor", .{prefix});
     try writeFile(anchor, "x");
 
     var bin = try fs_compat.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
@@ -219,11 +219,11 @@ test "fixBrokenSymlinks: dangling links are unlinked, valid links survive" {
 
     // Re-open to refresh the iterator after the unlink.
     var alive_path_buf: [256]u8 = undefined;
-    const alive_path = try std.fmt.bufPrint(&alive_path_buf, "{s}/bin/alive", .{prefix});
+    const alive_path = try std.mem.print(&alive_path_buf, "{s}/bin/alive", .{prefix});
     try testing.expect(pathExists(alive_path));
 
     var dead_path_buf: [256]u8 = undefined;
-    const dead_path = try std.fmt.bufPrint(&dead_path_buf, "{s}/bin/dead", .{prefix});
+    const dead_path = try std.mem.print(&dead_path_buf, "{s}/bin/dead", .{prefix});
     try testing.expect(!pathExists(dead_path));
 
     // After fixing, the next probe must report zero.
@@ -240,7 +240,7 @@ test "fixBrokenSymlinks: nested dangling links are found, not just top-level one
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var anchor_buf: [256]u8 = undefined;
-    const anchor = try std.fmt.bufPrint(&anchor_buf, "{s}/anchor", .{prefix});
+    const anchor = try std.mem.print(&anchor_buf, "{s}/anchor", .{prefix});
     try writeFile(anchor, "x");
 
     // One dangling link per nesting depth, plus a live nested link that must
@@ -252,7 +252,7 @@ test "fixBrokenSymlinks: nested dangling links are found, not just top-level one
     };
     for (nested_dirs) |sub| {
         var d_buf: [256]u8 = undefined;
-        const d = try std.fmt.bufPrint(&d_buf, "{s}/{s}", .{ prefix, sub });
+        const d = try std.mem.print(&d_buf, "{s}/{s}", .{ prefix, sub });
         try fs_compat.cwd().createDirPath(std.Options.debug_io, d);
 
         var dir = try fs_compat.openDirAbsolute(std.Options.debug_io, d, .{ .iterate = true });
@@ -270,10 +270,10 @@ test "fixBrokenSymlinks: nested dangling links are found, not just top-level one
 
     for (nested_dirs) |sub| {
         var dead_buf: [256]u8 = undefined;
-        const dead = try std.fmt.bufPrint(&dead_buf, "{s}/{s}/dead", .{ prefix, sub });
+        const dead = try std.mem.print(&dead_buf, "{s}/{s}/dead", .{ prefix, sub });
         try testing.expect(!pathExists(dead));
         var alive_buf: [256]u8 = undefined;
-        const alive = try std.fmt.bufPrint(&alive_buf, "{s}/{s}/alive", .{ prefix, sub });
+        const alive = try std.mem.print(&alive_buf, "{s}/{s}/alive", .{ prefix, sub });
         try testing.expect(pathExists(alive));
     }
 
@@ -288,14 +288,14 @@ test "fixBrokenSymlinks: a symlinked directory is not descended into" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var outside_buf: [256]u8 = undefined;
-    const outside = try std.fmt.bufPrint(&outside_buf, "{s}/outside", .{prefix});
+    const outside = try std.mem.print(&outside_buf, "{s}/outside", .{prefix});
     try fs_compat.cwd().createDirPath(std.Options.debug_io, outside);
     var outside_dir = try fs_compat.openDirAbsolute(std.Options.debug_io, outside, .{ .iterate = true });
     defer outside_dir.close(std.Options.debug_io);
     try outside_dir.symLink(std.Options.debug_io, "/tmp/malt-doctor-offlimits", "dead", .{});
 
     var share_buf: [256]u8 = undefined;
-    const share = try std.fmt.bufPrint(&share_buf, "{s}/share", .{prefix});
+    const share = try std.mem.print(&share_buf, "{s}/share", .{prefix});
     try fs_compat.cwd().createDirPath(std.Options.debug_io, share);
     var share_dir = try fs_compat.openDirAbsolute(std.Options.debug_io, share, .{ .iterate = true });
     defer share_dir.close(std.Options.debug_io);
@@ -341,11 +341,11 @@ test "executeFix: dry run leaves filesystem untouched and surfaces the plan" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -371,15 +371,15 @@ test "executeFix: live run sweeps stale lock + broken symlinks together" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, bin_dir);
     var bin = try fs_compat.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
     defer bin.close(std.Options.debug_io);
@@ -405,7 +405,7 @@ test "executeFix: live run sweeps stale lock + broken symlinks together" {
     try testing.expectEqual(@as(u64, 0), (try statAbsolute(io, lock_path)).size);
 
     var ghost_buf: [256]u8 = undefined;
-    const ghost = try std.fmt.bufPrint(&ghost_buf, "{s}/bin/ghost", .{prefix});
+    const ghost = try std.mem.print(&ghost_buf, "{s}/bin/ghost", .{prefix});
     try testing.expect(!pathExists(ghost));
 }
 
@@ -415,15 +415,15 @@ test "fixOrphanedStore: sweeps entries no keg holds against a real DB" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -432,7 +432,7 @@ test "fixOrphanedStore: sweeps entries no keg holds against a real DB" {
     // the fixer must do the same.
     const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     var entry_dir_buf: [320]u8 = undefined;
-    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    const entry_dir = try std.mem.print(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -459,22 +459,22 @@ test "fixOrphanedStore: an undeletable orphan is reported as blocked, not silent
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
     const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     var entry_dir_buf: [320]u8 = undefined;
-    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    const entry_dir = try std.mem.print(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -487,7 +487,7 @@ test "fixOrphanedStore: an undeletable orphan is reported as blocked, not silent
     // Make the entry undeletable; clear the flag before the prefix teardown,
     // or deleteTree of the prefix would itself be blocked.
     var entry_z_buf: [320]u8 = undefined;
-    const entry_z = try std.fmt.bufPrintSentinel(&entry_z_buf, "{s}/store/{s}", .{ prefix, sha }, 0);
+    const entry_z = try std.mem.printSentinel(&entry_z_buf, "{s}/store/{s}", .{ prefix, sha }, 0);
     try testing.expectEqual(@as(c_int, 0), c.chflags(entry_z.ptr, UF_IMMUTABLE));
     defer _ = c.chflags(entry_z.ptr, 0);
 
@@ -507,14 +507,14 @@ test "fixOrphanedStore: a partial sweep removes what it can and reports the rest
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -528,13 +528,13 @@ test "fixOrphanedStore: a partial sweep removes what it can and reports the rest
     const locked = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     inline for (.{ removable, locked }) |sha| {
         var dir_buf: [320]u8 = undefined;
-        const dir = try std.fmt.bufPrint(&dir_buf, "{s}/store/{s}", .{ prefix, sha });
+        const dir = try std.mem.print(&dir_buf, "{s}/store/{s}", .{ prefix, sha });
         try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
         try store.claim(sha);
     }
 
     var locked_z_buf: [320]u8 = undefined;
-    const locked_z = try std.fmt.bufPrintSentinel(&locked_z_buf, "{s}/store/{s}", .{ prefix, locked }, 0);
+    const locked_z = try std.mem.printSentinel(&locked_z_buf, "{s}/store/{s}", .{ prefix, locked }, 0);
     try testing.expectEqual(@as(c_int, 0), c.chflags(locked_z.ptr, UF_IMMUTABLE));
     defer _ = c.chflags(locked_z.ptr, 0);
 
@@ -556,28 +556,28 @@ test "fixOrphanedStore: an immutable child never leaves a partial entry under a 
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
     const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     var entry_dir_buf: [320]u8 = undefined;
-    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    const entry_dir = try std.mem.print(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
 
     // Two children so a failure on one leaves the other behind — the partial state.
     var a_buf: [384]u8 = undefined;
-    try writeFile(try std.fmt.bufPrint(&a_buf, "{s}/a", .{entry_dir}), "x");
+    try writeFile(try std.mem.print(&a_buf, "{s}/a", .{entry_dir}), "x");
     var b_buf: [384]u8 = undefined;
-    try writeFile(try std.fmt.bufPrint(&b_buf, "{s}/b", .{entry_dir}), "x");
+    try writeFile(try std.mem.print(&b_buf, "{s}/b", .{entry_dir}), "x");
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -589,11 +589,11 @@ test "fixOrphanedStore: an immutable child never leaves a partial entry under a 
     // Make one child undeletable; clear the flag wherever it ends up (the sweep
     // renames the entry aside), or the prefix teardown itself would block.
     var child_z_buf: [384]u8 = undefined;
-    const child_z = try std.fmt.bufPrintSentinel(&child_z_buf, "{s}/b", .{entry_dir}, 0);
+    const child_z = try std.mem.printSentinel(&child_z_buf, "{s}/b", .{entry_dir}, 0);
     try testing.expectEqual(@as(c_int, 0), c.chflags(child_z.ptr, UF_IMMUTABLE));
     defer _ = c.chflags(child_z.ptr, 0);
     var reap_child_z_buf: [384]u8 = undefined;
-    const reap_child_z = try std.fmt.bufPrintSentinel(&reap_child_z_buf, "{s}/.malt-reap-{s}/b", .{ prefix, sha }, 0);
+    const reap_child_z = try std.mem.printSentinel(&reap_child_z_buf, "{s}/.malt-reap-{s}/b", .{ prefix, sha }, 0);
     defer _ = c.chflags(reap_child_z.ptr, 0);
 
     const sweep = fix.fixOrphanedStore(io, prefix);
@@ -605,7 +605,7 @@ test "fixOrphanedStore: an immutable child never leaves a partial entry under a 
     try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
     // The un-reapable child survives only as unreferenced junk, not corruption.
     var reap_dir_buf: [320]u8 = undefined;
-    const reap_child = try std.fmt.bufPrint(&reap_dir_buf, "{s}/.malt-reap-{s}/b", .{ prefix, sha });
+    const reap_child = try std.mem.print(&reap_dir_buf, "{s}/.malt-reap-{s}/b", .{ prefix, sha });
     try testing.expect(pathExists(reap_child));
 }
 
@@ -618,14 +618,14 @@ test "fixOrphanedStore: a stale .malt-reap-* leftover is reclaimed by the reap, 
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -636,10 +636,10 @@ test "fixOrphanedStore: a stale .malt-reap-* leftover is reclaimed by the reap, 
 
     // A leftover staging dir, a sibling of store/ (never a valid orphan sha).
     var reap_buf: [320]u8 = undefined;
-    const reap_dir = try std.fmt.bufPrint(&reap_buf, "{s}/.malt-reap-deadbeef", .{prefix});
+    const reap_dir = try std.mem.print(&reap_buf, "{s}/.malt-reap-deadbeef", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, reap_dir);
     var leaf_buf: [384]u8 = undefined;
-    try writeFile(try std.fmt.bufPrint(&leaf_buf, "{s}/x", .{reap_dir}), "x");
+    try writeFile(try std.mem.print(&leaf_buf, "{s}/x", .{reap_dir}), "x");
 
     // The probe is read-only: leftover untouched, nothing counted.
     try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
@@ -663,14 +663,14 @@ test "fixOrphanedStore: a stranded reap dir does not block reaping a fresh same-
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -683,20 +683,20 @@ test "fixOrphanedStore: a stranded reap dir does not block reaping a fresh same-
 
     // A stranded, unreclaimable staging dir occupying the primary reap name.
     var stranded_buf: [320]u8 = undefined;
-    const stranded = try std.fmt.bufPrint(&stranded_buf, "{s}/.malt-reap-{s}", .{ prefix, sha });
+    const stranded = try std.mem.print(&stranded_buf, "{s}/.malt-reap-{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, stranded);
     var stuck_z_buf: [384]u8 = undefined;
-    const stuck_z = try std.fmt.bufPrintSentinel(&stuck_z_buf, "{s}/stuck", .{stranded}, 0);
+    const stuck_z = try std.mem.printSentinel(&stuck_z_buf, "{s}/stuck", .{stranded}, 0);
     try writeFile(std.mem.sliceTo(stuck_z, 0), "x");
     try testing.expectEqual(@as(c_int, 0), c.chflags(stuck_z.ptr, UF_IMMUTABLE));
     defer _ = c.chflags(stuck_z.ptr, 0);
 
     // A fresh, fully-deletable orphan under the same sha.
     var entry_dir_buf: [320]u8 = undefined;
-    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    const entry_dir = try std.mem.print(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
     var leaf_buf: [384]u8 = undefined;
-    try writeFile(try std.fmt.bufPrint(&leaf_buf, "{s}/a", .{entry_dir}), "x");
+    try writeFile(try std.mem.print(&leaf_buf, "{s}/a", .{entry_dir}), "x");
 
     var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
     try store.claim(sha);
@@ -719,22 +719,22 @@ test "orphan parity: an entry a live keg holds is invisible to both doctor and p
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
     const sha = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
     var entry_dir_buf: [320]u8 = undefined;
-    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    const entry_dir = try std.mem.print(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -774,15 +774,15 @@ test "orphan parity: a no-row store entry is invisible to both doctor and purge"
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_dir_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
 
     var store_dir_buf: [256]u8 = undefined;
-    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    const store_dir = try std.mem.print(&store_dir_buf, "{s}/store", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
 
     var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -790,7 +790,7 @@ test "orphan parity: a no-row store entry is invisible to both doctor and purge"
     // On disk but never claimed: no `store_refs` row.
     const sha = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
     var entry_dir_buf: [320]u8 = undefined;
-    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    const entry_dir = try std.mem.print(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -832,10 +832,10 @@ test "executeFix: idempotent — second run finds nothing left to do" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -861,14 +861,14 @@ test "executeFix: only=stale_lock removes the lock and leaves broken symlinks" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, bin_dir);
     var bin = try fs_compat.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
     defer bin.close(std.Options.debug_io);
@@ -914,10 +914,10 @@ test "executeFix: a valid id whose condition is absent is a clean no-op" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -936,10 +936,10 @@ test "executeFix: only=stale_lock --dry-run plans but mutates nothing" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -975,17 +975,17 @@ test "executeFix: dangerous classes carry into the plan, not the safe set" {
 fn seedLockAndDanglingLink(prefix: []const u8, lock_out: *[256]u8) ![]const u8 {
     const io = std.Options.debug_io;
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(io, db_dir);
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
     try fs_compat.makeDirAbsolute(io, bin_dir);
     var bin = try fs_compat.openDirAbsolute(io, bin_dir, .{ .iterate = true });
     defer bin.close(io);
     try bin.symLink(io, "/tmp/malt-doctor-fix-held-target-dne", "ghost", .{});
 
-    return std.fmt.bufPrint(lock_out, "{s}/db/malt.lock", .{prefix});
+    return std.mem.print(lock_out, "{s}/db/malt.lock", .{prefix});
 }
 
 test "executeFix: a live-held malt.lock blocks the broken-symlink sweep" {
@@ -1002,7 +1002,7 @@ test "executeFix: a live-held malt.lock blocks the broken-symlink sweep" {
     const lock_path = try seedLockAndDanglingLink(prefix, &lock_buf);
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1063,10 +1063,10 @@ test "acquire(timeout=0) on a held malt.lock times out at once (pins the executo
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
     var lock_buf: [256]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix});
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1086,7 +1086,7 @@ test "executeFix: a prefix with no db/ dir reports the skip (DirMissing), never 
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
     try fs_compat.makeDirAbsolute(std.Options.debug_io, bin_dir);
     var bin = try fs_compat.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
     defer bin.close(std.Options.debug_io);
@@ -1118,7 +1118,7 @@ test "executeFix: an unwritable db/ dir surfaces the acquire failure, not a sile
     _ = try seedLockAndDanglingLink(prefix, &lock_buf);
 
     var db_buf: [256]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    const db_dir = try std.mem.print(&db_buf, "{s}/db", .{prefix});
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1177,7 +1177,7 @@ test "executeFix: the lock policy keys off the class, not the invocation" {
     const lock_path = try seedLockAndDanglingLink(prefix, &lock_buf);
 
     var bin_buf: [256]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{prefix});
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

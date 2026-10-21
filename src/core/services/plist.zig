@@ -176,7 +176,7 @@ pub fn validate(
     // checked with a component-boundary-aware prefix match so
     // `/opt/malt/evilopt/x` doesn't pass as `/opt/malt/opt`.
     var opt_buf: [512]u8 = undefined;
-    const opt_prefix = std.fmt.bufPrint(&opt_buf, "{s}/opt", .{malt_prefix}) catch
+    const opt_prefix = std.mem.print(&opt_buf, "{s}/opt", .{malt_prefix}) catch
         return ValidationError.PathEscape;
 
     if (!dsl_sandbox.pathHasPrefix(head, cellar_path) and
@@ -214,7 +214,7 @@ fn calInRange(ci: CalendarInterval) bool {
 
 fn checkString(s: []const u8) ValidationError!void {
     if (s.len > max_arg_len) return ValidationError.ArgTooLong;
-    if (std.mem.indexOfScalar(u8, s, 0) != null) return ValidationError.EmbeddedNul;
+    if (std.mem.findScalar(u8, s, 0) != null) return ValidationError.EmbeddedNul;
 }
 
 pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
@@ -459,7 +459,7 @@ test "render emits a SecureSocketWithKey socket under Sockets" {
         .stderr_path = "/opt/malt/var/log/dbus.err",
         .sockets = &.{.{ .name = "unix_domain_listener", .env_key = "DBUS_LAUNCHD_SESSION_BUS_SOCKET" }},
     }, &aw.writer);
-    try testing.expect(std.mem.indexOf(u8, aw.written(),
+    try testing.expect(std.mem.find(u8, aw.written(),
         \\    <key>Sockets</key>
         \\    <dict>
         \\        <key>unix_domain_listener</key>
@@ -481,7 +481,7 @@ test "render leaves Sockets out when the spec has none" {
         .stdout_path = "/opt/malt/var/log/x.out",
         .stderr_path = "/opt/malt/var/log/x.err",
     }, &aw.writer);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "Sockets") == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "Sockets") == null);
 }
 
 test "validate checks socket names and keys like every other string" {

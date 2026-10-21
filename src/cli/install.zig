@@ -88,13 +88,13 @@ pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []c
     if (!path_component.isPathComponent(name) or !path_component.isPathComponent(version)) return;
 
     var pkg_buf: [512]u8 = undefined;
-    const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
+    const pkg_path = std.mem.print(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
     // Best-effort and silent: the materialize step that follows refuses the
     // same link loudly, so the install still fails visibly.
     if (symlink.isSymlinkOrUnreadable(ctx.io, pkg_path)) return;
 
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
+    const cellar_path = std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
     std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
 }
 
@@ -134,10 +134,10 @@ pub fn unlinkStaleKegLinks(
 /// True when `stale` is another version dir in the same `Cellar/<name>/` as
 /// the malt-built `keep` path, so deleting it cannot reach outside the keg.
 fn isSiblingKegDir(stale: []const u8, keep: []const u8) bool {
-    const keep_dir = std.fs.path.dirname(keep) orelse return false;
-    const stale_dir = std.fs.path.dirname(stale) orelse return false;
-    const leaf = std.fs.path.basename(stale);
-    if (!std.fs.path.isAbsolute(keep_dir) or !std.mem.eql(u8, stale_dir, keep_dir)) return false;
+    const keep_dir = std.Io.Dir.path.dirname(keep) orelse return false;
+    const stale_dir = std.Io.Dir.path.dirname(stale) orelse return false;
+    const leaf = std.Io.Dir.path.basename(stale);
+    if (!std.Io.Dir.path.isAbsolute(keep_dir) or !std.mem.eql(u8, stale_dir, keep_dir)) return false;
     return leaf.len > 0 and !std.mem.eql(u8, leaf, ".") and !std.mem.eql(u8, leaf, "..");
 }
 
@@ -288,7 +288,7 @@ pub fn pruneOtherCellarVersionsForReinstall(
     if (!path_component.isPathComponent(name)) return;
 
     var pkg_buf: [512]u8 = undefined;
-    const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
+    const pkg_path = std.mem.print(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
 
     // Before the open: an iterate handle through a symlinked package dir is
     // already inside whatever the link points at.
@@ -316,7 +316,7 @@ pub fn pruneOtherCellarVersionsForReinstall(
 
     for (stale.items) |version_name| {
         var version_buf: [512]u8 = undefined;
-        const version_path = std.fmt.bufPrint(
+        const version_path = std.mem.print(
             &version_buf,
             "{s}/{s}",
             .{ pkg_path, version_name },
@@ -335,7 +335,7 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     if (name.len == 0 or name[0] == '.') return false;
     api_mod.validateName(name) catch return false;
     var buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return false;
+    const cellar_path = std.mem.print(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return false;
     // `accessAbsolute` follows the link, so a symlinked package dir would
     // report a keg malt never materialized and skip the install silently.
     // Answering "absent" lets the pipeline run and refuse with a message.
@@ -349,7 +349,7 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
 /// into existence just by probing it.
 fn openExistingDb(ctx: *const AppCtx, prefix: []const u8) ?sqlite.Database {
     var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
+    const path = std.mem.printSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
     std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return null;
     return sqlite.Database.open(path) catch null;
 }
@@ -372,7 +372,7 @@ fn tapPackagePresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) b
 
     // Must key the probe the same way the install path records the row.
     var slug_raw_buf: [tap_slug.max_slug_len]u8 = undefined;
-    const slug_raw = std.fmt.bufPrint(&slug_raw_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return false;
+    const slug_raw = std.mem.print(&slug_raw_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return false;
     var slug_buf: [tap_slug.max_slug_len]u8 = undefined;
     const slug = tap_slug.canonicalTapSlug(&slug_buf, slug_raw) orelse return false;
 
@@ -462,7 +462,7 @@ fn promoteNamedDepIfAny(
         // opt link already present on a promoted dep; best-effort refresh. The
         // dir is named by pkg_version (`<version>_<revision>`), so derive the
         // leaf from cellar_path — raw `version` would dangle for a revisioned dep.
-        linker.linkOpt(name, std.fs.path.basename(cellar)) catch {};
+        linker.linkOpt(name, std.Io.Dir.path.basename(cellar)) catch {};
     }
 
     var upd = db.prepare(
@@ -474,7 +474,7 @@ fn promoteNamedDepIfAny(
 
     // Keep the receipt in step with the row; best-effort like every other
     // receipt write. The version slot is the cellar dir leaf (pkg_version).
-    cellar_mod.writeInstallReceiptFull(linker.io, cellar, name, std.fs.path.basename(cellar), store_sha256, tap, true);
+    cellar_mod.writeInstallReceiptFull(linker.io, cellar, name, std.Io.Dir.path.basename(cellar), store_sha256, tap, true);
 
     return if (isolated) .relinked else .marked;
 }
@@ -710,7 +710,7 @@ fn runInstall(
     var lk: ?lock_mod.LockFile = null;
     if (!exec_opts.skip_lock) {
         var lock_path_buf: [512]u8 = undefined;
-        const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
+        const lock_path = std.mem.print(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
             return InstallError.LockError;
         lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
             // A real run made db/ above; only a preview of a fresh prefix
@@ -734,7 +734,7 @@ fn runInstall(
 
     // Open database
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return InstallError.DatabaseError;
     var db = schema_report.openPreviewableCreating(ctx.io, db_path, flags.dry_run) catch {
         sink.err("Failed to open database at {s}", .{db_path});
@@ -1405,7 +1405,7 @@ fn matchesLinkOverwrite(patterns: []const []const u8, rel: []const u8) bool {
         if (pat.len == 0) continue;
         if (std.mem.eql(u8, pat, rel)) return true;
         if (rel.len > pat.len and rel[pat.len] == '/' and std.mem.startsWith(u8, rel, pat)) return true;
-        if (std.mem.indexOfScalar(u8, pat, '*') != null and glob.match(pat, rel)) return true;
+        if (std.mem.findScalar(u8, pat, '*') != null and glob.match(pat, rel)) return true;
     }
     return false;
 }
@@ -1448,7 +1448,7 @@ pub fn snapshotTaken(
     }
     for (found) |c| {
         if (!mayTakeOver(c, prefix, name, patterns)) continue;
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const n = try std.Io.Dir.readLinkAbsolute(io, c.link_path, &buf);
         const keg_id = try slotOwner(db, c.link_path);
         const link_path = try allocator.dupe(u8, c.link_path);
@@ -1481,7 +1481,7 @@ fn slotOwner(db: *sqlite.Database, link_path: []const u8) !?i64 {
 /// stays theirs, and an intact one is not touched.
 fn restoreTaken(io: std.Io, db: *sqlite.Database, taken: []const TakenSlot, new_keg: []const u8) void {
     for (taken) |t| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const restorable = blk: {
             const n = std.Io.Dir.readLinkAbsolute(io, t.link_path, &buf) catch |err| break :blk err == error.FileNotFound;
             break :blk linker_mod.Linker.isUnderKeg(buf[0..n], new_keg);
@@ -1489,7 +1489,7 @@ fn restoreTaken(io: std.Io, db: *sqlite.Database, taken: []const TakenSlot, new_
         if (!restorable) continue;
         std.Io.Dir.deleteFileAbsolute(io, t.link_path) catch {};
         // `unlink` prunes the directories it emptied.
-        if (std.fs.path.dirname(t.link_path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch continue;
+        if (std.Io.Dir.path.dirname(t.link_path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch continue;
         std.Io.Dir.symLinkAbsolute(io, t.target, t.link_path, .{}) catch continue;
         const id = t.keg_id orelse continue;
         var stmt = db.prepare("INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);") catch continue;
@@ -2011,9 +2011,9 @@ pub fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.Cel
     const tag = @errorName(err);
     const desc = cellar_mod.describeError(err);
     const result = if (std.mem.eql(u8, tag, desc))
-        std.fmt.bufPrint(buf, "Failed to materialize {s}: {s}", .{ name, tag })
+        std.mem.print(buf, "Failed to materialize {s}: {s}", .{ name, tag })
     else
-        std.fmt.bufPrint(buf, "Failed to materialize {s}: {s} ({s})", .{ name, tag, desc });
+        std.mem.print(buf, "Failed to materialize {s}: {s} ({s})", .{ name, tag, desc });
     // Overflow only fires on pathologically long names; fall back to a
     // truncated form rather than swallowing the failure silently.
     return result catch "Failed to materialize <truncated>";
@@ -2038,8 +2038,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -2051,8 +2050,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -2098,8 +2096,8 @@ fn seedDepKeg(s: *Scratch, io: std.Io, bin_isolated: bool) !sqlite.Database {
     var db = try sqlite.Database.open(s.p("/db/malt.db"));
     errdefer db.close();
     try schema.initSchema(&db);
-    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
+    var ins_buf: [std.Io.Dir.max_path_bytes + 256]u8 = undefined;
+    const insert = try std.mem.printSentinel(
         &ins_buf,
         "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
             "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',{d});",
@@ -2164,10 +2162,10 @@ test "promoteNamedDepIfAny rewrites the receipt as installed on request" {
 
     const receipt = try std.Io.Dir.cwd().readFileAlloc(io, s.p("/Cellar/zlib/1.3_1/INSTALL_RECEIPT.json"), allocator, .limited(4096));
     defer allocator.free(receipt);
-    try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_on_request\": true") != null);
-    try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_as_dependency\": false") != null);
+    try testing.expect(std.mem.find(u8, receipt, "\"installed_on_request\": true") != null);
+    try testing.expect(std.mem.find(u8, receipt, "\"installed_as_dependency\": false") != null);
     // The receipt's version slot is the cellar dir leaf, not the raw column.
-    try testing.expect(std.mem.indexOf(u8, receipt, "\"stable\": \"1.3_1\"") != null);
+    try testing.expect(std.mem.find(u8, receipt, "\"stable\": \"1.3_1\"") != null);
 }
 
 test "a non-isolated dependency named directly is marked on request" {
@@ -2198,7 +2196,7 @@ test "a non-isolated dependency named directly is marked on request" {
 
     const receipt = try std.Io.Dir.cwd().readFileAlloc(io, s.p("/Cellar/zlib/1.3_1/INSTALL_RECEIPT.json"), allocator, .limited(4096));
     defer allocator.free(receipt);
-    try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_on_request\": true") != null);
+    try testing.expect(std.mem.find(u8, receipt, "\"installed_on_request\": true") != null);
 }
 
 test "the fast-path gate yields to a non-isolated dependency" {
@@ -2320,7 +2318,7 @@ test "formatMaterializeFailure: action-hint tag keeps the parenthetical prose" {
     const msg = formatMaterializeFailure(&buf, "pkg", cellar_mod.CellarError.InstallNameToolMissing);
     try std.testing.expect(std.mem.startsWith(u8, msg, "Failed to materialize pkg: InstallNameToolMissing ("));
     try std.testing.expect(std.mem.endsWith(u8, msg, ")"));
-    try std.testing.expect(std.mem.indexOf(u8, msg, "install_name_tool not found on PATH") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "install_name_tool not found on PATH") != null);
 }
 
 test "formatMaterializeFailure: a symlinked package dir names the cause and the remedy" {
@@ -2329,7 +2327,7 @@ test "formatMaterializeFailure: a symlinked package dir names the cause and the 
     var buf: [256]u8 = undefined;
     const msg = formatMaterializeFailure(&buf, "jq", cellar_mod.CellarError.UnsafeCellarLink);
     try std.testing.expect(std.mem.startsWith(u8, msg, "Failed to materialize jq: UnsafeCellarLink ("));
-    try std.testing.expect(std.mem.indexOf(u8, msg, "is a symlink") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "is a symlink") != null);
 }
 
 test "formatMaterializeFailure: a name that overflows the buffer still reports a failure" {
@@ -2483,16 +2481,16 @@ test "pruneOtherCellarVersionsForReinstall sweeps multiple stale siblings in one
 
     const versions = [_][]const u8{ "10.46", "10.47", "10.47_1", "10.48" };
     for (versions) |v| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dir = try std.fmt.bufPrint(&buf, "{s}/Cellar/pcre2/{s}/bin", .{ prefix, v });
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = try std.mem.print(&buf, "{s}/Cellar/pcre2/{s}/bin", .{ prefix, v });
         try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     }
 
     pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.48");
 
     for (versions) |v| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root = try std.fmt.bufPrint(&buf, "{s}/Cellar/pcre2/{s}", .{ prefix, v });
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = try std.mem.print(&buf, "{s}/Cellar/pcre2/{s}", .{ prefix, v });
         if (std.mem.eql(u8, v, "10.48")) {
             try std.Io.Dir.accessAbsolute(ctx.io, root, .{});
         } else {

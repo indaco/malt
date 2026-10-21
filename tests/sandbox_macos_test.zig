@@ -40,23 +40,23 @@ test "renderRubyProfile deny-by-default, network denied, cellar + prefix subpath
         .{},
     );
     defer testing.allocator.free(profile);
-    try testing.expect(std.mem.indexOf(u8, profile, "(deny default)") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(deny network*)") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(allow file-read*)") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(deny file-read-data") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/Users\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/System/Volumes/Data\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/Cellar/foo/1.0\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/share\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(deny default)") != null);
+    try testing.expect(std.mem.find(u8, profile, "(deny network*)") != null);
+    try testing.expect(std.mem.find(u8, profile, "(allow file-read*)") != null);
+    try testing.expect(std.mem.find(u8, profile, "(deny file-read-data") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/Users\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/System/Volumes/Data\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/Cellar/foo/1.0\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/var\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/share\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
     // lib is granted only at the two cache subtrees, never the whole farm.
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gdk-pixbuf-2.0\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gio\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/lib/gdk-pixbuf-2.0\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/lib/gio\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
     // IPC is opt-in; the default profile omits it.
-    try testing.expect(std.mem.indexOf(u8, profile, "ipc-sysv-shm") == null);
+    try testing.expect(std.mem.find(u8, profile, "ipc-sysv-shm") == null);
 }
 
 test "renderRubyProfile grants IPC only under allow_ipc" {
@@ -67,9 +67,9 @@ test "renderRubyProfile grants IPC only under allow_ipc" {
         .{ .allow_ipc = true },
     );
     defer testing.allocator.free(profile);
-    try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
+    try testing.expect(std.mem.find(u8, profile, "(allow ipc-sysv-shm)") != null);
+    try testing.expect(std.mem.find(u8, profile, "(allow ipc-posix-shm)") != null);
+    try testing.expect(std.mem.find(u8, profile, "(allow ipc-sysv-sem)") != null);
 }
 
 test "renderRubyProfile grants standard font directories but not all of HOME" {
@@ -80,11 +80,11 @@ test "renderRubyProfile grants standard font directories but not all of HOME" {
         .{ .home = "/test-home" },
     );
     defer testing.allocator.free(profile);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/Library/Fonts\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/Library/Fonts\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/.fonts\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/.local/share/fonts\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home\")") == null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/Library/Fonts\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/test-home/Library/Fonts\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/test-home/.fonts\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/test-home/.local/share/fonts\")") != null);
+    try testing.expect(std.mem.find(u8, profile, "(subpath \"/test-home\")") == null);
 }
 
 test "renderRubyProfile refuses unsafe cellar path" {
@@ -119,7 +119,7 @@ test "sandbox_path restricts to system directories only" {
 }
 
 test "sandbox profile refuses copying a source from outside the prefix" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     const root = try test_io.uniqueTempPath(testing.allocator, "sandbox_macos", "read_source");
@@ -127,17 +127,17 @@ test "sandbox profile refuses copying a source from outside the prefix" {
     test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
 
-    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/prefix", .{root});
+    const prefix = try testing.allocator.print("{s}/prefix", .{root});
     defer testing.allocator.free(prefix);
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(keg);
-    const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
+    const share = try testing.allocator.print("{s}/share", .{prefix});
     defer testing.allocator.free(share);
-    const home = try std.fmt.allocPrint(testing.allocator, "{s}/home", .{root});
+    const home = try testing.allocator.print("{s}/home", .{root});
     defer testing.allocator.free(home);
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{home});
+    const victim = try testing.allocator.print("{s}/private", .{home});
     defer testing.allocator.free(victim);
-    const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/leaked", .{share});
+    const leaked = try testing.allocator.print("{s}/leaked", .{share});
     defer testing.allocator.free(leaked);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, share);
@@ -182,7 +182,7 @@ test "std.posix.rlimit_resource tags resolve on macOS for CPU/FSIZE/AS" {
     // Pin: the three rlimit tags applyRlimits relies on must round-trip
     // through the kernel on macOS. If a stdlib rename ever loses one of
     // these, this test fails before fork/exec tests do.
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     _ = try std.posix.getrlimit(.CPU);
     _ = try std.posix.getrlimit(.FSIZE);
     _ = try std.posix.getrlimit(.AS);
@@ -205,7 +205,7 @@ const ReapObserver = struct {
 };
 
 test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     const argv = [_][]const u8{"/usr/bin/true"};
@@ -233,7 +233,7 @@ test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
 }
 
 test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn fails" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     const argv = [_][]const u8{"/usr/bin/true"};
@@ -266,7 +266,7 @@ test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn 
 // `result_error_msgs` (which would otherwise print a misleading
 // `failed command:` against a passing test).
 test "spawnFilteredWithHooks routes child stderr to the configured fd" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     const argv = [_][]const u8{ "/bin/sh", "-c", "printf %s err-via-fd >&2" };
@@ -327,7 +327,7 @@ fn copyUnderProfile(profile: []const u8, prefix: []const u8, src: []const u8, ds
 }
 
 test "sandbox profile grants reads inside the directories it names" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     // The profile denies /private and /Library wholesale, so each read below
@@ -339,11 +339,11 @@ test "sandbox profile grants reads inside the directories it names" {
     test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
 
-    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/prefix", .{root});
+    const prefix = try testing.allocator.print("{s}/prefix", .{root});
     defer testing.allocator.free(prefix);
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(keg);
-    const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
+    const share = try testing.allocator.print("{s}/share", .{prefix});
     defer testing.allocator.free(share);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, share);
@@ -358,7 +358,7 @@ test "sandbox profile grants reads inside the directories it names" {
         "/private/etc/ssl/openssl.cnf",
     };
     for (sources, 0..) |src, i| {
-        const dst = try std.fmt.allocPrint(testing.allocator, "{s}/copied{d}", .{ share, i });
+        const dst = try testing.allocator.print("{s}/copied{d}", .{ share, i });
         defer testing.allocator.free(dst);
         const code = try copyUnderProfile(profile, prefix, src, dst);
         try testing.expect(code == 0);
@@ -367,7 +367,7 @@ test "sandbox profile grants reads inside the directories it names" {
 }
 
 test "sandbox profile grants ssl config without reopening the rest of /etc" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     // The ssl grant is a subpath, so widening it to /private/etc would hand
@@ -377,11 +377,11 @@ test "sandbox profile grants ssl config without reopening the rest of /etc" {
     test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
 
-    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/prefix", .{root});
+    const prefix = try testing.allocator.print("{s}/prefix", .{root});
     defer testing.allocator.free(prefix);
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(keg);
-    const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
+    const share = try testing.allocator.print("{s}/share", .{prefix});
     defer testing.allocator.free(share);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, share);
@@ -391,7 +391,7 @@ test "sandbox profile grants ssl config without reopening the rest of /etc" {
 
     const denied = [_][]const u8{ "/private/etc/passwd", "/private/etc/hosts" };
     for (denied, 0..) |src, i| {
-        const dst = try std.fmt.allocPrint(testing.allocator, "{s}/leaked{d}", .{ share, i });
+        const dst = try testing.allocator.print("{s}/leaked{d}", .{ share, i });
         defer testing.allocator.free(dst);
         const code = try copyUnderProfile(profile, prefix, src, dst);
         try testing.expect(code != 0);

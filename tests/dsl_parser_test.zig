@@ -746,7 +746,7 @@ test "parser: Dir peek preserves heredoc lexer state" {
     // Body lowers to one literal part with the squiggly indent stripped. The
     // old "  body\n" expectation encoded the de-indent bug — do not restore it.
     const body = nodes[1].kind.string_literal.parts[0].literal;
-    try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
+    try testing.expect(std.mem.find(u8, body, "<<~") == null);
     try testing.expectEqualStrings("body\n", body);
 }
 
@@ -764,7 +764,7 @@ test "parser: Formula peek preserves heredoc lexer state" {
     // Body lowers to one literal part with the squiggly indent stripped. The
     // old "  body\n" expectation encoded the de-indent bug — do not restore it.
     const body = nodes[1].kind.string_literal.parts[0].literal;
-    try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
+    try testing.expect(std.mem.find(u8, body, "<<~") == null);
     try testing.expectEqualStrings("body\n", body);
 }
 
@@ -782,7 +782,7 @@ test "parser: ENV peek preserves heredoc lexer state" {
     // Body lowers to one literal part with the squiggly indent stripped. The
     // old "  body\n" expectation encoded the de-indent bug — do not restore it.
     const body = nodes[1].kind.string_literal.parts[0].literal;
-    try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
+    try testing.expect(std.mem.find(u8, body, "<<~") == null);
     try testing.expectEqualStrings("body\n", body);
 }
 

@@ -73,7 +73,7 @@ fn serveConnection(s: *Stub) void {
         s.get_count += 1;
         switch (s.mode) {
             .ok => req.respond(body_200, .{}) catch return,
-            .redirect_then_ok => if (std.mem.indexOf(u8, target, "/final") != null)
+            .redirect_then_ok => if (std.mem.find(u8, target, "/final") != null)
                 req.respond(body_200, .{}) catch return
             else
                 req.respond("", .{
@@ -122,7 +122,7 @@ test "getToWriter streams a 200 body into the caller sink and returns 200" {
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -153,7 +153,7 @@ test "getWithHeaders remains byte-identical against the same fixture (buffer pat
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -184,7 +184,7 @@ test "getToWriter drains a non-200 to a throwaway, keeps the sink pristine, stre
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -218,7 +218,7 @@ test "getToWriter keeps the sink pristine across a caller-driven 401 re-auth" {
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -257,7 +257,7 @@ test "getToWriter surfaces a mid-200-stream transport failure without retrying" 
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -305,7 +305,7 @@ test "getToWriter reports progress as the 200 body streams into the sink" {
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -342,7 +342,7 @@ test "getToWriter follows a redirect and streams only the final 200 body into th
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -379,7 +379,7 @@ test "getToWriter trips ResponseTooLarge when the 200 body exceeds the blob cap"
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -417,7 +417,7 @@ test "getToWriter stops re-dialling when a cancel lands on the retry backoff" {
     const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);

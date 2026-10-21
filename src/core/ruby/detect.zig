@@ -57,12 +57,12 @@ pub fn resolveFormulaRbPath(io: std.Io, buf: *[1024]u8, tap_path: []const u8, na
     if (name.len == 0) return null;
 
     // New layout: Formula/FIRST_LETTER/NAME.rb
-    const new_path = std.fmt.bufPrint(buf, "{s}/Formula/{c}/{s}.rb", .{
+    const new_path = std.mem.print(buf, "{s}/Formula/{c}/{s}.rb", .{
         tap_path, name[0], name,
     }) catch return null;
     std.Io.Dir.accessAbsolute(io, new_path, .{}) catch {
         // Fall through to old layout
-        const old_path = std.fmt.bufPrint(buf, "{s}/Formula/{s}.rb", .{
+        const old_path = std.mem.print(buf, "{s}/Formula/{s}.rb", .{
             tap_path, name,
         }) catch return null;
         std.Io.Dir.accessAbsolute(io, old_path, .{}) catch return null;
@@ -88,8 +88,7 @@ fn uniqueDir(io: std.Io, suffix: []const u8) ![]u8 {
     var rand: [8]u8 = undefined;
     io.random(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
-    const p = try std.fmt.allocPrint(
-        testing.allocator,
+    const p = try testing.allocator.print(
         "/tmp/malt_ruby_detect_{s}_{s}",
         .{ hex[0..], suffix },
     );
@@ -122,10 +121,10 @@ test "resolveFormulaRbPath prefers the sharded Formula/{first}/{name}.rb layout"
     const tap = try uniqueDir(io, "sharded");
     defer testing.allocator.free(tap);
     defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
-    const shard_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula/w", .{tap});
+    const shard_dir = try testing.allocator.print("{s}/Formula/w", .{tap});
     defer testing.allocator.free(shard_dir);
     try std.Io.Dir.cwd().createDirPath(io, shard_dir);
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{shard_dir});
+    const rb = try testing.allocator.print("{s}/wget.rb", .{shard_dir});
     defer testing.allocator.free(rb);
     (try std.Io.Dir.createFileAbsolute(io, rb, .{})).close(io);
 
@@ -140,10 +139,10 @@ test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
     const tap = try uniqueDir(io, "flat");
     defer testing.allocator.free(tap);
     defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
-    const flat_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula", .{tap});
+    const flat_dir = try testing.allocator.print("{s}/Formula", .{tap});
     defer testing.allocator.free(flat_dir);
     try std.Io.Dir.cwd().createDirPath(io, flat_dir);
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{flat_dir});
+    const rb = try testing.allocator.print("{s}/wget.rb", .{flat_dir});
     defer testing.allocator.free(rb);
     (try std.Io.Dir.createFileAbsolute(io, rb, .{})).close(io);
 
@@ -158,7 +157,7 @@ test "detectRuby returns a heap-owned path and always finds one on macOS" {
     // /usr/bin/ruby is part of the macOS base system, so null there means the
     // probe itself is broken, not the box.
     const path = detectRuby(testIo(), testing.allocator) orelse {
-        try testing.expect(builtin.os.tag != .macos);
+        try testing.expect(builtin.target.os.tag != .macos);
         return;
     };
     defer testing.allocator.free(path);

@@ -18,7 +18,7 @@ fn testArena() std.heap.ArenaAllocator {
 
 /// Minimal JSON template for a formula with post_install_defined=true.
 fn minimalJson(alloc: std.mem.Allocator, name: []const u8, version: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(alloc,
+    return alloc.print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",
@@ -103,7 +103,7 @@ fn runSnippetInto(
 /// Create the cellar directory tree that ExecContext expects.
 fn setupCellar(prefix_dir: []const u8) !void {
     // Create Cellar/testpkg/1.0
-    const cellar_path = try std.fs.path.join(
+    const cellar_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix_dir, "Cellar", "testpkg", "1.0" },
     );
@@ -112,7 +112,7 @@ fn setupCellar(prefix_dir: []const u8) !void {
 
     // Create etc, share, var
     for ([_][]const u8{ "etc", "share", "var" }) |sub| {
-        const p = try std.fs.path.join(testing.allocator, &.{ prefix_dir, sub });
+        const p = try std.Io.Dir.path.join(testing.allocator, &.{ prefix_dir, sub });
         defer testing.allocator.free(p);
         try test_io.cwd().createDirPath(std.Options.debug_io, p);
     }
@@ -185,7 +185,7 @@ test "interpreter: pathname mkpath creates directory" {
     try testing.expect(err == null);
 
     // Verify the directory was created
-    const expected = try std.fs.path.join(
+    const expected = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "myapp" },
     );
@@ -208,7 +208,7 @@ test "interpreter: file write creates file with content" {
     try testing.expect(err == null);
 
     // Verify file was created with expected content
-    const expected_path = try std.fs.path.join(
+    const expected_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "etc", "myapp.conf" },
     );
@@ -239,7 +239,7 @@ test "interpreter: heredoc body interpolates via evalStringLiteral" {
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 
-    const expected_path = try std.fs.path.join(
+    const expected_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "etc", "greet.conf" },
     );
@@ -300,7 +300,7 @@ test "interpreter: variable assignment and use" {
     try testing.expect(err == null);
 
     // Verify directory was created
-    const expected = try std.fs.path.join(
+    const expected = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "data" },
     );
@@ -396,7 +396,7 @@ test "interpreter: raise message is recorded as a note, not written to stderr" {
 
     var found = false;
     for (flog.notes()) |n| {
-        if (std.mem.indexOf(u8, n, "boom") != null) found = true;
+        if (std.mem.find(u8, n, "boom") != null) found = true;
     }
     try testing.expect(found);
 }
@@ -448,7 +448,7 @@ test "interpreter: a rescued raise records a note without a routing entry" {
 
     var found = false;
     for (flog.notes()) |n| {
-        if (std.mem.indexOf(u8, n, "kaboom") != null) found = true;
+        if (std.mem.find(u8, n, "kaboom") != null) found = true;
     }
     try testing.expect(found);
     try testing.expectEqual(@as(usize, 0), flog.entries().len);
@@ -575,14 +575,14 @@ test "interpreter: cp children copies files" {
     const prefix = scratch.path;
 
     // Create source files under share/data
-    const share_data = try std.fs.path.join(
+    const share_data = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "data" },
     );
     defer testing.allocator.free(share_data);
     try test_io.cwd().createDirPath(std.Options.debug_io, share_data);
 
-    const file1 = try std.fs.path.join(testing.allocator, &.{ share_data, "a.txt" });
+    const file1 = try std.Io.Dir.path.join(testing.allocator, &.{ share_data, "a.txt" });
     defer testing.allocator.free(file1);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, file1, .{});
@@ -591,7 +591,7 @@ test "interpreter: cp children copies files" {
     }
 
     // Create lib dir
-    const lib_dir = try std.fs.path.join(
+    const lib_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "lib" },
     );
@@ -614,7 +614,7 @@ test "interpreter: rm array inline deletes files" {
     const prefix = scratch.path;
 
     // Create tmp dir and files
-    const tmp_dir = try std.fs.path.join(
+    const tmp_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp" },
     );
@@ -622,7 +622,7 @@ test "interpreter: rm array inline deletes files" {
     try test_io.cwd().createDirPath(std.Options.debug_io, tmp_dir);
 
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
-        const fp = try std.fs.path.join(testing.allocator, &.{ tmp_dir, name });
+        const fp = try std.Io.Dir.path.join(testing.allocator, &.{ tmp_dir, name });
         defer testing.allocator.free(fp);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, fp, .{});
         f.close(std.Options.debug_io);
@@ -644,14 +644,14 @@ test "interpreter: chmod array no error" {
     const prefix = scratch.path;
 
     // Create bin and sbin dirs
-    const bin_dir = try std.fs.path.join(
+    const bin_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "bin" },
     );
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
 
-    const sbin_dir = try std.fs.path.join(
+    const sbin_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "sbin" },
     );
@@ -687,7 +687,7 @@ test "interpreter: file? returns true for existing file" {
     const prefix = scratch.path;
 
     // Create the test file
-    const test_file = try std.fs.path.join(
+    const test_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "test.txt" },
     );
@@ -711,14 +711,14 @@ test "interpreter: children on directory no error" {
     const prefix = scratch.path;
 
     // Create subdir with files
-    const subdir = try std.fs.path.join(
+    const subdir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "subdir" },
     );
     defer testing.allocator.free(subdir);
     try test_io.cwd().createDirPath(std.Options.debug_io, subdir);
 
-    const fp = try std.fs.path.join(testing.allocator, &.{ subdir, "x.txt" });
+    const fp = try std.Io.Dir.path.join(testing.allocator, &.{ subdir, "x.txt" });
     defer testing.allocator.free(fp);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, fp, .{});
@@ -743,7 +743,7 @@ test "interpreter: atomic_write creates file with content" {
     try testing.expect(err == null);
 
     // Verify file contents
-    const expected_path = try std.fs.path.join(
+    const expected_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "config.txt" },
     );
@@ -771,7 +771,7 @@ test "interpreter: inreplace replaces content in file" {
     const prefix = scratch.path;
 
     // Create the config file with OLD_VALUE
-    const config_path = try std.fs.path.join(
+    const config_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "config.txt" },
     );
@@ -805,13 +805,13 @@ test "interpreter: inreplace fallback warning is recorded as a note" {
     defer scratch.deinit();
     const prefix = scratch.path;
 
-    const target_dir = try std.fs.path.join(
+    const target_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0" },
     );
     defer testing.allocator.free(target_dir);
 
-    const config_path = try std.fs.path.join(
+    const config_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ target_dir, "config.txt" },
     );
@@ -840,8 +840,8 @@ test "interpreter: inreplace fallback warning is recorded as a note" {
 
     var found = false;
     for (flog.notes()) |n| {
-        if (std.mem.indexOf(u8, n, "inreplace atomic write failed") != null and
-            std.mem.indexOf(u8, n, "TempCreateFailed") != null) found = true;
+        if (std.mem.find(u8, n, "inreplace atomic write failed") != null and
+            std.mem.find(u8, n, "TempCreateFailed") != null) found = true;
     }
     try testing.expect(found);
     // Regression guard for the byte-identical envelope: the fallback is a
@@ -937,7 +937,7 @@ test "interpreter: %w each loop creates dirs" {
 
     // Verify directories were created
     for ([_][]const u8{ "a", "b", "c" }) |name| {
-        const dir_path = try std.fs.path.join(
+        const dir_path = try std.Io.Dir.path.join(
             testing.allocator,
             &.{ prefix, "Cellar", "testpkg", "1.0", "dirs", name },
         );
@@ -961,7 +961,7 @@ test "interpreter: unless with negation executes body" {
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 
-    const expected = try std.fs.path.join(
+    const expected = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "keep" },
     );
@@ -1024,7 +1024,7 @@ test "interpreter: File.exist? returns true for existing file" {
     const prefix = scratch.path;
 
     // Create the file
-    const test_file = try std.fs.path.join(
+    const test_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "test.txt" },
     );
@@ -1109,14 +1109,14 @@ test "coverage: rm_r removes directory tree" {
     const prefix = scratch.path;
 
     // Create prefix/Cellar/testpkg/1.0/tmp/subdir/file.txt
-    const subdir = try std.fs.path.join(
+    const subdir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp", "subdir" },
     );
     defer testing.allocator.free(subdir);
     try test_io.cwd().createDirPath(std.Options.debug_io, subdir);
 
-    const file_path = try std.fs.path.join(testing.allocator, &.{ subdir, "file.txt" });
+    const file_path = try std.Io.Dir.path.join(testing.allocator, &.{ subdir, "file.txt" });
     defer testing.allocator.free(file_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
@@ -1129,7 +1129,7 @@ test "coverage: rm_r removes directory tree" {
     try testing.expect(err == null);
 
     // Verify prefix/Cellar/testpkg/1.0/tmp no longer exists
-    const tmp_dir = try std.fs.path.join(
+    const tmp_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp" },
     );
@@ -1147,7 +1147,7 @@ test "coverage: cp single file" {
     const prefix = scratch.path;
 
     // Create source file
-    const src_file = try std.fs.path.join(
+    const src_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "src.txt" },
     );
@@ -1163,7 +1163,7 @@ test "coverage: cp single file" {
     try testing.expect(err == null);
 
     // Verify dst.txt has "hello"
-    const dst_file = try std.fs.path.join(
+    const dst_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "dst.txt" },
     );
@@ -1186,14 +1186,14 @@ test "coverage: cp_r copies directory tree" {
     const prefix = scratch.path;
 
     // Create source directory with a file
-    const srcdir = try std.fs.path.join(
+    const srcdir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "srcdir" },
     );
     defer testing.allocator.free(srcdir);
     try test_io.cwd().createDirPath(std.Options.debug_io, srcdir);
 
-    const a_txt = try std.fs.path.join(testing.allocator, &.{ srcdir, "a.txt" });
+    const a_txt = try std.Io.Dir.path.join(testing.allocator, &.{ srcdir, "a.txt" });
     defer testing.allocator.free(a_txt);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, a_txt, .{});
@@ -1216,7 +1216,7 @@ test "coverage: mv renames file" {
     const prefix = scratch.path;
 
     // Create old.txt
-    const old_file = try std.fs.path.join(
+    const old_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "old.txt" },
     );
@@ -1232,7 +1232,7 @@ test "coverage: mv renames file" {
     try testing.expect(err == null);
 
     // Verify new.txt exists
-    const new_file = try std.fs.path.join(
+    const new_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "new.txt" },
     );
@@ -1259,7 +1259,7 @@ test "coverage: touch creates file" {
     try testing.expect(err == null);
 
     // Verify file exists
-    const file_path = try std.fs.path.join(
+    const file_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "touched.txt" },
     );
@@ -1278,7 +1278,7 @@ test "coverage: ln_s creates symlink" {
     const prefix = scratch.path;
 
     // Create target file
-    const target_file = try std.fs.path.join(
+    const target_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "target.txt" },
     );
@@ -1294,7 +1294,7 @@ test "coverage: ln_s creates symlink" {
     try testing.expect(err == null);
 
     // Verify link exists
-    const link_path = try std.fs.path.join(
+    const link_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "link.txt" },
     );
@@ -1313,7 +1313,7 @@ test "coverage: ln_sf single target overwrites" {
     const prefix = scratch.path;
 
     // Create target and an existing file at the link location
-    const target_file = try std.fs.path.join(
+    const target_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "target.txt" },
     );
@@ -1324,7 +1324,7 @@ test "coverage: ln_sf single target overwrites" {
         f.close(std.Options.debug_io);
     }
 
-    const link_path = try std.fs.path.join(
+    const link_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "link.txt" },
     );
@@ -1353,7 +1353,7 @@ test "coverage: mkdir_p nested directories" {
     try testing.expect(err == null);
 
     // Verify nested dirs exist
-    const deep_dir = try std.fs.path.join(
+    const deep_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "a", "b", "c" },
     );
@@ -1403,7 +1403,7 @@ test "coverage: symlink? false for regular file" {
     const prefix = scratch.path;
 
     // Create a regular file
-    const file_path = try std.fs.path.join(
+    const file_path = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "regular.txt" },
     );
@@ -1427,7 +1427,7 @@ test "coverage: read returns file content" {
     const prefix = scratch.path;
 
     // Create a file with content
-    const data_file = try std.fs.path.join(
+    const data_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "data.txt" },
     );
@@ -1478,7 +1478,7 @@ test "coverage: glob finds matching files" {
     const prefix = scratch.path;
 
     // Create share dir under cellar and add files
-    const share_dir = try std.fs.path.join(
+    const share_dir = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "share" },
     );
@@ -1486,7 +1486,7 @@ test "coverage: glob finds matching files" {
     try test_io.cwd().createDirPath(std.Options.debug_io, share_dir);
 
     for ([_][]const u8{ "a.xml", "b.xml" }) |name| {
-        const fp = try std.fs.path.join(testing.allocator, &.{ share_dir, name });
+        const fp = try std.Io.Dir.path.join(testing.allocator, &.{ share_dir, name });
         defer testing.allocator.free(fp);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, fp, .{});
         f.close(std.Options.debug_io);
@@ -1506,7 +1506,7 @@ test "coverage: install_symlink creates link" {
     const prefix = scratch.path;
 
     // Create source file
-    const src_file = try std.fs.path.join(
+    const src_file = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "src.txt" },
     );
@@ -1539,13 +1539,13 @@ test "coverage: openssl@3 chain links etc/openssl@3/cert.pem to a sibling formul
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 
-    const link = try std.fs.path.join(testing.allocator, &.{ prefix, "etc", "openssl@3", "cert.pem" });
+    const link = try std.Io.Dir.path.join(testing.allocator, &.{ prefix, "etc", "openssl@3", "cert.pem" });
     defer testing.allocator.free(link);
     var buf: [test_io.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, link, &buf);
     const target = buf[0..n];
 
-    const want = try std.fs.path.join(testing.allocator, &.{ prefix, "etc", "ca-certificates", "cert.pem" });
+    const want = try std.Io.Dir.path.join(testing.allocator, &.{ prefix, "etc", "ca-certificates", "cert.pem" });
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, target);
 }
@@ -1774,7 +1774,7 @@ test "coverage: each loop with mkpath in body" {
 
     // Verify directories were created
     for ([_][]const u8{ "x", "y", "z" }) |name| {
-        const dir_path = try std.fs.path.join(
+        const dir_path = try std.Io.Dir.path.join(
             testing.allocator,
             &.{ prefix, "Cellar", "testpkg", "1.0", "dirs2", name },
         );
@@ -1900,7 +1900,7 @@ test "depth guard: deeply nested expression degrades through the post_install pa
     var saw_depth_diag = false;
     for (flog.entries()) |entry| {
         if (entry.reason == .parse_error and
-            std.mem.indexOf(u8, entry.detail, "nesting too deep") != null) saw_depth_diag = true;
+            std.mem.find(u8, entry.detail, "nesting too deep") != null) saw_depth_diag = true;
     }
     try testing.expect(saw_depth_diag);
 }
@@ -1927,7 +1927,7 @@ test "depth guard: self-recursive method degrades through the post_install path"
     var saw_recursion_diag = false;
     for (flog.entries()) |entry| {
         if (entry.reason == .parse_error and
-            std.mem.indexOf(u8, entry.detail, "recursion limit") != null) saw_recursion_diag = true;
+            std.mem.find(u8, entry.detail, "recursion limit") != null) saw_recursion_diag = true;
     }
     try testing.expect(saw_recursion_diag);
 }
@@ -1958,7 +1958,7 @@ test "depth guard: sequential method calls past the cap do not trip the guard" {
     try runSnippetInto(&arena, body.items, prefix, &flog);
 
     for (flog.entries()) |entry| {
-        try testing.expect(std.mem.indexOf(u8, entry.detail, "recursion limit") == null);
+        try testing.expect(std.mem.find(u8, entry.detail, "recursion limit") == null);
     }
 }
 
@@ -2242,7 +2242,7 @@ test "interpreter: .each past a failed `system` keeps iterating" {
     try testing.expect(err == null);
 
     inline for (.{ "a.txt", "b.txt" }) |name| {
-        const p = try std.fs.path.join(
+        const p = try std.Io.Dir.path.join(
             testing.allocator,
             &.{ prefix, "Cellar", "testpkg", "1.0", "share", name },
         );
@@ -3238,18 +3238,16 @@ test "interpreter: <<~ output is byte-identical to system Ruby" {
         const prefix = scratch.path;
 
         // Native: evaluate the heredoc and write it under the prefix.
-        const native_src = try std.fmt.allocPrint(
-            a,
+        const native_src = try a.print(
             "x = \"world\"\ngreeting = <<~EOS\n{s}EOS\n(etc/\"out.conf\").write greeting\n",
             .{c.body},
         );
         try testing.expect((try runSnippet(&arena, native_src, prefix)) == null);
-        const native_path = try std.fs.path.join(a, &.{ prefix, "etc", "out.conf" });
+        const native_path = try std.Io.Dir.path.join(a, &.{ prefix, "etc", "out.conf" });
 
         // Reference: real Ruby writes the same heredoc source to a sibling file.
-        const ruby_path = try std.fs.path.join(a, &.{ prefix, "out.ruby" });
-        const ruby_prog = try std.fmt.allocPrint(
-            a,
+        const ruby_path = try std.Io.Dir.path.join(a, &.{ prefix, "out.ruby" });
+        const ruby_prog = try a.print(
             "x = \"world\"\nFile.write(\"{s}\", <<~EOS)\n{s}EOS\n",
             .{ ruby_path, c.body },
         );
@@ -3287,12 +3285,12 @@ test "interpreter: ln_s with a relative target links instead of aborting" {
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 
-    const link = try std.fs.path.join(
+    const link = try std.Io.Dir.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "bin", "tool" },
     );
     defer testing.allocator.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try test_io.cwd().readLink(std.Options.debug_io, link, &buf);
     try testing.expectEqualStrings("../libexec/tool", buf[0..n]);
     // Resolves through to the real file, so the keg is actually usable.

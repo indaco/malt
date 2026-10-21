@@ -103,7 +103,7 @@ test "color off + emoji on: no ANSI codes leak through" {
     const s = try render(.ok, "Z", "d", .{ .color = false, .emoji = true });
     defer testing.allocator.free(s);
     // No \x1b anywhere — the emoji glyph is fine (multibyte but not ANSI).
-    try testing.expect(std.mem.indexOf(u8, s, "\x1b") == null);
+    try testing.expect(std.mem.find(u8, s, "\x1b") == null);
     try testing.expectEqualStrings("  ✓ Z — d\n", s);
 }
 
@@ -142,8 +142,8 @@ test "empty detail string still renders (edge case)" {
 test "null detail omits the em-dash entirely" {
     const s = try render(.ok, "N", null, .{ .color = false, .emoji = false });
     defer testing.allocator.free(s);
-    try testing.expect(std.mem.indexOf(u8, s, "—") == null);
-    try testing.expect(std.mem.indexOf(u8, s, "-") == null);
+    try testing.expect(std.mem.find(u8, s, "—") == null);
+    try testing.expect(std.mem.find(u8, s, "-") == null);
 }
 
 // ── mirror-override reporting ───────────────────────────────────────
@@ -280,7 +280,7 @@ test "writeTapForgeHuman shows the host of a pinned tap, not its SHA" {
         "  > Registered taps:\n        grp/tap [gitlab.com]\n",
         aw.written(),
     );
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "0123456") == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "0123456") == null);
 }
 
 test "writeTapForgeJson omits the commit SHA for a pinned tap" {
@@ -547,10 +547,10 @@ test "printCheck appends consecutive rows instead of overwriting" {
     doctor.printCheck("Row C", .err_status, null);
 
     const s = buf.items;
-    try testing.expect(std.mem.indexOf(u8, s, "Row A") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "Row B") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "Row C") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "detail b") != null);
+    try testing.expect(std.mem.find(u8, s, "Row A") != null);
+    try testing.expect(std.mem.find(u8, s, "Row B") != null);
+    try testing.expect(std.mem.find(u8, s, "Row C") != null);
+    try testing.expect(std.mem.find(u8, s, "detail b") != null);
 }
 
 test "printCheck emits plain-mode bytes identical to renderCheckRow" {
@@ -585,7 +585,7 @@ test "printCheck handles null detail without em-dash separator" {
 
     doctor.printCheck("Stale lock", .ok, null);
     try testing.expectEqualStrings("  * Stale lock\n", buf.items);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "—") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "—") == null);
 }
 
 test "printCheck colour+emoji mode wraps glyph in ANSI" {

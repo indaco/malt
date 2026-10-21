@@ -81,8 +81,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -191,7 +190,7 @@ test "walkPrefix: respects max_findings cap" {
     // Seed 5 world-writable files.
     for (0..5) |i| {
         var buf: [16]u8 = undefined;
-        const name = try std.fmt.bufPrint(&buf, "f{d}", .{i});
+        const name = try std.mem.print(&buf, "f{d}", .{i});
         const p = fx.p(name);
         (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
         if (c.chmod(p.ptr, 0o666) != 0) return error.TestUnexpectedResult;
@@ -342,7 +341,7 @@ test "walkPrefix: entries beyond max_path_bytes are still audited" {
     var dir = try std.Io.Dir.openDirAbsolute(io, fx.base, .{});
     defer dir.close(io);
     var depth: usize = 0;
-    while (fx.base.len + depth * (seg.len + 1) <= std.fs.max_path_bytes) : (depth += 1) {
+    while (fx.base.len + depth * (seg.len + 1) <= std.Io.Dir.max_path_bytes) : (depth += 1) {
         try dir.createDir(io, seg, .default_dir);
         const child = try dir.openDir(io, seg, .{});
         dir.close(io);
@@ -357,7 +356,7 @@ test "walkPrefix: entries beyond max_path_bytes are still audited" {
     var saw_deep = false;
     for (findings) |f| {
         if (std.mem.endsWith(u8, f.path, "/evil")) {
-            try testing.expect(f.path.len > std.fs.max_path_bytes);
+            try testing.expect(f.path.len > std.Io.Dir.max_path_bytes);
             try testing.expect(f.report.other_writable);
             saw_deep = true;
         }

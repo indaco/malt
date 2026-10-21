@@ -35,22 +35,22 @@ pub const OutputSink = struct {
     /// the rendered bytes then dispatch through the runtime vtable.
     pub fn info(self: *const OutputSink, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const msg = std.mem.print(&buf, fmt, args) catch return;
         self.writeInfo(self.ctx, msg);
     }
     pub fn warn(self: *const OutputSink, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const msg = std.mem.print(&buf, fmt, args) catch return;
         self.writeWarn(self.ctx, msg);
     }
     pub fn success(self: *const OutputSink, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const msg = std.mem.print(&buf, fmt, args) catch return;
         self.writeSuccess(self.ctx, msg);
     }
     pub fn err(self: *const OutputSink, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const msg = std.mem.print(&buf, fmt, args) catch return;
         self.writeErr(self.ctx, msg);
     }
 };
@@ -119,8 +119,8 @@ test "terminal sink forwards human lines to ui/output" {
     terminal.info("hello {d}", .{7});
     terminal.err("boom", .{});
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "hello 7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "boom") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "hello 7") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "boom") != null);
 }
 
 test "silent sink swallows every human line" {

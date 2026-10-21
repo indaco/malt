@@ -48,7 +48,7 @@ test "a named theme paints the selected row's accent right before reverse-video"
     installed.render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
 
     // The accent SGR lands immediately before the reverse-video that backgrounds it.
-    try testing.expect(std.mem.indexOf(u8, f.slice(), dracula_accent ++ reverse) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), dracula_accent ++ reverse) != null);
 }
 
 test "the default theme keeps the selection plain reverse-video (no accent prefix)" {
@@ -61,8 +61,8 @@ test "the default theme keeps the selection plain reverse-video (no accent prefi
     s.chrome.view.selected = 1;
     installed.render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
 
-    try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null); // still highlighted
-    try testing.expect(std.mem.indexOf(u8, f.slice(), dracula_accent ++ reverse) == null); // but no accent bg
+    try testing.expect(std.mem.find(u8, f.slice(), reverse) != null); // still highlighted
+    try testing.expect(std.mem.find(u8, f.slice(), dracula_accent ++ reverse) == null); // but no accent bg
 }
 
 test "a named theme paints the active tab block's accent right before reverse-video" {
@@ -73,7 +73,7 @@ test "a named theme paints the active tab block's accent right before reverse-vi
     const titles: [tab_bar.count][]const u8 = .{ "Search", "Installed", "Outdated", "Services", "Doctor" };
     const out = tab_bar.render(&buf, .outdated, titles, 80);
 
-    try testing.expect(std.mem.indexOf(u8, out, dracula_accent ++ reverse) != null);
+    try testing.expect(std.mem.find(u8, out, dracula_accent ++ reverse) != null);
 }
 
 // Acceptance: all five tabs and the tab bar share the one reverse-video seam in
@@ -97,7 +97,7 @@ test "no reverse-video literal remains under src/tui" {
 
         // The needle is the *source* spelling of the escape (a backslash, then
         // `x1b[7m`), not the rendered ESC byte the assertions above match.
-        if (std.mem.indexOf(u8, content, "\\x1b[7m") != null) {
+        if (std.mem.find(u8, content, "\\x1b[7m") != null) {
             std.debug.print("src/tui/{s} still contains a raw reverse-video literal\n", .{entry.path});
             return error.RawReverseLiteral;
         }

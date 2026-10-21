@@ -599,7 +599,7 @@ pub fn findFailedDep(
 pub const MaterializeResult = struct {
     ok: bool,
     err: ?cellar_mod.CellarError,
-    keg_path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    keg_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
     keg_path_len: usize = 0,
 
     pub fn kegPath(self: *const MaterializeResult) []const u8 {
@@ -987,8 +987,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -1000,8 +999,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1227,8 +1225,7 @@ test "downloadBottleToStore returns false when the store already holds the bottl
     // independent of internal field shape changes.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const formula_json = try std.fmt.allocPrint(
-        arena.allocator(),
+    const formula_json = try arena.allocator().print(
         \\{{
         \\  "name": "warm",
         \\  "full_name": "warm",
@@ -1277,10 +1274,10 @@ test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across 
 
     const a = ctx_value.arena.allocator();
     // Mirror the worker's real allocation mix: a name dupe + KB-shaped
-    // body buffer + a result string built via `allocPrint`.
+    // body buffer + a result string built via `Allocator.print`.
     _ = try a.dupe(u8, "wget");
     _ = try a.alloc(u8, 4096);
-    const result = try std.fmt.allocPrint(a, "fetched-{s}", .{"wget"});
+    const result = try a.print("fetched-{s}", .{"wget"});
     ctx_value.result = result;
     try std.testing.expectEqualStrings("fetched-wget", ctx_value.result.?);
 }

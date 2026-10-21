@@ -24,7 +24,7 @@ const Scratch = struct {
         const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -47,7 +47,7 @@ fn unquiet() void {
 
 fn seedRows(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -183,7 +183,7 @@ test "execute --json emits a JSON dump" {
 /// shape of `mt list > out.txt` or a pipe.
 fn executeToFile(s: *const Scratch, args: []const []const u8, verbose: bool) ![]u8 {
     const io = std.Options.debug_io;
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/stdout.txt", .{s.path});
     defer testing.allocator.free(out_path);
     const f = try std.Io.Dir.createFileAbsolute(io, out_path, .{});
     output.setVerbose(verbose);
@@ -237,7 +237,7 @@ fn expectListRefusesDb() !void {
         output.setMode(mode);
         err_buf.clearRetainingCapacity();
         try testing.expectError(error.Aborted, list.execute(&ctxWithSink(), &.{}));
-        try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+        try testing.expect(std.mem.find(u8, err_buf.items, "install database") != null);
     }
 }
 
@@ -245,7 +245,7 @@ test "execute reports a malt.db that is not a database instead of an empty list"
     var s = try Scratch.init(testing.allocator, "garbage_db");
     defer s.deinit(testing.allocator);
     var path_buf: [512]u8 = undefined;
-    const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.mem.print(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
     try expectListRefusesDb();
@@ -257,7 +257,7 @@ test "execute reports a db/ directory it cannot look into instead of an empty li
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
     var dir_buf: [512]u8 = undefined;
-    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.mem.print(&dir_buf, "{s}/db", .{s.path}));
     defer test_io.unwallDir(std.Options.debug_io, walled);
     try expectListRefusesDb();
 }

@@ -193,13 +193,13 @@ pub fn run(
 
     // Bundles directory + advisory lock for idempotency.
     const prefix: []const u8 = opts.prefix orelse atomic.maltPrefixOrAbort();
-    const bundles_dir = std.fmt.allocPrint(allocator, "{s}/var/malt/bundles", .{prefix}) catch
+    const bundles_dir = allocator.print("{s}/var/malt/bundles", .{prefix}) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(bundles_dir);
     // bundles/ may already exist; the lock file create below surfaces real errors.
     if (!opts.dry_run) std.Io.Dir.cwd().createDirPath(io, bundles_dir) catch {};
 
-    const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, lock_name }) catch
+    const lock_path = allocator.print("{s}/{s}.lock", .{ bundles_dir, lock_name }) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(lock_path);
 

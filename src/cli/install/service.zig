@@ -37,17 +37,17 @@ pub fn specFromDef(
     for (def.env, env) |src, *dst| dst.* = .{ .key = try aa.dupe(u8, src.key), .value = try plist_mod.expandPrefix(aa, src.value, prefix) };
 
     return .{
-        .label = try std.fmt.allocPrint(aa, "com.malt.{s}", .{name}),
+        .label = try aa.print("com.malt.{s}", .{name}),
         .program_args = run,
         .working_dir = if (def.working_dir) |wd| try plist_mod.expandPrefix(aa, wd, prefix) else null,
         .stdout_path = if (def.log_path) |lp|
             try plist_mod.expandPrefix(aa, lp, prefix)
         else
-            try std.fmt.allocPrint(aa, "{s}/var/log/{s}.out", .{ prefix, name }),
+            try aa.print("{s}/var/log/{s}.out", .{ prefix, name }),
         .stderr_path = if (def.error_log_path) |elp|
             try plist_mod.expandPrefix(aa, elp, prefix)
         else
-            try std.fmt.allocPrint(aa, "{s}/var/log/{s}.err", .{ prefix, name }),
+            try aa.print("{s}/var/log/{s}.err", .{ prefix, name }),
         .schedule = def.schedule,
         .keep_alive = def.keep_alive,
         .stop_timeout = def.stop_timeout,
@@ -102,7 +102,7 @@ fn retireDropped(
     sink: sink_mod.OutputSink,
 ) void {
     if (!hasKegService(db, name)) return;
-    const label = std.fmt.allocPrint(allocator, "com.malt.{s}", .{name}) catch return;
+    const label = allocator.print("com.malt.{s}", .{name}) catch return;
     defer allocator.free(label);
     applyDropped(io, allocator, db, name, pkg_version, label, supervisor_mod.probeRuntime(io, allocator, label), sink);
 }
@@ -251,8 +251,8 @@ fn liftShipped(
 ) LiftError!plist_mod.ServiceSpec {
     // Both become path components under the Cellar.
     if (!path_component.isPathComponent(label) or !path_component.isPathComponent(name)) return error.BadLabel;
-    const keg = try std.fmt.allocPrint(aa, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
-    const path = try std.fmt.allocPrint(aa, "{s}/{s}.plist", .{ keg, label });
+    const keg = try aa.print("{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
+    const path = try aa.print("{s}/{s}.plist", .{ keg, label });
     // Formulas ship `<label>.plist` as a link to their real file, and the
     // extractor lets a link climb one level above its root (the prefix,
     // once the keg is in the Cellar); resolve it, but only into the keg.
@@ -278,9 +278,9 @@ fn shippedRefusal(buf: []u8, err: LiftError, diag: shipped_plist.Diag) []const u
         error.LabelMismatch => "shipped plist label does not match the declared service name",
         error.NoProgramArguments => "shipped plist has no ProgramArguments",
         // `max_key_len` keeps every key inside the caller's buffer.
-        error.UnknownKey => std.fmt.bufPrint(buf, "shipped plist uses {s}, which malt does not adopt", .{diag.key}) catch unreachable,
-        error.DuplicateKey => std.fmt.bufPrint(buf, "shipped plist repeats {s}", .{diag.key}) catch unreachable,
-        error.BadValue => std.fmt.bufPrint(buf, "shipped plist gives {s} a shape malt does not adopt", .{diag.key}) catch unreachable,
+        error.UnknownKey => std.mem.print(buf, "shipped plist uses {s}, which malt does not adopt", .{diag.key}) catch unreachable,
+        error.DuplicateKey => std.mem.print(buf, "shipped plist repeats {s}", .{diag.key}) catch unreachable,
+        error.BadValue => std.mem.print(buf, "shipped plist gives {s} a shape malt does not adopt", .{diag.key}) catch unreachable,
         error.OutOfMemory => "out of memory",
     };
 }
@@ -305,12 +305,12 @@ fn registerSpec(
     const spec = withEnvOverrides(io, arena.allocator(), environ, formula_spec, name, sink) orelse formula_spec;
 
     // launchd creates the log files on first run; a missing dir surfaces there.
-    var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = std.fmt.bufPrint(&log_buf, "{s}/var/log", .{prefix}) catch return;
+    var log_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const log_dir = std.mem.print(&log_buf, "{s}/var/log", .{prefix}) catch return;
     std.Io.Dir.cwd().createDirPath(io, log_dir) catch {};
 
-    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
+    var cellar_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cellar_path = std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
 
     const ctx: supervisor_mod.SupervisorCtx = .{ .allocator = allocator, .io = io, .db = db };
     // Dropped first so an interrupted or failed register leaves no spec
@@ -452,11 +452,11 @@ fn kegNameOf(aa: std.mem.Allocator, db: *sqlite.Database, label: []const u8) ?[]
 /// `~/.config` rather than resolving against the cwd.
 fn overridePath(aa: std.mem.Allocator, environ: std.process.Environ, name: []const u8) !?[:0]const u8 {
     if (!path_component.isPathComponent(name)) return null;
-    if (std.process.Environ.getPosix(environ, "XDG_CONFIG_HOME")) |xdg| if (std.fs.path.isAbsolute(xdg))
-        return try std.fmt.allocPrintSentinel(aa, "{s}/malt/services/{s}.env", .{ xdg, name }, 0);
+    if (std.process.Environ.getPosix(environ, "XDG_CONFIG_HOME")) |xdg| if (std.Io.Dir.path.isAbsolute(xdg))
+        return try aa.printSentinel("{s}/malt/services/{s}.env", .{ xdg, name }, 0);
     const home = std.process.Environ.getPosix(environ, "HOME") orelse return null;
-    if (!std.fs.path.isAbsolute(home)) return null;
-    return try std.fmt.allocPrintSentinel(aa, "{s}/.config/malt/services/{s}.env", .{ home, name }, 0);
+    if (!std.Io.Dir.path.isAbsolute(home)) return null;
+    return try aa.printSentinel("{s}/.config/malt/services/{s}.env", .{ home, name }, 0);
 }
 
 fn overrideRefusal(err: env_override.Error) []const u8 {
@@ -525,7 +525,7 @@ pub fn defFromRuby(
 /// `<root>/"leaf"`, and `Formula["dep"].<root>/"leaf"` with an opt root.
 fn rubyPath(aa: std.mem.Allocator, tok: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
     if (tok.len >= 2 and tok[0] == '"' and tok[tok.len - 1] == '"') return rubyLiteral(aa, tok[1 .. tok.len - 1], name, pkg_version);
-    if (std.mem.indexOf(u8, tok, "#{") != null) return null;
+    if (std.mem.find(u8, tok, "#{") != null) return null;
 
     var owner = name;
     var rest = tok;
@@ -549,23 +549,23 @@ fn rubyPath(aa: std.mem.Allocator, tok: []const u8, name: []const u8, pkg_versio
     const sub = quoted[0 .. quoted.len - 1];
     // Also catches a chained `/"a"/"b"` leaf, whose quotes would land in the path.
     if (!isVerbatim(sub)) return null;
-    return std.fmt.allocPrint(aa, "{s}/{s}", .{ base, sub }) catch null;
+    return aa.print("{s}/{s}", .{ base, sub }) catch null;
 }
 
 /// Whether a quoted literal's body means the same in Ruby as its bytes,
 /// `#{...}` aside. An inner `"` makes it several literals, escapes need a
 /// Ruby lexer, and `#@ivar`/`#$global` interpolate state malt never has.
 fn isVerbatim(body: []const u8) bool {
-    return std.mem.indexOfAny(u8, body, "\"\\") == null and
-        std.mem.indexOf(u8, body, "#@") == null and
-        std.mem.indexOf(u8, body, "#$") == null;
+    return std.mem.findAny(u8, body, "\"\\") == null and
+        std.mem.find(u8, body, "#@") == null and
+        std.mem.find(u8, body, "#$") == null;
 }
 
 /// Body of a quoted literal, with each `#{<root>}` rendered as its bare
 /// token would be.
 fn rubyLiteral(aa: std.mem.Allocator, body: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
     if (!isVerbatim(body)) return null;
-    if (std.mem.indexOf(u8, body, "#{") == null) return body;
+    if (std.mem.find(u8, body, "#{") == null) return body;
 
     var out: std.ArrayList(u8) = .empty;
     var rest = body;
@@ -585,14 +585,14 @@ fn rubyLiteral(aa: std.mem.Allocator, body: []const u8, name: []const u8, pkg_ve
 /// Cellar leaf.
 fn rootBase(aa: std.mem.Allocator, root: RubyRoot, owner: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
     return switch (root) {
-        .opt_bin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/bin", .{owner}),
-        .opt_sbin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/sbin", .{owner}),
-        .opt_libexec => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/libexec", .{owner}),
-        .opt_prefix => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}", .{owner}),
-        .bin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}/bin", .{ name, pkg_version }),
-        .sbin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}/sbin", .{ name, pkg_version }),
-        .libexec => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}/libexec", .{ name, pkg_version }),
-        .prefix => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}", .{ name, pkg_version }),
+        .opt_bin => aa.print("$HOMEBREW_PREFIX/opt/{s}/bin", .{owner}),
+        .opt_sbin => aa.print("$HOMEBREW_PREFIX/opt/{s}/sbin", .{owner}),
+        .opt_libexec => aa.print("$HOMEBREW_PREFIX/opt/{s}/libexec", .{owner}),
+        .opt_prefix => aa.print("$HOMEBREW_PREFIX/opt/{s}", .{owner}),
+        .bin => aa.print("$HOMEBREW_PREFIX/Cellar/{s}/{s}/bin", .{ name, pkg_version }),
+        .sbin => aa.print("$HOMEBREW_PREFIX/Cellar/{s}/{s}/sbin", .{ name, pkg_version }),
+        .libexec => aa.print("$HOMEBREW_PREFIX/Cellar/{s}/{s}/libexec", .{ name, pkg_version }),
+        .prefix => aa.print("$HOMEBREW_PREFIX/Cellar/{s}/{s}", .{ name, pkg_version }),
         .@"var" => aa.dupe(u8, "$HOMEBREW_PREFIX/var"),
         .etc => aa.dupe(u8, "$HOMEBREW_PREFIX/etc"),
         .homebrew_prefix => aa.dupe(u8, "$HOMEBREW_PREFIX"),
@@ -835,7 +835,7 @@ var prefix_seq: std.atomic.Value(u32) = .init(0);
 /// A private prefix per call: the suite may run without the harness prefix
 /// (the real `/opt/malt` is the fallback) or as several concurrent copies.
 fn scratchPrefix() ![:0]const u8 {
-    return std.fmt.allocPrintSentinel(testing.allocator, "/tmp/malt_retire_{d}_{d}", .{ std.c.getpid(), prefix_seq.fetchAdd(1, .monotonic) }, 0);
+    return testing.allocator.printSentinel("/tmp/malt_retire_{d}_{d}", .{ std.c.getpid(), prefix_seq.fetchAdd(1, .monotonic) }, 0);
 }
 
 test "applyDropped retires the previous version's row when no job is loaded" {
@@ -865,8 +865,8 @@ test "applyDropped retires the previous version's row when no job is loaded" {
 
     try testing.expect(!hasKegService(&db, "tree"));
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.Options.debug_io, dir, .{}));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "retired") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "declares no service") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "retired") != null);
 }
 
 test "applyDropped keeps the row when launchd could not be asked" {
@@ -887,8 +887,8 @@ test "applyDropped keeps the row when launchd could not be asked" {
     applyDropped(std.Options.debug_io, testing.allocator, &db, "tree", "2.2.1", "com.malt.tree", null, sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not ask launchd") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "mt reinstall tree") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not ask launchd") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "mt reinstall tree") != null);
 }
 
 test "applyDropped keeps the row while the previous version's job is loaded" {
@@ -909,9 +909,9 @@ test "applyDropped keeps the row while the previous version's job is loaded" {
     applyDropped(std.Options.debug_io, testing.allocator, &db, "tree", "2.2.1", "com.malt.tree", .running, sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "mt services stop tree") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "mt reinstall tree") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "declares no service") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "mt services stop tree") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "mt reinstall tree") != null);
 }
 
 test "register stays silent for a formula that never had a service" {
@@ -954,8 +954,8 @@ test "register keeps the row and says why when the new version's service block i
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: unsupported service block") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: unsupported service block") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "register retires the previous version's row when the new version's service is linux-only" {
@@ -989,8 +989,8 @@ test "register retires the previous version's row when the new version's service
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service; retired the registration from the previous version") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "declares no service; retired the registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service") == null);
 }
 
 test "register says a declared shipped plist is missing from the keg and registers nothing" {
@@ -1013,8 +1013,8 @@ test "register says a declared shipped plist is missing from the keg and registe
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "kept the service registration") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "kept the service registration") == null);
 }
 
 test "register keeps the row and says why when the new version ships its own plist" {
@@ -1038,8 +1038,8 @@ test "register keeps the row and says why when the new version ships its own pli
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "registerRuby retires the previous version's row when the block is gone" {
@@ -1061,7 +1061,7 @@ test "registerRuby retires the previous version's row when the block is gone" {
     registerRuby(threaded.io(), .empty, testing.allocator, &db, null, false, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "declares no service") != null);
 }
 
 test "retireDropped ignores a registration that only shares the formula's name as a label" {
@@ -1103,7 +1103,7 @@ test "registerRuby keeps the row when the block is declared but could not be rea
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, null, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "registerRuby keeps the row when the block has a token it cannot render" {
@@ -1121,8 +1121,8 @@ test "registerRuby keeps the row when the block has a token it cannot render" {
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, .{ .run = &.{"\"a\\\\t\""} }, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: unsupported service block") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: unsupported service block") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "registerRuby says nothing about a refused block on a fresh install" {
@@ -1150,10 +1150,10 @@ const shipd_json =
 /// A keg at `<prefix>/Cellar/tree/2.2.1` shipping `org.example.shipd.plist`
 /// with `body`; returns the file's path.
 fn seedShippedKeg(prefix: []const u8, body: []const u8) ![]u8 {
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tree/2.2.1", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/tree/2.2.1", .{prefix});
     defer testing.allocator.free(keg);
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, keg);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/org.example.shipd.plist", .{keg});
+    const path = try testing.allocator.print("{s}/org.example.shipd.plist", .{keg});
     errdefer testing.allocator.free(path);
     const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
@@ -1162,7 +1162,7 @@ fn seedShippedKeg(prefix: []const u8, body: []const u8) ![]u8 {
 }
 
 fn shippedBody(aa: std.mem.Allocator, prefix: []const u8, extra: []const u8) ![]u8 {
-    return std.fmt.allocPrint(aa,
+    return aa.print(
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         \\<plist version="1.0">
@@ -1182,7 +1182,7 @@ fn shippedBody(aa: std.mem.Allocator, prefix: []const u8, extra: []const u8) ![]
 }
 
 fn renderedPlist(prefix: []const u8) ![]u8 {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/var/malt/services/com.malt.tree/service.plist", .{prefix});
+    const path = try testing.allocator.print("{s}/var/malt/services/com.malt.tree/service.plist", .{prefix});
     defer testing.allocator.free(path);
     return std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, testing.allocator, .unlimited);
 }
@@ -1227,14 +1227,14 @@ test "register lifts the plist a core formula ships into a malt-rendered service
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service") == null);
     const rendered = try renderedPlist(prefix);
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "<string>com.malt.tree</string>") != null);
-    const head = try std.fmt.allocPrint(testing.allocator, "<string>{s}/opt/tree/bin/tree</string>", .{prefix});
+    try testing.expect(std.mem.find(u8, rendered, "<string>com.malt.tree</string>") != null);
+    const head = try testing.allocator.print("<string>{s}/opt/tree/bin/tree</string>", .{prefix});
     defer testing.allocator.free(head);
-    try testing.expect(std.mem.indexOf(u8, rendered, head) != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "<string>TREE_SOCKET</string>") != null);
+    try testing.expect(std.mem.find(u8, rendered, head) != null);
+    try testing.expect(std.mem.find(u8, rendered, "<string>TREE_SOCKET</string>") != null);
     const after = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, keg_plist, testing.allocator, .unlimited);
     defer testing.allocator.free(after);
     try testing.expectEqualStrings(body, after);
@@ -1260,11 +1260,11 @@ test "register lifts a shipped plist that the keg carries as a symlink to its re
     const body = try shippedBody(arena.allocator(), prefix, "");
     const linked = try seedShippedKeg(prefix, body);
     defer testing.allocator.free(linked);
-    const real = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tree/2.2.1/macos_tree.plist", .{prefix});
+    const real = try testing.allocator.print("{s}/Cellar/tree/2.2.1/macos_tree.plist", .{prefix});
     defer testing.allocator.free(real);
     try std.Io.Dir.renameAbsolute(linked, real, std.Options.debug_io);
     // Relative target, as `install_symlink` writes it.
-    var keg = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, std.fs.path.dirname(real).?, .{});
+    var keg = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, std.Io.Dir.path.dirname(real).?, .{});
     defer keg.close(std.Options.debug_io);
     try keg.symLink(std.Options.debug_io, "macos_tree.plist", "org.example.shipd.plist", .{});
 
@@ -1278,7 +1278,7 @@ test "register lifts a shipped plist that the keg carries as a symlink to its re
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service") == null);
 }
 
 test "register refreshes the previous version's row when the new keg's shipped plist lifts" {
@@ -1310,17 +1310,17 @@ test "register refreshes the previous version's row when the new keg's shipped p
     defer threaded.deinit();
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "kept the service registration") == null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "kept the service registration") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service") == null);
     var stmt = try db.prepare("SELECT plist_path FROM services WHERE keg_name = 'tree';");
     defer stmt.finalize();
     try testing.expect(try stmt.step());
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}/var/malt/services/com.malt.tree/service.plist", .{prefix});
+    const want = try testing.allocator.print("{s}/var/malt/services/com.malt.tree/service.plist", .{prefix});
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, std.mem.sliceTo(stmt.columnText(0).?, 0));
     const rendered = try renderedPlist(prefix);
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "<string>--nofork</string>") != null);
+    try testing.expect(std.mem.find(u8, rendered, "<string>--nofork</string>") != null);
 }
 
 test "register refuses a shipped label from the API that is not a plain file name" {
@@ -1343,7 +1343,7 @@ test "register refuses a shipped label from the API that is not a plain file nam
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
 }
 
 test "register refuses a shipped plist whose symlink leaves the keg" {
@@ -1364,11 +1364,11 @@ test "register refuses a shipped plist whose symlink leaves the keg" {
     const body = try shippedBody(arena.allocator(), prefix, "");
     const linked = try seedShippedKeg(prefix, body);
     defer testing.allocator.free(linked);
-    const outside = try std.fmt.allocPrint(testing.allocator, "{s}/etc/evil.plist", .{prefix});
+    const outside = try testing.allocator.print("{s}/etc/evil.plist", .{prefix});
     defer testing.allocator.free(outside);
-    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(outside).?);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, std.Io.Dir.path.dirname(outside).?);
     try std.Io.Dir.renameAbsolute(linked, outside, std.Options.debug_io);
-    var keg = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, std.fs.path.dirname(linked).?, .{});
+    var keg = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, std.Io.Dir.path.dirname(linked).?, .{});
     defer keg.close(std.Options.debug_io);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -1380,7 +1380,7 @@ test "register refuses a shipped plist whose symlink leaves the keg" {
     try keg.symLink(std.Options.debug_io, "../../../etc/evil.plist", "org.example.shipd.plist", .{});
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
 
     // Leaf stays lexically in the keg; an intermediate directory link
     // carries it out.
@@ -1390,7 +1390,7 @@ test "register refuses a shipped plist whose symlink leaves the keg" {
     buf.clearRetainingCapacity();
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
 }
 
 test "register refuses a shipped plist over the size cap even when its head parses" {
@@ -1421,7 +1421,7 @@ test "register refuses a shipped plist over the size cap even when its head pars
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist is not a launchd plist malt can read") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist is not a launchd plist malt can read") != null);
 }
 
 test "register refuses a shipped plist that uses a key malt does not adopt and names it" {
@@ -1448,10 +1448,10 @@ test "register refuses a shipped plist that uses a key malt does not adopt and n
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist uses MachServices, which malt does not adopt") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist uses MachServices, which malt does not adopt") != null);
     // The seeded row is the previous version's; a refusal keeps it.
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "register refuses a shipped plist whose Label is not the declared one" {
@@ -1479,7 +1479,7 @@ test "register refuses a shipped plist whose Label is not the declared one" {
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label does not match the declared service name") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist label does not match the declared service name") != null);
 }
 
 test "register refuses a shipped plist whose executable escapes the keg and opt roots" {
@@ -1508,7 +1508,7 @@ test "register refuses a shipped plist whose executable escapes the keg and opt 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: InvalidService") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: InvalidService") != null);
 }
 
 test "register says it kept the previous row when the new keg's shipped plist fails validation" {
@@ -1538,8 +1538,8 @@ test "register says it kept the previous row when the new keg's shipped plist fa
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: InvalidService") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: InvalidService") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "registerRuby lifts the plist a tap formula ships" {
@@ -1569,7 +1569,7 @@ test "registerRuby lifts the plist a tap formula ships" {
     registerRuby(threaded.io(), .empty, testing.allocator, &db, null, true, "org.example.shipd", "tree", "2.2.1", prefix, sink_mod.terminal);
 
     try testing.expect(hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service") == null);
 }
 
 test "registerRuby refuses a shipped label that is not a plain file name" {
@@ -1587,21 +1587,21 @@ test "registerRuby refuses a shipped label that is not a plain file name" {
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, null, true, "../../etc/evil", "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(!hasKegService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
 }
 
 /// An environ carrying only `XDG_CONFIG_HOME=<root>`, owned by `aa`.
 fn xdgEnviron(aa: std.mem.Allocator, root: []const u8) !std.process.Environ {
     const entries = try aa.allocSentinel(?[*:0]const u8, 1, null);
-    entries[0] = (try std.fmt.allocPrintSentinel(aa, "XDG_CONFIG_HOME={s}", .{root}, 0)).ptr;
+    entries[0] = (try aa.printSentinel("XDG_CONFIG_HOME={s}", .{root}, 0)).ptr;
     return .{ .block = .{ .slice = entries } };
 }
 
 fn writeEnvFile(cfg: []const u8, body: []const u8) !void {
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/malt/services", .{cfg});
+    const dir = try testing.allocator.print("{s}/malt/services", .{cfg});
     defer testing.allocator.free(dir);
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/tree.env", .{dir});
+    const path = try testing.allocator.print("{s}/tree.env", .{dir});
     defer testing.allocator.free(path);
     try std.Io.Dir.cwd().writeFile(std.Options.debug_io, .{ .sub_path = path, .data = body });
 }
@@ -1630,7 +1630,7 @@ test "refreshOverrides applies an edited .env to a registered service without a 
     ));
     defer testing.allocator.free(keg_plist);
 
-    const cfg = try std.fmt.allocPrint(aa, "{s}/cfg", .{prefix});
+    const cfg = try aa.print("{s}/cfg", .{prefix});
     try writeEnvFile(cfg, "OLD=1\n");
     const environ = try xdgEnviron(aa, cfg);
 
@@ -1640,7 +1640,7 @@ test "refreshOverrides applies an edited .env to a registered service without a 
     register(threaded.io(), environ, testing.allocator, &db, &formula, prefix, sink_mod.silent);
     const before = try renderedPlist(prefix);
     defer testing.allocator.free(before);
-    try testing.expect(std.mem.indexOf(u8, before, "<key>OLD</key>") != null);
+    try testing.expect(std.mem.find(u8, before, "<key>OLD</key>") != null);
 
     // A key dropped from the file must leave the plist too; only the saved
     // formula spec can tell it apart from one the formula declares.
@@ -1648,16 +1648,16 @@ test "refreshOverrides applies an edited .env to a registered service without a 
     refreshOverrides(std.Options.debug_io, environ, testing.allocator, &db, "com.malt.tree", sink_mod.silent);
     const after = try renderedPlist(prefix);
     defer testing.allocator.free(after);
-    try testing.expect(std.mem.indexOf(u8, after, "<key>OLD</key>") == null);
-    try testing.expect(std.mem.indexOf(u8, after, "<key>NEW</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, after, "<key>FROM_FORMULA</key>") != null);
+    try testing.expect(std.mem.find(u8, after, "<key>OLD</key>") == null);
+    try testing.expect(std.mem.find(u8, after, "<key>NEW</key>") != null);
+    try testing.expect(std.mem.find(u8, after, "<key>FROM_FORMULA</key>") != null);
 
     try writeEnvFile(cfg, "");
     refreshOverrides(std.Options.debug_io, environ, testing.allocator, &db, "tree", sink_mod.silent);
     const cleared = try renderedPlist(prefix);
     defer testing.allocator.free(cleared);
-    try testing.expect(std.mem.indexOf(u8, cleared, "<key>NEW</key>") == null);
-    try testing.expect(std.mem.indexOf(u8, cleared, "<key>FROM_FORMULA</key>") != null);
+    try testing.expect(std.mem.find(u8, cleared, "<key>NEW</key>") == null);
+    try testing.expect(std.mem.find(u8, cleared, "<key>FROM_FORMULA</key>") != null);
 }
 
 test "refreshOverrides leaves a registration with no saved formula spec untouched" {
@@ -1682,12 +1682,12 @@ test "refreshOverrides leaves a registration with no saved formula spec untouche
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.silent);
-    const saved = try std.fmt.allocPrint(aa, "{s}/var/malt/services/com.malt.tree/formula.json", .{prefix});
+    const saved = try aa.print("{s}/var/malt/services/com.malt.tree/formula.json", .{prefix});
     try std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, saved);
     const before = try renderedPlist(prefix);
     defer testing.allocator.free(before);
 
-    const cfg = try std.fmt.allocPrint(aa, "{s}/cfg", .{prefix});
+    const cfg = try aa.print("{s}/cfg", .{prefix});
     try writeEnvFile(cfg, "NEW=2\n");
     const environ = try xdgEnviron(aa, cfg);
     var buf: std.ArrayList(u8) = .empty;
@@ -1699,7 +1699,7 @@ test "refreshOverrides leaves a registration with no saved formula spec untouche
     defer testing.allocator.free(after);
     try testing.expectEqualStrings(before, after);
     // The user wrote a file; saying nothing would read as "applied".
-    try testing.expect(std.mem.indexOf(u8, buf.items, "mt reinstall tree") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "mt reinstall tree") != null);
 }
 
 test "refreshOverrides ignores a saved spec whose label names another service" {
@@ -1727,22 +1727,22 @@ test "refreshOverrides ignores a saved spec whose label names another service" {
 
     var saved = supervisor_mod.loadFormulaSpec(aa, std.Options.debug_io, "com.malt.tree").?;
     saved.spec.label = "com.malt.other";
-    const path = try std.fmt.allocPrint(aa, "{s}/var/malt/services/com.malt.tree/formula.json", .{prefix});
+    const path = try aa.print("{s}/var/malt/services/com.malt.tree/formula.json", .{prefix});
     try std.Io.Dir.cwd().writeFile(std.Options.debug_io, .{ .sub_path = path, .data = try std.json.Stringify.valueAlloc(aa, saved, .{}) });
 
     // A registered neighbour, so a misdirected write would land.
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, try supervisor_mod.serviceDir(aa, "com.malt.other"));
 
-    const cfg = try std.fmt.allocPrint(aa, "{s}/cfg", .{prefix});
+    const cfg = try aa.print("{s}/cfg", .{prefix});
     try writeEnvFile(cfg, "NEW=2\n");
     const environ = try xdgEnviron(aa, cfg);
     refreshOverrides(std.Options.debug_io, environ, testing.allocator, &db, "tree", sink_mod.silent);
 
-    const other = try std.fmt.allocPrint(aa, "{s}/var/malt/services/com.malt.other/service.plist", .{prefix});
+    const other = try aa.print("{s}/var/malt/services/com.malt.other/service.plist", .{prefix});
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.Options.debug_io, other, .{}));
     const after = try renderedPlist(prefix);
     defer testing.allocator.free(after);
-    try testing.expect(std.mem.indexOf(u8, after, "<key>NEW</key>") == null);
+    try testing.expect(std.mem.find(u8, after, "<key>NEW</key>") == null);
 }
 
 test "refreshOverrides keeps the live overrides when the edited file is refused" {
@@ -1762,7 +1762,7 @@ test "refreshOverrides keeps the live overrides when the edited file is refused"
     const aa = arena.allocator();
     const keg_plist = try seedShippedKeg(prefix, try shippedBody(aa, prefix, ""));
     defer testing.allocator.free(keg_plist);
-    const cfg = try std.fmt.allocPrint(aa, "{s}/cfg", .{prefix});
+    const cfg = try aa.print("{s}/cfg", .{prefix});
     const environ = try xdgEnviron(aa, cfg);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -1775,7 +1775,7 @@ test "refreshOverrides keeps the live overrides when the edited file is refused"
     refreshOverrides(std.Options.debug_io, environ, testing.allocator, &db, "tree", sink_mod.silent);
     const after = try renderedPlist(prefix);
     defer testing.allocator.free(after);
-    try testing.expect(std.mem.indexOf(u8, after, "<string>5433</string>") != null);
+    try testing.expect(std.mem.find(u8, after, "<string>5433</string>") != null);
 }
 
 test "register drops the previous formula spec before a registration that fails" {
@@ -1798,7 +1798,7 @@ test "register drops the previous formula spec before a registration that fails"
     const aa = arena.allocator();
     const dir = try supervisor_mod.serviceDir(aa, "com.malt.tree");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir);
-    const stale = try std.fmt.allocPrint(aa, "{s}/formula.json", .{dir});
+    const stale = try aa.print("{s}/formula.json", .{dir});
     try std.Io.Dir.cwd().writeFile(std.Options.debug_io, .{ .sub_path = stale, .data = "{}" });
     try std.Io.Dir.cwd().access(std.Options.debug_io, stale, .{});
 

@@ -73,17 +73,17 @@ fn checkSha(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError!
 
 fn cacheDir(buf: []u8, prefix: []const u8, version: u32, sha: []const u8) RelocatedStoreError![]u8 {
     try checkSha(buf, prefix, sha);
-    return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}", .{ prefix, version, sha }) catch
+    return std.mem.print(buf, "{s}/store-relocated/v{d}/{s}", .{ prefix, version, sha }) catch
         return RelocatedStoreError.PathTooLong;
 }
 
 fn cellarKegDir(buf: []u8, prefix: []const u8, name: []const u8, version: []const u8) RelocatedStoreError![]u8 {
-    return std.fmt.bufPrint(buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
+    return std.mem.print(buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return RelocatedStoreError.PathTooLong;
 }
 
 fn cellarParentDir(buf: []u8, prefix: []const u8, name: []const u8) RelocatedStoreError![]u8 {
-    return std.fmt.bufPrint(buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
+    return std.mem.print(buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
         return RelocatedStoreError.PathTooLong;
 }
 
@@ -145,7 +145,7 @@ fn saveFresh(
 
     // Ensure the versioned parent `<prefix>/store-relocated/v<N>/` exists.
     // Derive it from `dst` so the version segment stays in one place.
-    const parent = std.fs.path.dirname(dst) orelse return RelocatedStoreError.SaveFailed;
+    const parent = std.Io.Dir.path.dirname(dst) orelse return RelocatedStoreError.SaveFailed;
     std.Io.Dir.cwd().createDirPath(io, parent) catch return RelocatedStoreError.SaveFailed;
 
     // Atomic write: clone into a sibling temp dir, then rename into place.
@@ -155,7 +155,7 @@ fn saveFresh(
     var rand_bytes: [8]u8 = undefined;
     io.random(&rand_bytes);
     const rand_int = std.mem.bytesToValue(u64, &rand_bytes);
-    const tmp = std.fmt.bufPrint(&tmp_buf, "{s}.tmp.{x}", .{ dst, rand_int }) catch
+    const tmp = std.mem.print(&tmp_buf, "{s}.tmp.{x}", .{ dst, rand_int }) catch
         return RelocatedStoreError.PathTooLong;
     // Best-effort sweep of a stale temp from a previous crashed snapshot;
     // a real permission error here will resurface on the clone below.
@@ -238,7 +238,7 @@ pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreErr
 /// it — anything inside would be cloned into the user's keg.
 fn verifiedMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError![]u8 {
     try checkSha(buf, prefix, sha);
-    return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
+    return std.mem.print(buf, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
         return RelocatedStoreError.PathTooLong;
 }
 
@@ -246,7 +246,7 @@ fn verifiedMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreEr
 /// the snapshot dir for the same reason as the verified mark.
 fn labelMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError![]u8 {
     try checkSha(buf, prefix, sha);
-    return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}.keg", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
+    return std.mem.print(buf, "{s}/store-relocated/v{d}/{s}.keg", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
         return RelocatedStoreError.PathTooLong;
 }
 
@@ -254,7 +254,7 @@ fn writeLabel(io: std.Io, prefix: []const u8, sha: []const u8, name: []const u8,
     var buf: [512]u8 = undefined;
     const mark = labelMark(&buf, prefix, sha) catch return;
     var body_buf: [512]u8 = undefined;
-    const body = std.fmt.bufPrint(&body_buf, "{s}/{s}\n", .{ name, version }) catch return;
+    const body = std.mem.print(&body_buf, "{s}/{s}\n", .{ name, version }) catch return;
     const f = std.Io.Dir.createFileAbsolute(io, mark, .{}) catch return;
     defer f.close(io);
     f.writeStreamingAll(io, body) catch {};
@@ -265,7 +265,7 @@ fn labelMatches(io: std.Io, prefix: []const u8, sha: []const u8, name: []const u
     var buf: [512]u8 = undefined;
     const mark = labelMark(&buf, prefix, sha) catch return false;
     var want_buf: [512]u8 = undefined;
-    const want = std.fmt.bufPrint(&want_buf, "{s}/{s}\n", .{ name, version }) catch return false;
+    const want = std.mem.print(&want_buf, "{s}/{s}\n", .{ name, version }) catch return false;
     const f = std.Io.Dir.openFileAbsolute(io, mark, .{}) catch return false;
     defer f.close(io);
     // One byte past `want` so a longer label cannot pass as a prefix match.
@@ -303,7 +303,7 @@ pub const Reaped = struct { removed: u32 = 0, bytes: u64 = 0 };
 /// `v<N>/`, so an older version has no live reader to disturb.
 pub fn reapStaleVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, do_remove: bool) Reaped {
     var root_buf: [512]u8 = undefined;
-    const root = std.fmt.bufPrint(&root_buf, "{s}/store-relocated", .{prefix}) catch return .{};
+    const root = std.mem.print(&root_buf, "{s}/store-relocated", .{prefix}) catch return .{};
     var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return .{};
     defer dir.close(io);
 
@@ -329,7 +329,7 @@ pub fn reapStaleVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []con
     var reaped: Reaped = .{};
     for (stale.items) |name| {
         var child_buf: [512]u8 = undefined;
-        const child = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ root, name }) catch continue;
+        const child = std.mem.print(&child_buf, "{s}/{s}", .{ root, name }) catch continue;
         const bytes = dirsize.dirSizeBytes(io, child);
         if (do_remove) std.Io.Dir.cwd().deleteTree(io, child) catch continue;
         reaped.removed += 1;
@@ -366,8 +366,7 @@ fn tmpPrefixForTests(allocator: std.mem.Allocator, comptime tag: []const u8) ![]
     var rand_bytes: [8]u8 = undefined;
     testIo().random(&rand_bytes);
     const rand_int = std.mem.bytesToValue(u64, &rand_bytes);
-    const path = try std.fmt.allocPrint(
-        allocator,
+    const path = try allocator.print(
         "/tmp/malt_relocated_store_{s}_{x}",
         .{ tag, rand_int },
     );
@@ -377,9 +376,9 @@ fn tmpPrefixForTests(allocator: std.mem.Allocator, comptime tag: []const u8) ![]
 }
 
 fn writeFileForTests(allocator: std.mem.Allocator, parent: []const u8, rel: []const u8, body: []const u8) !void {
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ parent, rel });
+    const path = try allocator.print("{s}/{s}", .{ parent, rel });
     defer allocator.free(path);
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         std.Io.Dir.cwd().createDirPath(testIo(), dir) catch {};
     }
     const f = try std.Io.Dir.createFileAbsolute(testIo(), path, .{});
@@ -397,8 +396,7 @@ fn readAllForTests(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 }
 
 fn buildKegForTests(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, version: []const u8) !void {
-    const cellar_dir = try std.fmt.allocPrint(
-        allocator,
+    const cellar_dir = try allocator.print(
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },
     );
@@ -577,20 +575,20 @@ test "save then materialize round-trips byte-identical files" {
     try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "tool", "1.2");
     try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
 
-    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tool/1.2", .{prefix});
+    const cellar_keg = try testing.allocator.print("{s}/Cellar/tool/1.2", .{prefix});
     defer testing.allocator.free(cellar_keg);
     try std.Io.Dir.cwd().deleteTree(testIo(), cellar_keg);
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), cellar_keg, .{}));
 
     try materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "tool", "1.2");
 
-    const script = try std.fmt.allocPrint(testing.allocator, "{s}/bin/hello", .{cellar_keg});
+    const script = try testing.allocator.print("{s}/bin/hello", .{cellar_keg});
     defer testing.allocator.free(script);
     const got = try readAllForTests(testing.allocator, script);
     defer testing.allocator.free(got);
     try testing.expectEqualStrings(fixture_script, got);
 
-    const pc = try std.fmt.allocPrint(testing.allocator, "{s}/lib/test.pc", .{cellar_keg});
+    const pc = try testing.allocator.print("{s}/lib/test.pc", .{cellar_keg});
     defer testing.allocator.free(pc);
     const got_pc = try readAllForTests(testing.allocator, pc);
     defer testing.allocator.free(got_pc);
@@ -619,8 +617,7 @@ test "materialize replaces an existing destination" {
     try buildKegForTests(testing.allocator, prefix, "rep", "2.0");
     try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "rep", "2.0");
 
-    const stale = try std.fmt.allocPrint(
-        testing.allocator,
+    const stale = try testing.allocator.print(
         "{s}/Cellar/rep/2.0/bin/hello",
         .{prefix},
     );
@@ -655,12 +652,12 @@ test "saveFresh cleans the tempdir on the race-loss branch" {
 
     // Race winner kept dst; the loser's tempdir must not survive. The temp is
     // a sibling of dst, so scan dst's parent (the versioned segment dir).
-    const store_root = std.fs.path.dirname(dst).?;
+    const store_root = std.Io.Dir.path.dirname(dst).?;
     var root_dir = try std.Io.Dir.openDirAbsolute(testIo(), store_root, .{ .iterate = true });
     defer root_dir.close(testIo());
     var iter = root_dir.iterate();
     while (iter.next(testIo()) catch null) |entry| {
-        try testing.expect(std.mem.indexOf(u8, entry.name, ".tmp.") == null);
+        try testing.expect(std.mem.find(u8, entry.name, ".tmp.") == null);
     }
 }
 
@@ -689,8 +686,8 @@ test "same sha under two logic versions resolves to distinct paths" {
     const a = try cacheDir(&a_buf, "/opt/malt", 1, valid_sha_for_tests);
     const b = try cacheDir(&b_buf, "/opt/malt", 2, valid_sha_for_tests);
     try testing.expect(!std.mem.eql(u8, a, b));
-    try testing.expect(std.mem.indexOf(u8, a, "/v1/") != null);
-    try testing.expect(std.mem.indexOf(u8, b, "/v2/") != null);
+    try testing.expect(std.mem.find(u8, a, "/v1/") != null);
+    try testing.expect(std.mem.find(u8, b, "/v2/") != null);
 }
 
 test "save nests the entry under the current version, not the bare sha path" {
@@ -705,8 +702,7 @@ test "save nests the entry under the current version, not the bare sha path" {
 
     // The old unversioned layout (`store-relocated/<sha>`) must not be produced —
     // a logic change would otherwise serve that stale entry forever.
-    const bare = try std.fmt.allocPrint(
-        testing.allocator,
+    const bare = try testing.allocator.print(
         "{s}/store-relocated/{s}",
         .{ prefix, valid_sha_for_tests },
     );
@@ -806,7 +802,7 @@ test "reapStaleVersions ignores foreign entries and a missing store" {
     try testing.expectEqual(@as(u32, 0), reapStaleVersions(testIo(), testing.allocator, prefix, true).removed);
 
     // A non-`v<digits>` sibling must never be touched.
-    const foreign = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/notes", .{prefix});
+    const foreign = try testing.allocator.print("{s}/store-relocated/notes", .{prefix});
     defer testing.allocator.free(foreign);
     try std.Io.Dir.cwd().createDirPath(testIo(), foreign);
     try testing.expectEqual(@as(u32, 0), reapStaleVersions(testIo(), testing.allocator, prefix, true).removed);
@@ -877,7 +873,7 @@ test "materialize refuses a different name for the same sha" {
         materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "other", "1.0"),
     );
     // A refused label never touches the Cellar.
-    const dst = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/other", .{prefix});
+    const dst = try testing.allocator.print("{s}/Cellar/other", .{prefix});
     defer testing.allocator.free(dst);
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), dst, .{}));
 }

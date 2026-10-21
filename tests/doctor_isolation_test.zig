@@ -19,12 +19,12 @@ fn uniquePrefix(suffix: []const u8) ![]const u8 {
 // (the offender). The check must flag only the offender.
 fn seedFixture(prefix: []const u8) !void {
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -78,12 +78,12 @@ test "doctor isolation check returns ok when no dep keg leaks bin/sbin" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);

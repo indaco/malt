@@ -32,8 +32,7 @@ fn restoreMaltPrefix(old: [:0]const u8) void {
 }
 
 fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
-    const path = try std.fmt.allocPrint(
-        allocator,
+    const path = try allocator.print(
         "/tmp/malt_warm_path_test_{x}",
         .{test_io.randomInt(std.Options.debug_io, u64)},
     );
@@ -47,7 +46,7 @@ fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
 fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     const dirs = [_][]const u8{ "store", "Cellar", "opt", "bin", "lib" };
     for (dirs) |d| {
-        const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, d });
+        const p = try allocator.print("{s}/{s}", .{ prefix, d });
         defer allocator.free(p);
         test_io.cwd().createDirPath(std.Options.debug_io, p) catch {};
     }
@@ -60,19 +59,18 @@ fn createBottleFixture(
     name: []const u8,
     ver: []const u8,
 ) !void {
-    const keg = try std.fmt.allocPrint(
-        allocator,
+    const keg = try allocator.print(
         "{s}/store/{s}/{s}/{s}",
         .{ prefix, sha, name, ver },
     );
     defer allocator.free(keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
-    const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
+    const bin_dir = try allocator.print("{s}/bin", .{keg});
     defer allocator.free(bin_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
-    const script = try std.fmt.allocPrint(allocator, "{s}/bin/hello", .{keg});
+    const script = try allocator.print("{s}/bin/hello", .{keg});
     defer allocator.free(script);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, script, .{});
     defer f.close(std.Options.debug_io);
@@ -116,14 +114,14 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
     try testing.expect(relocated.has(std.Options.debug_io, prefix, test_sha));
 
     // Uninstall: drop the Cellar tree so the next materialize has to rebuild.
-    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/warmpkg/1.0", .{prefix});
+    const cellar_keg = try testing.allocator.print("{s}/Cellar/warmpkg/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg);
     try testing.expect(!pathExists(cellar_keg));
 
     // Now wipe the bottle store too. With both the Cellar entry and the
     // store/<sha> source gone, only a cache hit can satisfy a reinstall.
-    const store_path = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, test_sha });
+    const store_path = try testing.allocator.print("{s}/store/{s}", .{ prefix, test_sha });
     defer testing.allocator.free(store_path);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, store_path);
     try testing.expect(!pathExists(store_path));
@@ -144,7 +142,7 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
     try testing.expect(pathExists(keg.path));
 
     var bin_buf: [512]u8 = undefined;
-    const bin_path = try std.fmt.bufPrint(&bin_buf, "{s}/bin/hello", .{keg.path});
+    const bin_path = try std.mem.print(&bin_buf, "{s}/bin/hello", .{keg.path});
     try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 }
 
@@ -186,7 +184,7 @@ test "non-APFS-style cache miss still allows a successful pipeline reinstall" {
     try relocated.remove(std.Options.debug_io, prefix, test_sha);
     try testing.expect(!relocated.has(std.Options.debug_io, prefix, test_sha));
 
-    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nocache/0.1", .{prefix});
+    const cellar_keg = try testing.allocator.print("{s}/Cellar/nocache/0.1", .{prefix});
     defer testing.allocator.free(cellar_keg);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg);
 

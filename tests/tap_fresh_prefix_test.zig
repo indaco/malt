@@ -38,7 +38,7 @@ test "untap on a fresh prefix does the work instead of reporting a silent succes
         _ = c.unsetenv("MALT_PREFIX");
     }
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_file = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
 
     const prior_quiet = malt.output.isQuiet();
@@ -60,8 +60,8 @@ test "untap on a fresh prefix does the work instead of reporting a silent succes
     try testing.expectError(error.Aborted, tap.executeUntap(&ctx, arena.allocator(), &.{"nosuch/tap"}));
 
     try testing.expect(pathExists(db_file));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap nosuch/tap") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No available tap nosuch/tap") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Untapped") == null);
 }
 
 test "listing on a fresh prefix reports empty without creating a database" {
@@ -74,7 +74,7 @@ test "listing on a fresh prefix reports empty without creating a database" {
         _ = c.unsetenv("MALT_PREFIX");
     }
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
 
     const prior_quiet = malt.output.isQuiet();
@@ -94,6 +94,6 @@ test "listing on a fresh prefix reports empty without creating a database" {
 
     try tap.execute(&ctx, arena.allocator(), &.{});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No taps registered") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No taps registered") != null);
     try testing.expect(!pathExists(db_dir));
 }

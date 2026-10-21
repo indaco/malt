@@ -30,7 +30,7 @@ fn restoreMaltPrefix(old: [:0]const u8) void {
 }
 
 fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "/tmp/malt_cellar_receipt_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
+    const path = try allocator.print("/tmp/malt_cellar_receipt_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer allocator.free(path);
     const z = try allocator.allocSentinel(u8, path.len, 0);
     @memcpy(z, path);
@@ -46,24 +46,24 @@ fn writeFile(path: []const u8, contents: []const u8) !void {
 
 /// Store entry with two placeholdered text files and the given receipt.
 fn createListedBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, receipt_json: []const u8) !void {
-    const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/listed/1.0", .{ prefix, sha_receipt_lists });
+    const keg = try allocator.print("{s}/store/{s}/listed/1.0", .{ prefix, sha_receipt_lists });
     defer allocator.free(keg);
     for ([_][]const u8{ "bin", "lib" }) |sub| {
-        const d = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ keg, sub });
+        const d = try allocator.print("{s}/{s}", .{ keg, sub });
         defer allocator.free(d);
         try test_io.cwd().createDirPath(std.Options.debug_io, d);
     }
-    const hello = try std.fmt.allocPrint(allocator, "{s}/bin/hello", .{keg});
+    const hello = try allocator.print("{s}/bin/hello", .{keg});
     defer allocator.free(hello);
     try writeFile(hello, "#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\necho $prefix\n");
-    const pc = try std.fmt.allocPrint(allocator, "{s}/lib/test.pc", .{keg});
+    const pc = try allocator.print("{s}/lib/test.pc", .{keg});
     defer allocator.free(pc);
     try writeFile(pc, "prefix=@@HOMEBREW_PREFIX@@\nlibdir=${prefix}/lib\n");
-    const receipt = try std.fmt.allocPrint(allocator, "{s}/INSTALL_RECEIPT.json", .{keg});
+    const receipt = try allocator.print("{s}/INSTALL_RECEIPT.json", .{keg});
     defer allocator.free(receipt);
     try writeFile(receipt, receipt_json);
     for ([_][]const u8{ "Cellar", "opt", "bin", "lib" }) |sub| {
-        const d = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sub });
+        const d = try allocator.print("{s}/{s}", .{ prefix, sub });
         defer allocator.free(d);
         test_io.cwd().createDirPath(std.Options.debug_io, d) catch {};
     }
@@ -88,11 +88,11 @@ fn materialize(allocator: std.mem.Allocator, prefix: []const u8) !cellar_mod.Keg
 }
 
 fn carriesPlaceholder(allocator: std.mem.Allocator, keg_path: []const u8, rel: []const u8) !bool {
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ keg_path, rel });
+    const path = try allocator.print("{s}/{s}", .{ keg_path, rel });
     defer allocator.free(path);
     const text = try readFile(allocator, path);
     defer allocator.free(text);
-    return std.mem.indexOf(u8, text, "@@HOMEBREW_PREFIX@@") != null;
+    return std.mem.find(u8, text, "@@HOMEBREW_PREFIX@@") != null;
 }
 
 test "materializeWithCellar relocates only the files the bottle receipt lists" {
@@ -115,12 +115,12 @@ test "materializeWithCellar relocates only the files the bottle receipt lists" {
     try testing.expect(try carriesPlaceholder(testing.allocator, keg.path, "lib/test.pc"));
 
     // malt's own receipt replaces the bottle's once relocation is done.
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg.path});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg.path});
     defer testing.allocator.free(receipt_path);
     const receipt = try readFile(testing.allocator, receipt_path);
     defer testing.allocator.free(receipt);
-    try testing.expect(std.mem.indexOf(u8, receipt, "bin/hello") == null);
-    try testing.expect(std.mem.indexOf(u8, receipt, sha_receipt_lists) != null);
+    try testing.expect(std.mem.find(u8, receipt, "bin/hello") == null);
+    try testing.expect(std.mem.find(u8, receipt, sha_receipt_lists) != null);
 }
 
 test "materializeWithCellar walks the keg when the bottle receipt carries no lists" {

@@ -43,9 +43,9 @@ fn serveStub(s: *Stub) void {
     while (true) {
         var req = srv.receiveHead() catch return;
         const target = req.head.target;
-        if (std.mem.indexOf(u8, target, "/token") != null) {
+        if (std.mem.find(u8, target, "/token") != null) {
             req.respond("{\"token\":\"t1\"}", .{}) catch return;
-        } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
+        } else if (std.mem.find(u8, target, "/blobs/") != null) {
             if (s.truncate) {
                 var body_buf: [64]u8 = undefined;
                 var bw = req.respondStreaming(&body_buf, .{}) catch return;
@@ -115,19 +115,19 @@ test "download streams a verified bottle to disk, extracts it, and drops the tem
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     // Mint a real gzip tarball: payload/hello.txt.
-    const payload_dir = try std.fmt.allocPrint(testing.allocator, "{s}/work/payload", .{base});
+    const payload_dir = try testing.allocator.print("{s}/work/payload", .{base});
     defer testing.allocator.free(payload_dir);
     try test_io.cwd().createDirPath(io, payload_dir);
-    const hello = try std.fmt.allocPrint(testing.allocator, "{s}/hello.txt", .{payload_dir});
+    const hello = try testing.allocator.print("{s}/hello.txt", .{payload_dir});
     defer testing.allocator.free(hello);
     {
         const f = try test_io.createFileAbsolute(io, hello, .{});
         defer f.close(io);
         try f.writeStreamingAll(io, "bottle payload\n");
     }
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work", .{base});
+    const work = try testing.allocator.print("{s}/work", .{base});
     defer testing.allocator.free(work);
-    const archive_path = try std.fmt.allocPrint(testing.allocator, "{s}/bottle-fixture.tar.gz", .{base});
+    const archive_path = try testing.allocator.print("{s}/bottle-fixture.tar.gz", .{base});
     defer testing.allocator.free(archive_path);
     try runTar(&.{ "tar", "czf", archive_path, "-C", work, "payload" });
 
@@ -143,7 +143,7 @@ test "download streams a verified bottle to disk, extracts it, and drops the tem
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -152,7 +152,7 @@ test "download streams a verified bottle to disk, extracts it, and drops the tem
     defer g.deinit();
     g.base_url = base_url;
 
-    const dest_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dest", .{base});
+    const dest_dir = try testing.allocator.print("{s}/dest", .{base});
     defer testing.allocator.free(dest_dir);
 
     var mismatch: bottle.MismatchInfo = undefined;
@@ -164,10 +164,10 @@ test "download streams a verified bottle to disk, extracts it, and drops the tem
     _ = try result;
 
     // Extracted content is present; the temp archive was removed.
-    const extracted = try std.fmt.allocPrint(testing.allocator, "{s}/payload/hello.txt", .{dest_dir});
+    const extracted = try testing.allocator.print("{s}/payload/hello.txt", .{dest_dir});
     defer testing.allocator.free(extracted);
     try testing.expect(pathExists(io, extracted));
-    const tmp_archive = try std.fmt.allocPrint(testing.allocator, "{s}/bottle.tar.gz", .{dest_dir});
+    const tmp_archive = try testing.allocator.print("{s}/bottle.tar.gz", .{dest_dir});
     defer testing.allocator.free(tmp_archive);
     try testing.expect(!pathExists(io, tmp_archive));
 }
@@ -196,7 +196,7 @@ test "download rejects a SHA mismatch: populates MismatchInfo, wipes temp + dest
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -205,7 +205,7 @@ test "download rejects a SHA mismatch: populates MismatchInfo, wipes temp + dest
     defer g.deinit();
     g.base_url = base_url;
 
-    const dest_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dest", .{base});
+    const dest_dir = try testing.allocator.print("{s}/dest", .{base});
     defer testing.allocator.free(dest_dir);
 
     var mismatch: bottle.MismatchInfo = undefined;
@@ -249,7 +249,7 @@ test "a verified-but-unextractable archive fails closed: ExtractionFailed wipes 
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -258,7 +258,7 @@ test "a verified-but-unextractable archive fails closed: ExtractionFailed wipes 
     defer g.deinit();
     g.base_url = base_url;
 
-    const dest_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dest", .{base});
+    const dest_dir = try testing.allocator.print("{s}/dest", .{base});
     defer testing.allocator.free(dest_dir);
 
     var mismatch: bottle.MismatchInfo = undefined;
@@ -303,7 +303,7 @@ test "the tee hashes the transport-decoded bottle, not the wire bytes (SHA domai
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -312,7 +312,7 @@ test "the tee hashes the transport-decoded bottle, not the wire bytes (SHA domai
     defer g.deinit();
     g.base_url = base_url;
 
-    const dest_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dest", .{base});
+    const dest_dir = try testing.allocator.print("{s}/dest", .{base});
     defer testing.allocator.free(dest_dir);
 
     const wrong = &@as([64]u8, @splat('0'));
@@ -348,7 +348,7 @@ test "a mid-stream transport failure leaves no temp file and no dest dir" {
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -357,7 +357,7 @@ test "a mid-stream transport failure leaves no temp file and no dest dir" {
     defer g.deinit();
     g.base_url = base_url;
 
-    const dest_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dest", .{base});
+    const dest_dir = try testing.allocator.print("{s}/dest", .{base});
     defer testing.allocator.free(dest_dir);
 
     var mismatch: bottle.MismatchInfo = undefined;

@@ -251,7 +251,7 @@ fn staleNotice(buf: []u8, name: []const u8, upstream: []const u8, installed: ?[]
     for (rows) |r| {
         if (std.mem.eql(u8, r.name, name)) break;
     } else return null;
-    return std.fmt.bufPrint(buf, "{s}: open at {s}; installed {s} may carry more", .{ name, upstream, inst }) catch null;
+    return std.mem.print(buf, "{s}: open at {s}; installed {s} may carry more", .{ name, upstream, inst }) catch null;
 }
 
 /// One formula fetch; exactly one of `body` / `err` is set after `fetchAll`.
@@ -371,7 +371,7 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
     const sha = f.keg.sha orelse blk: {
         var head_url_buf: [512]u8 = undefined;
         const head_url = if (x.forge_base) |b|
-            std.fmt.bufPrint(&head_url_buf, "{s}/commits/HEAD", .{b}) catch return f.fail("could not resolve the tap HEAD")
+            std.mem.print(&head_url_buf, "{s}/commits/HEAD", .{b}) catch return f.fail("could not resolve the tap HEAD")
         else
             urls.api_head_url;
         // The tap resolve hint every other command shows (rate limit, token).
@@ -507,7 +507,7 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
     var out: Installed = .{};
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     // Only a missing `db/` reads as "nothing installed"; a database that is
     // there but will not open must never turn into a clean bill of health.
     var db = outdated.openPrefixDb(io, db_path, false) catch |e| switch (e) {
@@ -533,7 +533,7 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
             continue;
         }
         // A --local keg (or any label that is not a slug) has no tap to ask.
-        const slash = std.mem.indexOfScalar(u8, tap, '/') orelse {
+        const slash = std.mem.findScalar(u8, tap, '/') orelse {
             out.skipped += 1;
             continue;
         };
@@ -553,7 +553,7 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
 fn allClearMessage(buf: []u8, checked: usize, unchecked: usize) []const u8 {
     if (checked == 0) return if (unchecked == 0) "No formulae installed." else "No formulae could be checked.";
     const noun: []const u8 = if (checked == 1) "formula" else "formulae";
-    return std.fmt.bufPrint(buf, "No open advisories for {d} {s}.", .{ checked, noun }) catch "No open advisories.";
+    return std.mem.print(buf, "No open advisories for {d} {s}.", .{ checked, noun }) catch "No open advisories.";
 }
 
 /// A cold cache pays one API fetch per formula plus the tap and OSV round
@@ -563,18 +563,18 @@ fn checkingMessage(buf: []u8, core: usize, taps: usize) ?[]const u8 {
     const core_noun: []const u8 = if (core == 1) "formula" else "formulae";
     const tap_noun: []const u8 = if (taps == 1) "tap formula" else "tap formulae";
     const msg = if (taps == 0)
-        std.fmt.bufPrint(buf, "Checking {d} {s}...", .{ core, core_noun })
+        std.mem.print(buf, "Checking {d} {s}...", .{ core, core_noun })
     else if (core == 0)
-        std.fmt.bufPrint(buf, "Checking {d} {s}...", .{ taps, tap_noun })
+        std.mem.print(buf, "Checking {d} {s}...", .{ taps, tap_noun })
     else
-        std.fmt.bufPrint(buf, "Checking {d} {s} and {d} {s}...", .{ core, core_noun, taps, tap_noun });
+        std.mem.print(buf, "Checking {d} {s} and {d} {s}...", .{ core, core_noun, taps, tap_noun });
     return msg catch "Checking...";
 }
 
 fn coverageMessage(buf: []u8, skipped: usize) ?[]const u8 {
     if (skipped == 0) return null;
     const one = skipped == 1;
-    return std.fmt.bufPrint(buf, "{d} local or unidentifiable {s} not covered: no advisory source for {s}.", .{
+    return std.mem.print(buf, "{d} local or unidentifiable {s} not covered: no advisory source for {s}.", .{
         skipped, @as([]const u8, if (one) "keg" else "kegs"), @as([]const u8, if (one) "it" else "them"),
     }) catch null;
 }

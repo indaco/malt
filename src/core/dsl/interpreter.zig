@@ -292,7 +292,7 @@ pub const Interpreter = struct {
                 // wrong builtin — that used to shadow dispatch for any Ruby
                 // identifier > ~30 chars.
                 var compound_buf: [256]u8 = undefined;
-                if (std.fmt.bufPrint(&compound_buf, "{s}.{s}", .{ class_name, mc.method })) |compound| {
+                if (std.mem.print(&compound_buf, "{s}.{s}", .{ class_name, mc.method })) |compound| {
                     if (builtins_root.bare_builtins.get(compound)) |func| {
                         return func(builtin_ctx, null, args_slice) catch |e| {
                             return mapBuiltinError(e);
@@ -308,7 +308,7 @@ pub const Interpreter = struct {
                 if (recv_mc.receiver) |inner_recv| {
                     if (inner_recv.kind == .identifier) {
                         var compound_buf: [256]u8 = undefined;
-                        if (std.fmt.bufPrint(&compound_buf, "{s}::{s}.{s}", .{
+                        if (std.mem.print(&compound_buf, "{s}::{s}.{s}", .{
                             inner_recv.kind.identifier, recv_mc.method, mc.method,
                         })) |compound| {
                             if (builtins_root.bare_builtins.get(compound)) |func| {
@@ -465,7 +465,7 @@ pub const Interpreter = struct {
         const left_str = left_val.asString(self.allocator) catch return DslError.OutOfMemory;
         const right_str = right_val.asString(self.allocator) catch return DslError.OutOfMemory;
 
-        const joined = std.fs.path.join(self.allocator, &.{ left_str, right_str }) catch return DslError.OutOfMemory;
+        const joined = std.Io.Dir.path.join(self.allocator, &.{ left_str, right_str }) catch return DslError.OutOfMemory;
         return Value{ .pathname = joined };
     }
 
@@ -597,7 +597,7 @@ pub const Interpreter = struct {
             // Assemble once so EPIPE hits a single detectable site; the real
             // signal is DslError.PostInstallFailed below, so both the
             // assembly OOM and the stream failure are tolerated.
-            if (std.fmt.allocPrint(self.allocator, "  x {s}\n", .{msg_str})) |line| {
+            if (self.allocator.print("  x {s}\n", .{msg_str})) |line| {
                 defer self.allocator.free(line);
                 // Record-only: the post_install caller renders notes. Keeps
                 // the interpreter free of ui/output.
@@ -1025,7 +1025,7 @@ test "interpreter: self-recursive method hits the call-depth guard and degrades"
 
     var found = false;
     for (flog.entries()) |e| {
-        if (std.mem.indexOf(u8, e.detail, "recursion limit") != null) found = true;
+        if (std.mem.find(u8, e.detail, "recursion limit") != null) found = true;
     }
     try std.testing.expect(found);
 }

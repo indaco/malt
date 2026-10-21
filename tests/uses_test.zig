@@ -23,7 +23,7 @@ const TempDb = struct {
     fn init(tag: []const u8) !TempDb {
         const dir = try test_io.uniqueTempPath(testing.allocator, "uses_test", tag);
         defer testing.allocator.free(dir);
-        const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}.db", .{dir}, 0);
+        const path = try testing.allocator.printSentinel("{s}.db", .{dir}, 0);
         errdefer testing.allocator.free(path);
 
         var db = try sqlite.Database.open(path);
@@ -37,7 +37,7 @@ const TempDb = struct {
         // A WAL database leaves -wal/-shm beside the file; sweep all three.
         var buf: [512]u8 = undefined;
         for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
-            const p = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ self.path, suffix }, 0) catch continue;
+            const p = std.mem.printSentinel(&buf, "{s}{s}", .{ self.path, suffix }, 0) catch continue;
             test_io.deleteFileAbsolute(std.Options.debug_io, p) catch {};
         }
         testing.allocator.free(self.path);
@@ -198,8 +198,8 @@ test "collectDependents reports dependency rows it cannot read instead of no dep
     defer malt.output.endStderrCapture();
 
     try testing.expectError(error.Aborted, uses.collectDependents(testing.allocator, &tdb.db, "openssl@3", false));
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "openssl@3") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "install database") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "openssl@3") != null);
 }
 
 test "collectDependents reports a dependencies table it cannot query instead of no dependents" {
@@ -277,7 +277,7 @@ test "collectDependents recursive walk handles a 1000-node chain" {
     var ids: [n]i64 = undefined;
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        const name = try std.fmt.bufPrint(&name_buf, "k{d}", .{i});
+        const name = try std.mem.print(&name_buf, "k{d}", .{i});
         ids[i] = try insertKeg(db, name);
     }
 
@@ -285,7 +285,7 @@ test "collectDependents recursive walk handles a 1000-node chain" {
     // no inbound edge — it's the target of the walk).
     i = 1;
     while (i < n) : (i += 1) {
-        const dep_name = try std.fmt.bufPrint(&name_buf, "k{d}", .{i - 1});
+        const dep_name = try std.mem.print(&name_buf, "k{d}", .{i - 1});
         try addDep(db, ids[i], dep_name);
     }
 

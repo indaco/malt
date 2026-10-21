@@ -69,7 +69,7 @@ test "HttpClient.initWith: GET round-trips a body from a localhost server (offli
     defer server_thread.join();
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{port});
 
     // The injected client is owned by HttpClient after initWith copies it
     // in (same as init), so the caller must not deinit `inner` separately.
@@ -128,7 +128,7 @@ test "HttpClient.get does not leak the GitHub token to a non-GitHub host (cross-
     const server_thread = try std.Thread.spawn(.{}, serveOnceRecordingAuth, .{&fx});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{port});
 
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_must_not_leak".ptr};
     const env: std.process.Environ = .{ .block = .{ .slice = &entries } };
@@ -162,7 +162,7 @@ test "HttpClient.initWith: HEAD probe returns the server status (doctor's API-re
     defer server_thread.join();
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/health", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/health", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);

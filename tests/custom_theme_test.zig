@@ -48,8 +48,8 @@ const Fixture = struct {
         const base = try a.dupeSentinel(u8, unique, 0);
         test_io.deleteTreeAbsolute(dbg_io, base) catch {};
         try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
-        const file = try std.fmt.allocPrintSentinel(a, "{s}/themes.json", .{base}, 0);
-        const kv = try std.fmt.allocPrintSentinel(a, "MALT_THEMES_FILE={s}", .{file}, 0);
+        const file = try a.printSentinel("{s}/themes.json", .{base}, 0);
+        const kv = try a.printSentinel("MALT_THEMES_FILE={s}", .{file}, 0);
         const block = try a.allocSentinel(?[*:0]const u8, 1, null);
         block[0] = kv.ptr;
         return .{
@@ -110,7 +110,7 @@ test "a valid themes file recolours both a CLI line and a TUI frame" {
     // TUI frame: the tab bar paints titles through color.roleCode(.accent).
     var fb: [256]u8 = undefined;
     const frame = tab_bar.render(&fb, .search, titles, 80);
-    try testing.expect(std.mem.indexOf(u8, frame, accent_sgr) != null);
+    try testing.expect(std.mem.find(u8, frame, accent_sgr) != null);
 
     // CLI line: a success line carries the custom success colour.
     var cap: std.ArrayList(u8) = .empty;
@@ -118,7 +118,7 @@ test "a valid themes file recolours both a CLI line and a TUI frame" {
     output.beginStderrCapture(testing.allocator, &cap);
     output.success("installed", .{});
     output.endStderrCapture();
-    try testing.expect(std.mem.indexOf(u8, cap.items, success_sgr) != null);
+    try testing.expect(std.mem.find(u8, cap.items, success_sgr) != null);
 }
 
 test "a malformed themes file leaves built-in output unchanged" {
@@ -132,6 +132,6 @@ test "a malformed themes file leaves built-in output unchanged" {
     const builtin_accent = color.resolveRole(.default, .accent, .unknown, true);
     var fb: [256]u8 = undefined;
     const frame = tab_bar.render(&fb, .search, titles, 80);
-    try testing.expect(std.mem.indexOf(u8, frame, builtin_accent) != null);
-    try testing.expect(std.mem.indexOf(u8, frame, accent_sgr) == null);
+    try testing.expect(std.mem.find(u8, frame, builtin_accent) != null);
+    try testing.expect(std.mem.find(u8, frame, accent_sgr) == null);
 }

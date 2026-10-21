@@ -140,7 +140,7 @@ fn cmdOne(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator
 /// when the lock is busy the job starts on the plist it already has.
 fn refreshLocked(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) void {
     var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{atomic.maltPrefixOrAbort()}) catch return;
+    const lock_path = std.mem.print(&lock_path_buf, "{s}/db/malt.lock", .{atomic.maltPrefixOrAbort()}) catch return;
     var lk = lock_mod.LockFile.acquire(io, lock_path, 5000) catch {
         output.warn("{s}: another malt command is running; service .env not re-read", .{name});
         return;
@@ -269,12 +269,12 @@ fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []con
 fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const prefix = atomic.maltPrefixOrAbort();
     var db_dir_buf: [512]u8 = undefined;
-    const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
+    const db_dir = std.mem.print(&db_dir_buf, "{s}/db", .{prefix}) catch
         return ServicesError.DatabaseError;
     // db/ may already exist; sqlite.open below surfaces real path errors.
     std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
+    const path = std.mem.printSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return ServicesError.DatabaseError;
     var db = try sqlite.Database.open(path);
     errdefer db.close();
@@ -337,15 +337,15 @@ var lock_test_seq: std.atomic.Value(u32) = .init(0);
 test "start backs off the plist refresh while another malt command holds the lock" {
     // An upgrade mid-register would otherwise have its new plist overwritten.
     const io = std.Options.debug_io;
-    const prefix = try std.fmt.allocPrintSentinel(std.testing.allocator, "/tmp/malt_svc_lock_{d}_{d}", .{ std.c.getpid(), lock_test_seq.fetchAdd(1, .monotonic) }, 0);
+    const prefix = try std.testing.allocator.printSentinel("/tmp/malt_svc_lock_{d}_{d}", .{ std.c.getpid(), lock_test_seq.fetchAdd(1, .monotonic) }, 0);
     defer std.testing.allocator.free(prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
     const prev = try atomic.overridePrefixEnv(prefix);
     defer atomic.restorePrefixEnv(prev);
-    const db_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try std.testing.allocator.print("{s}/db", .{prefix});
     defer std.testing.allocator.free(db_dir);
     try std.Io.Dir.cwd().createDirPath(io, db_dir);
-    const lock_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt.lock", .{db_dir});
+    const lock_path = try std.testing.allocator.print("{s}/malt.lock", .{db_dir});
     defer std.testing.allocator.free(lock_path);
     var held = try lock_mod.LockFile.acquire(io, lock_path, 0);
     defer held.release(io);
@@ -357,5 +357,5 @@ test "start backs off the plist refresh while another malt command holds the loc
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
     refreshLocked(io, .empty, std.testing.allocator, &db, "tree");
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "another malt command is running") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "another malt command is running") != null);
 }

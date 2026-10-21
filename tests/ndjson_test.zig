@@ -148,11 +148,11 @@ test "no-op skip event names are stable across mutating commands" {
 
     try testing.expectEqual(skip_events.len, std.mem.count(u8, buf.items, "\n"));
     // No status field on any of them — these are no-transition events.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"status\"") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"status\"") == null);
     for (skip_events) |ev| {
         var needle_buf: [64]u8 = undefined;
-        const needle = try std.fmt.bufPrint(&needle_buf, "\"event\":\"{s}\"", .{@tagName(ev)});
-        try testing.expect(std.mem.indexOf(u8, buf.items, needle) != null);
+        const needle = try std.mem.print(&needle_buf, "\"event\":\"{s}\"", .{@tagName(ev)});
+        try testing.expect(std.mem.find(u8, buf.items, needle) != null);
     }
 }
 
@@ -174,12 +174,12 @@ test "would_install and already_installed are stable side-channel event names" {
     output.emitNdjsonEvent(.already_installed, "tree", null);
 
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, buf.items, "\n"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"would_install\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"name\":\"wget\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"already_installed\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"name\":\"tree\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"event\":\"would_install\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"name\":\"wget\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"event\":\"already_installed\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"name\":\"tree\"") != null);
     // No status field on either event.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"status\"") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"status\"") == null);
 }
 
 test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
@@ -197,7 +197,7 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
@@ -214,11 +214,11 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try upgrade.execute(&ctx, testing.allocator, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"lock_acquired\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"install_complete\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"event\":\"lock_acquired\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"event\":\"install_complete\"") != null);
     // install_complete must trail lock_acquired so consumers can rely on
     // a strict open/close bracket.
-    const open_pos = std.mem.indexOf(u8, buf.items, "\"event\":\"lock_acquired\"").?;
-    const close_pos = std.mem.indexOf(u8, buf.items, "\"event\":\"install_complete\"").?;
+    const open_pos = std.mem.find(u8, buf.items, "\"event\":\"lock_acquired\"").?;
+    const close_pos = std.mem.find(u8, buf.items, "\"event\":\"install_complete\"").?;
     try testing.expect(close_pos > open_pos);
 }

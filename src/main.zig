@@ -380,25 +380,25 @@ test "dispatch preserves interrupt once the signal handler is installed" {
 test "formatBrewFallbackNotice names the input and signals the brew handoff" {
     var buf: [256]u8 = undefined;
     const notice = try formatBrewFallbackNotice(&buf, "pfoo");
-    try std.testing.expect(std.mem.indexOf(u8, notice, "'pfoo'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, notice, "is not a malt command") != null);
-    try std.testing.expect(std.mem.indexOf(u8, notice, "brew") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "'pfoo'") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "is not a malt command") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "brew") != null);
 }
 
 test "formatSlugHint for 2-segment slug names both install and tap verbs" {
     var buf: [256]u8 = undefined;
     const hint = try formatSlugHint(&buf, .tap_slug_2, "aeroxy/ast-outline");
-    try std.testing.expect(std.mem.indexOf(u8, hint, "mt install aeroxy/ast-outline/<formula>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "mt tap aeroxy/ast-outline") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "mt install aeroxy/ast-outline/<formula>") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "mt tap aeroxy/ast-outline") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "is not a malt command") != null);
 }
 
 test "formatSlugHint for 3-segment slug names install without <formula> placeholder" {
     var buf: [256]u8 = undefined;
     const hint = try formatSlugHint(&buf, .tap_slug_3, "a/b/c");
-    try std.testing.expect(std.mem.indexOf(u8, hint, "mt install a/b/c") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "<formula>") == null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "mt install a/b/c") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "<formula>") == null);
+    try std.testing.expect(std.mem.find(u8, hint, "is not a malt command") != null);
 }
 
 test "formatSlugHint truncates an overlong 2-segment slug instead of overflowing" {
@@ -407,8 +407,8 @@ test "formatSlugHint truncates an overlong 2-segment slug instead of overflowing
     slug_buf[200] = '/';
     var buf: [1024]u8 = undefined;
     const hint = try formatSlugHint(&buf, .tap_slug_2, &slug_buf);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "…") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "is not a malt command") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "…") != null);
 }
 
 test "formatSlugHint truncates an overlong 3-segment slug instead of overflowing" {
@@ -418,8 +418,8 @@ test "formatSlugHint truncates an overlong 3-segment slug instead of overflowing
     slug_buf[400] = '/';
     var buf: [1024]u8 = undefined;
     const hint = try formatSlugHint(&buf, .tap_slug_3, &slug_buf);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "…") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "is not a malt command") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "…") != null);
 }
 
 test "formatBrewFallbackNotice truncates an overlong command instead of overflowing" {
@@ -427,8 +427,8 @@ test "formatBrewFallbackNotice truncates an overlong command instead of overflow
     @memset(&cmd_buf, 'x');
     var buf: [1024]u8 = undefined;
     const notice = try formatBrewFallbackNotice(&buf, &cmd_buf);
-    try std.testing.expect(std.mem.indexOf(u8, notice, "is not a malt command") != null);
-    try std.testing.expect(std.mem.indexOf(u8, notice, "…") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "is not a malt command") != null);
+    try std.testing.expect(std.mem.find(u8, notice, "…") != null);
 }
 
 test "truncateForHint leaves input at the cap untouched and cuts one byte past it" {
@@ -465,7 +465,7 @@ test "formatSlugHint truncation never splits a multibyte codepoint" {
     var buf: [1024]u8 = undefined;
     const hint = try formatSlugHint(&buf, .tap_slug_2, &slug_buf);
     try std.testing.expect(std.unicode.utf8ValidateSlice(hint));
-    try std.testing.expect(std.mem.indexOf(u8, hint, "…") != null);
+    try std.testing.expect(std.mem.find(u8, hint, "…") != null);
 }
 
 test "classifyFirstPositional routes slug-shaped, path, and verb-shaped inputs" {
@@ -521,15 +521,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.process.exit(78); // EX_CONFIG
     }
 
-    // In debug builds, use GeneralPurposeAllocator as the backing
+    // In debug builds, use SafeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const backing: std.mem.Allocator = if (@import("builtin").mode == .debug)
         gpa.allocator()
     else
         std.heap.page_allocator;
     defer if (@import("builtin").mode == .debug) {
-        if (gpa.deinit() == .leak) {
+        if (gpa.deinit() != 0) {
             std.log.err("memory leak detected", .{});
         }
     };
@@ -780,7 +780,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
             // Resolve this binary's path so the TUI re-execs the *same* `mt` for
             // delegated mutations. Falling back to a bare `mt` would resolve
             // through PATH, where a package's own bin directory can shadow us.
-            var self_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var self_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const n = std.process.executablePath(ctx.io, &self_buf) catch {
                 output_mod.err("cannot resolve malt's own path; refusing to start the dashboard", .{});
                 return error.Aborted;
@@ -979,7 +979,7 @@ fn truncateForHint(buf: *[hint_display_cap + 3]u8, s: []const u8) []const u8 {
 fn formatBrewFallbackNotice(buf: []u8, cmd: []const u8) ![]const u8 {
     var display_buf: [hint_display_cap + 3]u8 = undefined;
     const display = truncateForHint(&display_buf, cmd);
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buf,
         "'{s}' is not a malt command — malt forwards unknown commands to brew. Output below is brew's.",
         .{display},
@@ -990,12 +990,12 @@ fn formatSlugHint(buf: []u8, kind: FirstPositional, slug: []const u8) ![]const u
     var display_buf: [hint_display_cap + 3]u8 = undefined;
     const display = truncateForHint(&display_buf, slug);
     return switch (kind) {
-        .tap_slug_2 => std.fmt.bufPrint(
+        .tap_slug_2 => std.mem.print(
             buf,
             "'{s}' is not a malt command. Did you mean `mt install {s}/<formula>` or `mt tap {s}`?",
             .{ display, display, display },
         ),
-        .tap_slug_3 => std.fmt.bufPrint(
+        .tap_slug_3 => std.mem.print(
             buf,
             "'{s}' is not a malt command. Did you mean `mt install {s}`?",
             .{ display, display },
@@ -1069,7 +1069,7 @@ fn brewFallback(ctx: *const AppCtx, cmd: []const u8, args: []const []const u8) !
     // No brew on disk — exit 127, as a shell does for an unknown command.
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]})) |msg| {
+        if (std.mem.print(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]})) |msg| {
             ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
         } else |_| {}
     }

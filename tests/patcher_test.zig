@@ -67,7 +67,7 @@ fn buildTwoDylibFixture(
 }
 
 fn writeFixture(io: std.Io, dir: []const u8, filename: []const u8, bytes: []const u8) ![]u8 {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, filename });
+    const path = try testing.allocator.print("{s}/{s}", .{ dir, filename });
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, bytes);
@@ -78,8 +78,7 @@ fn tmpSubdir(io: std.Io, tag: []const u8) ![]u8 {
     var seed_buf: [8]u8 = undefined;
     io.random(&seed_buf);
     const seed = std.mem.bytesToValue(u64, &seed_buf);
-    const path = try std.fmt.allocPrint(
-        testing.allocator,
+    const path = try testing.allocator.print(
         "/tmp/malt_patcher_test_{s}_{x}",
         .{ tag, seed },
     );
@@ -669,7 +668,7 @@ test "patchTextFiles leaves the original file intact when atomic staging fails" 
     defer threaded.deinit();
 
     const root = try tmpSubdir(io, "atomic_intact");
-    const sub = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{root});
+    const sub = try testing.allocator.print("{s}/sub", .{root});
     defer testing.allocator.free(sub);
     try std.Io.Dir.createDirAbsolute(io, sub, .default_dir);
     defer {
@@ -679,7 +678,7 @@ test "patchTextFiles leaves the original file intact when atomic staging fails" 
         testing.allocator.free(root);
     }
 
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/wrapper.txt", .{sub});
+    const file_path = try testing.allocator.print("{s}/wrapper.txt", .{sub});
     defer testing.allocator.free(file_path);
     const original = "exec @@HOMEBREW_PREFIX@@/bin/foo\n";
     {
@@ -724,7 +723,7 @@ test "patchTextFiles preserves the original file mode across the rewrite" {
         testing.allocator.free(dir);
     }
 
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/wrapper", .{dir});
+    const file_path = try testing.allocator.print("{s}/wrapper", .{dir});
     defer testing.allocator.free(file_path);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
@@ -763,7 +762,7 @@ test "patchTextFiles rewrites a 0o444 read-only text file" {
     defer threaded.deinit();
 
     const dir = try tmpSubdir(io, "readonly_input");
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/conf.pc", .{dir});
+    const file_path = try testing.allocator.print("{s}/conf.pc", .{dir});
     defer {
         // Restore write perm so deleteTree can unlink the 0o444 file.
         chmodFile(io, file_path, 0o644) catch {};

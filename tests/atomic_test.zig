@@ -40,8 +40,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -448,7 +447,7 @@ test "max_prefix_len is the longest prefix whose install database SQLite can ope
     for ([_]struct { len: usize, opens: bool }{ .{ .len = max, .opens = true }, .{ .len = max + 1, .opens = false } }) |case| {
         var p = try test_io.LongPrefix.init(testing.allocator, "atomic", case.len);
         defer p.deinit(testing.allocator);
-        const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{p.path}, 0);
+        const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{p.path}, 0);
         defer testing.allocator.free(db_path);
         var db = malt.sqlite.Database.open(db_path) catch {
             try testing.expect(!case.opens);

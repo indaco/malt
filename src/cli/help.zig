@@ -979,7 +979,7 @@ test "warnTreatedAsFormula names both ways out and stays silent under --quiet" {
     defer output.endStderrCapture();
 
     warnTreatedAsFormula("box");
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Treating box as a formula. For the cask, specify the `--cask` flag. To silence this message, use the `--formula` flag.") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Treating box as a formula. For the cask, specify the `--cask` flag. To silence this message, use the `--formula` flag.") != null);
 
     // brew skips it under --quiet.
     buf.clearRetainingCapacity();

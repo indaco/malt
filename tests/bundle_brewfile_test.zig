@@ -72,7 +72,7 @@ test "unknown directive records a warning in diagnostics" {
     defer m.deinit();
 
     try testing.expectEqual(@as(usize, 1), diag.warnings.items.len);
-    try testing.expect(std.mem.indexOf(u8, diag.warnings.items[0], "whalebrew") != null);
+    try testing.expect(std.mem.find(u8, diag.warnings.items[0], "whalebrew") != null);
 }
 
 test "conditionals rejected" {

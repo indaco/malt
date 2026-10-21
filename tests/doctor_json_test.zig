@@ -26,7 +26,7 @@ const Scratch = struct {
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "tmp", "cache", "db" };
         for (subs) |sd| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, sd });
+            const dir = try allocator.print("{s}/{s}", .{ path, sd });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
@@ -40,7 +40,7 @@ const Scratch = struct {
 
     fn initSchema(self: *Scratch) !void {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -94,7 +94,7 @@ test "a broken symlink serializes a fixable broken_symlinks finding" {
     var s = try Scratch.init(allocator, "broken_symlink");
     defer s.deinit(allocator);
 
-    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-json", .{s.path});
+    const link_path = try allocator.print("{s}/bin/ghost-json", .{s.path});
     defer allocator.free(link_path);
     try std.Io.Dir.symLinkAbsolute(
         std.Options.debug_io,
@@ -119,12 +119,12 @@ test "a broken symlink serializes a fixable broken_symlinks finding" {
     try doctor.writeChecksJson(&aw.writer, result.findings());
     const json = aw.written();
     try testing.expect(std.mem.startsWith(u8, json, "{\"checks\":["));
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         json,
         "\"id\":\"broken_symlinks\",\"severity\":\"warn\"",
     ) != null);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         json,
         "\"fixable\":true,\"fix_class\":\"broken_symlinks\"",
@@ -140,13 +140,13 @@ test "an orphaned store entry serializes a fixable orphaned_store finding" {
     // A store/<sha> dir claimed by no keg is a true orphan — the entry
     // `purge --store-orphans` removes.
     const sha = "0000000000000000000000000000000000000000000000000000000000000000";
-    const orphan = try std.fmt.allocPrint(allocator, "{s}/store/{s}", .{ s.path, sha });
+    const orphan = try allocator.print("{s}/store/{s}", .{ s.path, sha });
     defer allocator.free(orphan);
     try test_io.cwd().createDirPath(std.Options.debug_io, orphan);
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var store = store_mod.Store.init(std.Options.debug_io, allocator, &db, s.path);
@@ -171,7 +171,7 @@ test "a missing keg serializes a non-fixable err finding (manual class)" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var stmt = try db.prepare(
@@ -195,7 +195,7 @@ test "a missing keg serializes a non-fixable err finding (manual class)" {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try doctor.writeChecksJson(&aw.writer, result.findings());
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         aw.written(),
         "\"id\":\"missing_kegs\",\"severity\":\"err\"",
@@ -231,14 +231,14 @@ test "a lock held by a live PID is reported in-progress, not a fixable warn" {
     var s = try Scratch.init(allocator, "live_lock");
     defer s.deinit(allocator);
 
-    const lock_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.lock", .{s.path});
+    const lock_path = try allocator.print("{s}/db/malt.lock", .{s.path});
     defer allocator.free(lock_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
         var buf: [16]u8 = undefined;
         // Our own PID is, by definition, alive for the duration of the test.
-        const line = try std.fmt.bufPrint(&buf, "{d}\n", .{std.c.getpid()});
+        const line = try std.mem.print(&buf, "{d}\n", .{std.c.getpid()});
         try f.writeStreamingAll(std.Options.debug_io, line);
     }
 
@@ -258,7 +258,7 @@ test "a lock from a dead PID is a fixable stale_lock finding" {
     var s = try Scratch.init(allocator, "dead_lock");
     defer s.deinit(allocator);
 
-    const lock_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.lock", .{s.path});
+    const lock_path = try allocator.print("{s}/db/malt.lock", .{s.path});
     defer allocator.free(lock_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
@@ -278,12 +278,12 @@ test "a lock from a dead PID is a fixable stale_lock finding" {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try doctor.writeChecksJson(&aw.writer, result.findings());
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         aw.written(),
         "\"id\":\"stale_lock\",\"severity\":\"warn\"",
     ) != null);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         aw.written(),
         "\"fixable\":true,\"fix_class\":\"stale_lock\"",
@@ -299,7 +299,7 @@ test "every finding keeps the fixable/fix_class invariant" {
     defer s.deinit(allocator);
     try s.initSchema();
 
-    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-inv", .{s.path});
+    const link_path = try allocator.print("{s}/bin/ghost-inv", .{s.path});
     defer allocator.free(link_path);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_json_inv_dne", link_path, .{});
 
@@ -381,7 +381,7 @@ test "the human walk still renders rows to stderr (capture gate is JSON-only)" {
     }, &doctor.checks, false);
     defer result.deinit();
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "MALT_PREFIX") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "MALT_PREFIX") != null);
 }
 
 // ── SSL CA bundle: gated on ca-certificates being installed ───────────
@@ -389,7 +389,7 @@ test "the human walk still renders rows to stderr (capture gate is JSON-only)" {
 // lock the `--json` `checks[]` contract for each state.
 
 fn linkCaCerts(allocator: std.mem.Allocator, prefix: []const u8) !void {
-    const opt = try std.fmt.allocPrint(allocator, "{s}/opt/ca-certificates", .{prefix});
+    const opt = try allocator.print("{s}/opt/ca-certificates", .{prefix});
     defer allocator.free(opt);
     try test_io.cwd().createDirPath(std.Options.debug_io, opt);
 }
@@ -433,14 +433,14 @@ test "ca-certificates installed and linked: an ok ssl_ca_bundle finding" {
     try s.initSchema();
     try linkCaCerts(allocator, s.path);
 
-    const opt = try std.fmt.allocPrint(allocator, "{s}/opt/openssl@3", .{s.path});
+    const opt = try allocator.print("{s}/opt/openssl@3", .{s.path});
     defer allocator.free(opt);
     try test_io.cwd().createDirPath(std.Options.debug_io, opt);
 
-    const dir = try std.fmt.allocPrint(allocator, "{s}/etc/openssl@3", .{s.path});
+    const dir = try allocator.print("{s}/etc/openssl@3", .{s.path});
     defer allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-    const cert = try std.fmt.allocPrint(allocator, "{s}/cert.pem", .{dir});
+    const cert = try allocator.print("{s}/cert.pem", .{dir});
     defer allocator.free(cert);
     (try test_io.createFileAbsolute(std.Options.debug_io, cert, .{})).close(std.Options.debug_io);
 
@@ -461,15 +461,15 @@ test "emitDoctorJson sizes tap_cache from the cache dir it is handed, not the pr
     defer s.deinit(allocator);
     try s.initSchema();
 
-    const alt = try std.fmt.allocPrint(allocator, "{s}/alt", .{s.path});
+    const alt = try allocator.print("{s}/alt", .{s.path});
     defer allocator.free(alt);
     inline for (.{ "{s}/alt/Tap", "{s}/cache/Tap" }) |fmt| {
-        const dir = try std.fmt.allocPrint(allocator, fmt, .{s.path});
+        const dir = try allocator.print(fmt, .{s.path});
         defer allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
     inline for (comptime .{ .{ "{s}/alt/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz", "xx" }, .{ "{s}/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz", "x" } }) |entry| {
-        const path = try std.fmt.allocPrint(allocator, entry[0], .{s.path});
+        const path = try allocator.print(entry[0], .{s.path});
         defer allocator.free(path);
         const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
         defer f.close(std.Options.debug_io);
@@ -485,5 +485,5 @@ test "emitDoctorJson sizes tap_cache from the cache dir it is handed, not the pr
 
     doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, alt, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"tap_cache\":{\"bytes\":2,") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"tap_cache\":{\"bytes\":2,") != null);
 }

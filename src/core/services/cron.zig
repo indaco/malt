@@ -100,7 +100,7 @@ fn parsePart(part: []const u8, spec: FieldSpec, is_weekday: bool, set: *Set) Cro
 
     var base = part;
     var step: u8 = 1;
-    if (std.mem.indexOfScalar(u8, part, '/')) |slash| {
+    if (std.mem.findScalar(u8, part, '/')) |slash| {
         base = part[0..slash];
         step = try parseNum(part[slash + 1 ..]);
         if (step == 0) return CronError.CronMalformed;
@@ -111,7 +111,7 @@ fn parsePart(part: []const u8, spec: FieldSpec, is_weekday: bool, set: *Set) Cro
     if (base.len == 1 and base[0] == '*') {
         lo = spec.min;
         hi = spec.max;
-    } else if (std.mem.indexOfScalar(u8, base, '-')) |dash| {
+    } else if (std.mem.findScalar(u8, base, '-')) |dash| {
         lo = try parseNum(base[0..dash]);
         hi = try parseNum(base[dash + 1 ..]);
     } else {

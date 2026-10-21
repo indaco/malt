@@ -55,7 +55,7 @@ fn bottleErrorFromGhcr(e: ghcr_mod.GhcrError) BottleError {
 /// Formats `<dest_dir>/bottle.tar.gz` into `buf`; distinguishes path overflow
 /// from allocation failure so callers can surface a precise message.
 pub fn buildTmpArchivePath(buf: []u8, dest_dir: []const u8) BottleError![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
+    return std.mem.print(buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
         return BottleError.PathTooLong;
 }
 
@@ -250,8 +250,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -263,8 +262,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,

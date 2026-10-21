@@ -204,7 +204,7 @@ pub fn freeEntrySlice(allocator: std.mem.Allocator, slice: []OutdatedEntry) void
 
 /// Resolve the absolute snapshot path under `cache_dir`. Caller frees.
 pub fn snapshotPath(allocator: std.mem.Allocator, cache_dir: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ cache_dir, snapshot_file });
+    return allocator.print("{s}/{s}", .{ cache_dir, snapshot_file });
 }
 
 /// Atomically write `snap` to `{cache_dir}/outdated.json`. Creates the
@@ -265,8 +265,8 @@ pub fn readSnapshot(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const
 /// only a re-audit can represent it. Best-effort — absent is the goal — but
 /// a file that stays put keeps misleading readers, so that is said aloud.
 pub fn deleteSnapshot(io: std.Io, cache_dir: []const u8) void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ cache_dir, snapshot_file }) catch return;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = std.mem.print(&buf, "{s}/{s}", .{ cache_dir, snapshot_file }) catch return;
     std.Io.Dir.deleteFileAbsolute(io, path) catch |e| switch (e) {
         error.FileNotFound => {},
         else => output.warn("Could not remove the stale outdated snapshot at {s}: {s}", .{ path, @errorName(e) }),
@@ -521,7 +521,7 @@ test "deleteSnapshot removes the file so the next reader must re-audit" {
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_snap_delete_{d}", .{std.c.getpid()});
+    const dir = try std.mem.print(&dir_buf, "/tmp/malt_snap_delete_{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
 
     try writeSnapshot(io, a, dir, .{ .generated_at_ms = 1, .formulas = &.{}, .casks = &.{} });
@@ -539,7 +539,7 @@ test "deleteSnapshot warns when the file cannot be removed, but not when it is a
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/malt_snap_locked_{d}", .{std.c.getpid()}, 0);
+    const dir = try std.mem.printSentinel(&dir_buf, "/tmp/malt_snap_locked_{d}", .{std.c.getpid()}, 0);
     defer {
         _ = std.c.chmod(dir.ptr, 0o755);
         std.Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -553,7 +553,7 @@ test "deleteSnapshot warns when the file cannot be removed, but not when it is a
 
     _ = std.c.chmod(dir.ptr, 0o500);
     deleteSnapshot(io, dir);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "outdated snapshot") != null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "outdated snapshot") != null);
 
     _ = std.c.chmod(dir.ptr, 0o755);
     err_buf.clearRetainingCapacity();
@@ -573,7 +573,7 @@ const ReconcileFixture = struct {
     ;
 
     fn init(self: *ReconcileFixture, comptime tag: []const u8) !void {
-        self.dir = try std.fmt.bufPrint(&self.dir_buf, "/tmp/malt_snap_rec_{s}_{d}", .{ tag, std.c.getpid() });
+        self.dir = try std.mem.print(&self.dir_buf, "/tmp/malt_snap_rec_{s}_{d}", .{ tag, std.c.getpid() });
         std.Io.Dir.cwd().deleteTree(io, self.dir) catch {};
         try self.write(seed);
     }

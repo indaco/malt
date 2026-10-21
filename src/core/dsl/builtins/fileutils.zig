@@ -93,8 +93,8 @@ pub fn cp(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
                 return BuiltinError.PathSandboxViolation;
             for (items) |item| {
                 const src = item.asString(ctx.allocator) catch continue;
-                const base = std.fs.path.basename(src);
-                const dest_path = std.fs.path.join(ctx.allocator, &.{ dst, base }) catch continue;
+                const base = std.Io.Dir.path.basename(src);
+                const dest_path = std.Io.Dir.path.join(ctx.allocator, &.{ dst, base }) catch continue;
                 // Best-effort per entry: a forbidden/out-of-keg source is skipped.
                 copyFileConfined(ctx.io, src, dest_path, ctx.cellar_path, ctx.malt_prefix) catch continue;
             }
@@ -221,7 +221,7 @@ pub fn lnS(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
 
-    if (std.fs.path.dirname(link_path)) |parent| {
+    if (std.Io.Dir.path.dirname(link_path)) |parent| {
         std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
     }
     // Relative targets are ordinary in formulae and already bounds-checked above;
@@ -244,8 +244,8 @@ pub fn lnSf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
             std.Io.Dir.cwd().createDirPath(ctx.io, dest_dir) catch {};
             for (items) |item| {
                 const target = item.asString(ctx.allocator) catch continue;
-                const base = std.fs.path.basename(target);
-                const link_path = std.fs.path.join(ctx.allocator, &.{ dest_dir, base }) catch continue;
+                const base = std.Io.Dir.path.basename(target);
+                const link_path = std.Io.Dir.path.join(ctx.allocator, &.{ dest_dir, base }) catch continue;
                 defer ctx.allocator.free(link_path);
                 try forceSymlink(ctx, target, link_path);
             }
@@ -266,7 +266,7 @@ fn forceSymlink(ctx: ExecCtx, target: []const u8, link_path: []const u8) Builtin
         error.OutOfMemory => return BuiltinError.OutOfMemory,
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
-    if (std.fs.path.dirname(link_path)) |parent| {
+    if (std.Io.Dir.path.dirname(link_path)) |parent| {
         std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
     }
     std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
@@ -291,8 +291,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -301,7 +300,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -311,8 +310,7 @@ const Scratch = struct {
 
     /// Absolute path to `sub` (leading slash included); valid until deinit.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -333,17 +331,17 @@ test "cp refuses to copy through an intermediate-directory symlink out of the ke
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" });
     defer alloc.free(dirlink);
-    const src = try std.fs.path.join(alloc, &.{ keg, "src.txt" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src.txt" });
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ dirlink, "x" }); // keg/d/x, d -> outside
+    const dst = try std.Io.Dir.path.join(alloc, &.{ dirlink, "x" }); // keg/d/x, d -> outside
     defer alloc.free(dst);
-    const escaped = try std.fs.path.join(alloc, &.{ outside, "x" });
+    const escaped = try std.Io.Dir.path.join(alloc, &.{ outside, "x" });
     defer alloc.free(escaped);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -372,11 +370,11 @@ test "ln_s refuses a target that points out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const link = try std.fs.path.join(alloc, &.{ keg, "d" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "d" });
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -399,9 +397,9 @@ test "ln_s still links to a target inside the keg" {
     defer s.deinit();
     const keg = s.base;
 
-    const target = try std.fs.path.join(alloc, &.{ keg, "real.txt" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ keg, "real.txt" });
     defer alloc.free(target);
-    const link = try std.fs.path.join(alloc, &.{ keg, "alias" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "alias" });
     defer alloc.free(link);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
@@ -421,16 +419,16 @@ test "ln_s refuses a target that reaches out through a planted directory symlink
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" });
     defer alloc.free(dirlink);
     // Lexically inside the keg, but `d` is a doorway the bottle shipped.
-    const target = try std.fs.path.join(alloc, &.{ dirlink, "secret" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ dirlink, "secret" });
     defer alloc.free(target);
-    const link = try std.fs.path.join(alloc, &.{ keg, "alias" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "alias" });
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -452,15 +450,15 @@ test "rm_r refuses to delete through an intermediate-directory symlink out of th
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const victim = try std.fs.path.join(alloc, &.{ outside, "precious" });
+    const victim = try std.Io.Dir.path.join(alloc, &.{ outside, "precious" });
     defer alloc.free(victim);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" });
     defer alloc.free(dirlink);
-    const through = try std.fs.path.join(alloc, &.{ dirlink, "precious" });
+    const through = try std.Io.Dir.path.join(alloc, &.{ dirlink, "precious" });
     defer alloc.free(through);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -486,7 +484,7 @@ test "rm_r still deletes a tree inside the keg" {
     defer s.deinit();
     const keg = s.base;
 
-    const doomed = try std.fs.path.join(alloc, &.{ keg, "build" });
+    const doomed = try std.Io.Dir.path.join(alloc, &.{ keg, "build" });
     defer alloc.free(doomed);
     try std.Io.Dir.cwd().createDirPath(io, doomed);
 
@@ -502,15 +500,15 @@ test "mkdir_p refuses to create through an intermediate-directory symlink out of
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" });
     defer alloc.free(dirlink);
-    const through = try std.fs.path.join(alloc, &.{ dirlink, "made" });
+    const through = try std.Io.Dir.path.join(alloc, &.{ dirlink, "made" });
     defer alloc.free(through);
-    const escaped = try std.fs.path.join(alloc, &.{ outside, "made" });
+    const escaped = try std.Io.Dir.path.join(alloc, &.{ outside, "made" });
     defer alloc.free(escaped);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -532,11 +530,11 @@ test "touch refuses to create through a symlink out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const target = try std.fs.path.join(alloc, &.{ base, "outside" }); // out of keg, never created
+    const target = try std.Io.Dir.path.join(alloc, &.{ base, "outside" }); // out of keg, never created
     defer alloc.free(target);
-    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" }); // keg/pwn -> base/outside
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "pwn" }); // keg/pwn -> base/outside
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -558,11 +556,11 @@ test "chmod refuses to follow a symlink out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    const victim = try std.Io.Dir.path.join(alloc, &.{ base, "victim" });
     defer alloc.free(victim);
-    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "pwn" });
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -590,17 +588,17 @@ test "cp_r refuses a symlink planted deep in the dest subtree" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
 
     // Source tree: src/sub/file.txt
-    const src = try std.fs.path.join(alloc, &.{ keg, "src" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src" });
     defer alloc.free(src);
-    const src_file = try std.fs.path.join(alloc, &.{ keg, "src", "sub", "file.txt" });
+    const src_file = try std.Io.Dir.path.join(alloc, &.{ keg, "src", "sub", "file.txt" });
     defer alloc.free(src_file);
-    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(src_file).?);
+    try std.Io.Dir.cwd().createDirPath(io, std.Io.Dir.path.dirname(src_file).?);
     {
         const sf = try std.Io.Dir.createFileAbsolute(io, src_file, .{});
         defer sf.close(io);
@@ -608,11 +606,11 @@ test "cp_r refuses a symlink planted deep in the dest subtree" {
     }
 
     // Dest tree with a planted symlink at dst/sub -> outside.
-    const dst = try std.fs.path.join(alloc, &.{ keg, "dst" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "dst" });
     defer alloc.free(dst);
-    const dst_sub = try std.fs.path.join(alloc, &.{ keg, "dst", "sub" });
+    const dst_sub = try std.Io.Dir.path.join(alloc, &.{ keg, "dst", "sub" });
     defer alloc.free(dst_sub);
-    const escaped = try std.fs.path.join(alloc, &.{ outside, "file.txt" });
+    const escaped = try std.Io.Dir.path.join(alloc, &.{ outside, "file.txt" });
     defer alloc.free(escaped);
     try std.Io.Dir.cwd().createDirPath(io, dst);
     try std.Io.Dir.cwd().createDirPath(io, outside);
@@ -635,11 +633,11 @@ test "mv refuses to move a source from outside the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const secret = try std.fs.path.join(alloc, &.{ base, "secret" }); // out of keg
+    const secret = try std.Io.Dir.path.join(alloc, &.{ base, "secret" }); // out of keg
     defer alloc.free(secret);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "loot" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "loot" });
     defer alloc.free(dst);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -667,9 +665,9 @@ test "mv moves a regular file within the keg" {
     defer s.deinit();
     const keg = s.base;
 
-    const src = try std.fs.path.join(alloc, &.{ keg, "a.txt" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "a.txt" });
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "b.txt" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "b.txt" });
     defer alloc.free(dst);
     {
         const sf = try std.Io.Dir.createFileAbsolute(io, src, .{});
@@ -694,11 +692,11 @@ test "cp refuses to copy a source from outside the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const secret = try std.fs.path.join(alloc, &.{ base, "secret" }); // out of keg
+    const secret = try std.Io.Dir.path.join(alloc, &.{ base, "secret" }); // out of keg
     defer alloc.free(secret);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "leak" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "leak" });
     defer alloc.free(dst);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -724,13 +722,13 @@ test "cp refuses to read through a source symlink out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const secret = try std.fs.path.join(alloc, &.{ base, "secret" }); // out of keg
+    const secret = try std.Io.Dir.path.join(alloc, &.{ base, "secret" }); // out of keg
     defer alloc.free(secret);
-    const link = try std.fs.path.join(alloc, &.{ keg, "link" }); // keg/link -> base/secret
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "link" }); // keg/link -> base/secret
     defer alloc.free(link);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "leak" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "leak" });
     defer alloc.free(dst);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -762,12 +760,12 @@ test "cp array branch skips an out-of-keg source but copies an in-keg one" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
-    const good = try std.fs.path.join(alloc, &.{ keg, "good.txt" }); // in keg
-    const secret = try std.fs.path.join(alloc, &.{ base, "secret" }); // out of keg
-    const into = try std.fs.path.join(alloc, &.{ keg, "into" }); // dest dir
-    const landed = try std.fs.path.join(alloc, &.{ into, "good.txt" });
-    const escaped = try std.fs.path.join(alloc, &.{ into, "secret" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
+    const good = try std.Io.Dir.path.join(alloc, &.{ keg, "good.txt" }); // in keg
+    const secret = try std.Io.Dir.path.join(alloc, &.{ base, "secret" }); // out of keg
+    const into = try std.Io.Dir.path.join(alloc, &.{ keg, "into" }); // dest dir
+    const landed = try std.Io.Dir.path.join(alloc, &.{ into, "good.txt" });
+    const escaped = try std.Io.Dir.path.join(alloc, &.{ into, "secret" });
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
     {
@@ -801,13 +799,13 @@ test "cp_r refuses to copy a source from outside the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const tree = try std.fs.path.join(alloc, &.{ base, "tree" }); // out-of-keg source dir
+    const tree = try std.Io.Dir.path.join(alloc, &.{ base, "tree" }); // out-of-keg source dir
     defer alloc.free(tree);
-    const tree_file = try std.fs.path.join(alloc, &.{ base, "tree", "f.txt" });
+    const tree_file = try std.Io.Dir.path.join(alloc, &.{ base, "tree", "f.txt" });
     defer alloc.free(tree_file);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "copy" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "copy" });
     defer alloc.free(dst);
 
     try std.Io.Dir.cwd().createDirPath(io, tree);
@@ -837,12 +835,12 @@ test "cp_r refuses to read a source symlink planted in the source subtree" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
-    const secret = try std.fs.path.join(alloc, &.{ base, "secret" }); // out of keg
-    const src = try std.fs.path.join(alloc, &.{ keg, "src" }); // in-keg source dir
-    const link = try std.fs.path.join(alloc, &.{ keg, "src", "link" }); // src/link -> secret
-    const dst = try std.fs.path.join(alloc, &.{ keg, "dst" });
-    const leaked = try std.fs.path.join(alloc, &.{ keg, "dst", "link" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
+    const secret = try std.Io.Dir.path.join(alloc, &.{ base, "secret" }); // out of keg
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src" }); // in-keg source dir
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "src", "link" }); // src/link -> secret
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "dst" });
+    const leaked = try std.Io.Dir.path.join(alloc, &.{ keg, "dst", "link" });
 
     try std.Io.Dir.cwd().createDirPath(io, src);
     {
@@ -869,12 +867,12 @@ test "cp_r copies a directory tree within the keg" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const src = try std.fs.path.join(alloc, &.{ keg, "src" });
-    const src_file = try std.fs.path.join(alloc, &.{ keg, "src", "sub", "file.txt" });
-    const dst = try std.fs.path.join(alloc, &.{ keg, "dst" });
-    const copied = try std.fs.path.join(alloc, &.{ keg, "dst", "sub", "file.txt" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src" });
+    const src_file = try std.Io.Dir.path.join(alloc, &.{ keg, "src", "sub", "file.txt" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "dst" });
+    const copied = try std.Io.Dir.path.join(alloc, &.{ keg, "dst", "sub", "file.txt" });
 
-    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(src_file).?);
+    try std.Io.Dir.cwd().createDirPath(io, std.Io.Dir.path.dirname(src_file).?);
     {
         const sf = try std.Io.Dir.createFileAbsolute(io, src_file, .{});
         defer sf.close(io);
@@ -900,8 +898,8 @@ test "cp_r on a tree deeper than PATH_MAX terminates instead of overflowing" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const src = try std.fs.path.join(alloc, &.{ keg, "src" });
-    const dst = try std.fs.path.join(alloc, &.{ keg, "dst" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "dst" });
 
     // 600 levels is 1200 path bytes, past what an absolute open can address.
     // Descend by handle: createDirPath cannot build a tree it cannot name.
@@ -944,17 +942,17 @@ test "mv refuses a source under an intermediate-directory symlink out of the keg
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const victim = try std.fs.path.join(alloc, &.{ base, "outside", "victim" });
+    const victim = try std.Io.Dir.path.join(alloc, &.{ base, "outside", "victim" });
     defer alloc.free(victim);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" }); // keg/d -> outside
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" }); // keg/d -> outside
     defer alloc.free(dirlink);
-    const src = try std.fs.path.join(alloc, &.{ keg, "d", "victim" }); // literal in-keg, resolves out
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "d", "victim" }); // literal in-keg, resolves out
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "loot" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "loot" });
     defer alloc.free(dst);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -983,17 +981,17 @@ test "mv refuses a destination under an intermediate-directory symlink out of th
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const src = try std.fs.path.join(alloc, &.{ keg, "src.txt" }); // in-keg source
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src.txt" }); // in-keg source
     defer alloc.free(src);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" }); // keg/d -> outside
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" }); // keg/d -> outside
     defer alloc.free(dirlink);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "d", "x" }); // literal in-keg, resolves out
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "d", "x" }); // literal in-keg, resolves out
     defer alloc.free(dst);
-    const escaped = try std.fs.path.join(alloc, &.{ outside, "x" });
+    const escaped = try std.Io.Dir.path.join(alloc, &.{ outside, "x" });
     defer alloc.free(escaped);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -1025,9 +1023,9 @@ test "mv moves an in-keg symlink leaf, relinking it without following" {
     // A final-component symlink source is acceptable for mv: rename relinks the
     // link entry itself, it does not read through it. The guard must not reject
     // it, and the moved entry must remain a symlink (not a dereferenced copy).
-    const link = try std.fs.path.join(alloc, &.{ keg, "link" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "link" });
     defer alloc.free(link);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "moved" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "moved" });
     defer alloc.free(dst);
     try std.Io.Dir.symLinkAbsolute(io, "/etc/hosts", link, .{});
 
@@ -1035,7 +1033,7 @@ test "mv moves an in-keg symlink leaf, relinking it without following" {
     _ = try mv(ctx, null, &.{ Value{ .string = link }, Value{ .string = dst } });
 
     // The link entry moved; the destination is still a symlink to the same target.
-    var lb: [std.fs.max_path_bytes]u8 = undefined;
+    var lb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(io, dst, &lb);
     try std.testing.expectEqualStrings("/etc/hosts", lb[0..n]);
 }
@@ -1047,17 +1045,17 @@ test "cp refuses a source under an intermediate-directory symlink out of the keg
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const secret = try std.fs.path.join(alloc, &.{ base, "outside", "secret" });
+    const secret = try std.Io.Dir.path.join(alloc, &.{ base, "outside", "secret" });
     defer alloc.free(secret);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" }); // keg/d -> outside
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" }); // keg/d -> outside
     defer alloc.free(dirlink);
-    const src = try std.fs.path.join(alloc, &.{ keg, "d", "secret" }); // literal in-keg, resolves out
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "d", "secret" }); // literal in-keg, resolves out
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "leak" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "leak" });
     defer alloc.free(dst);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -1087,13 +1085,13 @@ test "cp_r refuses to follow a symlinked directory in the source subtree" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" }); // out-of-keg dir
-    const outside_file = try std.fs.path.join(alloc, &.{ base, "outside", "secret" });
-    const src = try std.fs.path.join(alloc, &.{ keg, "src" }); // in-keg source dir
-    const sublink = try std.fs.path.join(alloc, &.{ keg, "src", "sub" }); // src/sub -> outside
-    const dst = try std.fs.path.join(alloc, &.{ keg, "dst" });
-    const leaked = try std.fs.path.join(alloc, &.{ keg, "dst", "sub", "secret" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" }); // out-of-keg dir
+    const outside_file = try std.Io.Dir.path.join(alloc, &.{ base, "outside", "secret" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src" }); // in-keg source dir
+    const sublink = try std.Io.Dir.path.join(alloc, &.{ keg, "src", "sub" }); // src/sub -> outside
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "dst" });
+    const leaked = try std.Io.Dir.path.join(alloc, &.{ keg, "dst", "sub", "secret" });
 
     try std.Io.Dir.cwd().createDirPath(io, src);
     try std.Io.Dir.cwd().createDirPath(io, outside);
@@ -1119,9 +1117,9 @@ test "cp preserves the source file mode within the keg" {
 
     // The no-follow read + atomic write must keep the executable bit that
     // copyFileAbsolute used to carry, or poured scripts would lose +x.
-    const src = try std.fs.path.join(alloc, &.{ keg, "exec.sh" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "exec.sh" });
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "copy.sh" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "copy.sh" });
     defer alloc.free(dst);
     {
         const sf = try std.Io.Dir.createFileAbsolute(io, src, .{});
@@ -1144,9 +1142,9 @@ test "cp copies a regular file within the keg" {
     defer s.deinit();
     const keg = s.base;
 
-    const src = try std.fs.path.join(alloc, &.{ keg, "src.txt" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ keg, "src.txt" });
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ keg, "dst.txt" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ keg, "dst.txt" });
     defer alloc.free(dst);
     {
         const sf = try std.Io.Dir.createFileAbsolute(io, src, .{});
@@ -1170,7 +1168,7 @@ test "touch creates a regular file in the keg" {
     defer s.deinit();
     const keg = s.base;
 
-    const target = try std.fs.path.join(alloc, &.{ keg, "stamp" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ keg, "stamp" });
     defer alloc.free(target);
 
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
@@ -1186,7 +1184,7 @@ test "touch bumps the times of an existing read-only keg file" {
     const keg = s.base;
 
     // A compiled cache marked newer than its source, read-only as bottled.
-    const target = try std.fmt.allocPrintSentinel(alloc, "{s}/mod.go", .{keg}, 0);
+    const target = try alloc.printSentinel("{s}/mod.go", .{keg}, 0);
     defer alloc.free(target);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
@@ -1210,7 +1208,7 @@ test "chmod changes the mode of a regular keg file" {
     defer s.deinit();
     const keg = s.base;
 
-    const file = try std.fs.path.join(alloc, &.{ keg, "script" });
+    const file = try std.Io.Dir.path.join(alloc, &.{ keg, "script" });
     defer alloc.free(file);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, file, .{});
@@ -1283,8 +1281,8 @@ fn copyDirRecursive(io: std.Io, allocator: std.mem.Allocator, src: []const u8, d
 
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
-        const src_child = std.fs.path.join(allocator, &.{ src, entry.name }) catch continue;
-        const dst_child = std.fs.path.join(allocator, &.{ dst, entry.name }) catch continue;
+        const src_child = std.Io.Dir.path.join(allocator, &.{ src, entry.name }) catch continue;
+        const dst_child = std.Io.Dir.path.join(allocator, &.{ dst, entry.name }) catch continue;
 
         if (entry.kind == .directory) {
             try copyDirRecursive(io, allocator, src_child, dst_child, cellar_path, malt_prefix);
@@ -1303,23 +1301,23 @@ test "ln_s keeps a relative in-keg target instead of aborting" {
 
     // `ln_s "../libexec/tool", bin/"tool"` is ordinary Homebrew shorthand: the
     // target is relative so the link survives the keg being relocated.
-    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    const libexec = try std.Io.Dir.path.join(alloc, &.{ keg, "libexec" });
     defer alloc.free(libexec);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, libexec);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    const real = try std.Io.Dir.path.join(alloc, &.{ libexec, "tool" });
     defer alloc.free(real);
     (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
-    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "tool" });
     defer alloc.free(link);
 
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try lnS(ctx, null, &.{ Value{ .string = "../libexec/tool" }, Value{ .string = link } });
 
     // Stored verbatim, and it resolves to the real file.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
     try std.Io.Dir.cwd().access(io, link, .{});
@@ -1332,22 +1330,22 @@ test "ln_sf keeps a relative in-keg target instead of aborting" {
     defer s.deinit();
     const keg = s.base;
 
-    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    const libexec = try std.Io.Dir.path.join(alloc, &.{ keg, "libexec" });
     defer alloc.free(libexec);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, libexec);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    const real = try std.Io.Dir.path.join(alloc, &.{ libexec, "tool" });
     defer alloc.free(real);
     (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
-    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "tool" });
     defer alloc.free(link);
 
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try lnSf(ctx, null, &.{ Value{ .string = "../libexec/tool" }, Value{ .string = link } });
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
 }
@@ -1359,12 +1357,12 @@ test "ln_s refuses a relative target that escapes the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const link = try std.fs.path.join(alloc, &.{ bin, "pwn" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "pwn" });
     defer alloc.free(link);
 
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
@@ -1384,12 +1382,12 @@ test "ln_sf refuses a relative target that escapes the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const link = try std.fs.path.join(alloc, &.{ bin, "pwn" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "pwn" });
     defer alloc.free(link);
 
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
@@ -1407,7 +1405,7 @@ test "ln_sf leaves no link for an empty target" {
     defer s.deinit();
     const keg = s.base;
 
-    const link = try std.fs.path.join(alloc, &.{ keg, "tool" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "tool" });
     defer alloc.free(link);
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     // `ln_s` guards this arg but the force variant does not; it must still be
@@ -1423,13 +1421,13 @@ test "ln_sf array form links a relative target under its basename" {
     defer s.deinit();
     const keg = s.base;
 
-    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    const libexec = try std.Io.Dir.path.join(alloc, &.{ keg, "libexec" });
     defer alloc.free(libexec);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, libexec);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    const real = try std.Io.Dir.path.join(alloc, &.{ libexec, "tool" });
     defer alloc.free(real);
     (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
 
@@ -1439,9 +1437,9 @@ test "ln_sf array form links a relative target under its basename" {
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try lnSf(ctx, null, &.{ Value{ .array = &items }, Value{ .string = bin } });
 
-    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "tool" });
     defer alloc.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
     try std.Io.Dir.cwd().access(io, link, .{});
@@ -1454,10 +1452,10 @@ test "ln_s accepts a relative target that does not exist yet" {
     defer s.deinit();
     const keg = s.base;
 
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "tool" });
     defer alloc.free(link);
 
     // Formulae link ahead of the file they point at; an in-keg target that is
@@ -1465,7 +1463,7 @@ test "ln_s accepts a relative target that does not exist yet" {
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try lnS(ctx, null, &.{ Value{ .string = "../libexec/later" }, Value{ .string = link } });
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/later", buf[0..n]);
 }

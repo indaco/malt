@@ -60,8 +60,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,

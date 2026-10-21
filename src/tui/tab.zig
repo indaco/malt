@@ -308,8 +308,8 @@ test "putCheckbox renders each selection state with the right glyph" {
         var buf: [64]u8 = undefined;
         var f: Frame = .{ .buf = &buf };
         putCheckbox(&f, c.state);
-        try std.testing.expect(std.mem.indexOf(u8, f.slice(), c.want) != null);
-        try std.testing.expect(std.mem.indexOf(u8, f.slice(), c.absent) == null);
+        try std.testing.expect(std.mem.find(u8, f.slice(), c.want) != null);
+        try std.testing.expect(std.mem.find(u8, f.slice(), c.absent) == null);
     }
 }
 
@@ -318,14 +318,14 @@ test "putCheckbox colours only the selected check, leaving the brackets plain" {
     var f: Frame = .{ .buf = &buf };
     putCheckbox(&f, .on);
     // A reset follows the check so the row content after it isn't tinted green.
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reset.code()) != null);
+    try std.testing.expect(std.mem.find(u8, f.slice(), color.Style.reset.code()) != null);
 }
 
 test "renderHint paints the placeholder text into the frame" {
     var buf: [128]u8 = undefined;
     var f: Frame = .{ .buf = &buf };
     renderHint(&f, .{ .row = 2, .col = 1, .width = 40, .height = 6 }, "Nothing here.");
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "Nothing here.") != null);
+    try std.testing.expect(std.mem.find(u8, f.slice(), "Nothing here.") != null);
 }
 
 test "renderSeparator paints a full-width rule, dim only when asked" {
@@ -333,17 +333,17 @@ test "renderSeparator paints a full-width rule, dim only when asked" {
     var f: Frame = .{ .buf = &buf };
     renderSeparator(&f, .{ .row = 5, .col = 1, .width = 4, .height = 1 }, 5, true);
     const dim = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, dim, color.roleCode(.muted)) != null);
-    try std.testing.expect(std.mem.indexOf(u8, dim, "────") != null); // width box-drawing cells
-    try std.testing.expect(std.mem.indexOf(u8, dim, color.Style.reset.code()) != null);
+    try std.testing.expect(std.mem.find(u8, dim, color.roleCode(.muted)) != null);
+    try std.testing.expect(std.mem.find(u8, dim, "────") != null); // width box-drawing cells
+    try std.testing.expect(std.mem.find(u8, dim, color.Style.reset.code()) != null);
 
     // Undimmed: the bare rule, terminal default — no muted SGR, no reset.
     var pbuf: [256]u8 = undefined;
     var pf: Frame = .{ .buf = &pbuf };
     renderSeparator(&pf, .{ .row = 1, .col = 1, .width = 4, .height = 1 }, 1, false);
     const plain = pf.slice();
-    try std.testing.expect(std.mem.indexOf(u8, plain, "────") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plain, color.roleCode(.muted)) == null);
+    try std.testing.expect(std.mem.find(u8, plain, "────") != null);
+    try std.testing.expect(std.mem.find(u8, plain, color.roleCode(.muted)) == null);
 }
 
 test "renderHeading lays bold columns with an indent and per-column gaps" {
@@ -354,9 +354,9 @@ test "renderHeading lays bold columns with an indent and per-column gaps" {
         .{ .label = "B", .width = 4, .gap = 2 },
     });
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    try std.testing.expect(std.mem.find(u8, out, color.Style.bold.code()) != null);
     // 2-space indent, A padded to width 4, then a 2-cell gap before B.
-    try std.testing.expect(std.mem.indexOf(u8, out, "  A" ++ &@as([5]u8, @splat(' ')) ++ "B") != null);
+    try std.testing.expect(std.mem.find(u8, out, "  A" ++ &@as([5]u8, @splat(' ')) ++ "B") != null);
 }
 
 test "renderHeading truncates to the rect width and still closes the bold" {
@@ -368,8 +368,8 @@ test "renderHeading truncates to the rect width and still closes the bold" {
         .{ .label = "VERSION", .width = 14 },
     });
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, out, "VERSION") == null); // cut past the width
-    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.reset.code()) != null); // bold still closed
+    try std.testing.expect(std.mem.find(u8, out, "VERSION") == null); // cut past the width
+    try std.testing.expect(std.mem.find(u8, out, color.Style.reset.code()) != null); // bold still closed
 }
 
 test "renderHint on a zero-height rect is a clean no-op" {
@@ -414,7 +414,7 @@ test "putContent drops an ESC so a child row cannot re-drive the cursor or set c
     var f: Frame = .{ .buf = &buf };
     f.putContent("\x1b[1mX\x1b[0m"); // an SGR a hostile package name might carry
     try std.testing.expectEqualStrings("[1mX[0m", f.slice()); // ESC bytes gone; the remnant is inert text
-    try std.testing.expect(std.mem.indexOfScalar(u8, f.slice(), 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, f.slice(), 0x1b) == null);
 }
 
 test "putContent strips the control introducers from a hostile row (OSC + BEL + erase)" {
@@ -423,9 +423,9 @@ test "putContent strips the control introducers from a hostile row (OSC + BEL + 
     // An OSC title-set, a BEL, and an erase-display a hostile child name might carry.
     f.putContent("x\x1b]0;pwn\x07y\x1b[2J");
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null); // no ESC → no CSI/OSC executes
-    try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
-    try std.testing.expect(std.mem.indexOf(u8, out, "x") != null and std.mem.indexOf(u8, out, "y") != null);
+    try std.testing.expect(std.mem.findScalar(u8, out, 0x1b) == null); // no ESC → no CSI/OSC executes
+    try std.testing.expect(std.mem.findScalar(u8, out, 0x07) == null); // BEL dropped
+    try std.testing.expect(std.mem.find(u8, out, "x") != null and std.mem.find(u8, out, "y") != null);
 }
 
 test "putContent drops a lone 8-bit C1 introducer from row content" {
@@ -484,7 +484,7 @@ test "paintRows emits the erase raw yet still scrubs an erase carried in row con
     // Exactly one erase — the structural one from moveClear. The row's own
     // `\x1b[K` lost its ESC to putContent, so it can never drive a second erase.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, f.slice(), "\x1b[K"));
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "[Kx") != null); // inert remnant
+    try std.testing.expect(std.mem.find(u8, f.slice(), "[Kx") != null); // inert remnant
 }
 
 test "paintRows positions each row and a row's embedded newline never injects a frame line" {
@@ -493,9 +493,9 @@ test "paintRows positions each row and a row's embedded newline never injects a 
     const rows = [_][]const u8{ "x\ny", "z" };
     paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 10, .height = 2 });
     // A frame positions with cursor moves and carries no raw newline.
-    try std.testing.expect(std.mem.indexOfScalar(u8, f.slice(), '\n') == null);
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "xy") != null); // the \n was stripped
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "z") != null);
+    try std.testing.expect(std.mem.findScalar(u8, f.slice(), '\n') == null);
+    try std.testing.expect(std.mem.find(u8, f.slice(), "xy") != null); // the \n was stripped
+    try std.testing.expect(std.mem.find(u8, f.slice(), "z") != null);
 }
 
 test "paintRows blanks the whole rectangle so a shrunk list leaves no ghost rows" {
@@ -509,9 +509,9 @@ test "paintRows blanks the whole rectangle so a shrunk list leaves no ghost rows
     // Five self-erasing rows total: two painted, three remainder.
     try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, out, "\x1b[K"));
     // The remainder rows are addressed and erased in place.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[3;1H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[3;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[4;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[5;1H\x1b[K") != null);
 }
 
 test "paintRows on a full-height list blanks no extra row past the rectangle bottom" {
@@ -522,7 +522,7 @@ test "paintRows on a full-height list blanks no extra row past the rectangle bot
     paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 20, .height = 3 });
     const out = f.slice();
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, out, "\x1b[K"));
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H") == null); // no write past the bottom edge
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[4;1H") == null); // no write past the bottom edge
 }
 
 test "paintRows on an empty list blanks every row of the rectangle" {
@@ -532,9 +532,9 @@ test "paintRows on an empty list blanks every row of the rectangle" {
     paintRows(&f, &.{}, .{}, .{ .row = 1, .col = 1, .width = 20, .height = 4 });
     const out = f.slice();
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, out, "\x1b[K"));
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;1H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H") == null); // no write past the bottom edge
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[1;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[4;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[5;1H") == null); // no write past the bottom edge
 }
 
 test "blankRemainder addresses the unpainted rows relative to the rect origin" {
@@ -545,10 +545,10 @@ test "blankRemainder addresses the unpainted rows relative to the rect origin" {
     blankRemainder(&f, .{ .row = 10, .col = 3, .width = 20, .height = 3 }, 1);
     const out = f.slice();
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "\x1b[K"));
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[11;3H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[12;3H\x1b[K") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[10;3H") == null); // caller's painted row untouched
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[13;3H") == null); // nothing past the bottom
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[11;3H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[12;3H\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[10;3H") == null); // caller's painted row untouched
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[13;3H") == null); // nothing past the bottom
 }
 
 test "blankRemainder is a no-op when the caller already filled the rectangle" {

@@ -76,7 +76,7 @@ pub fn directoryQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError
 pub fn symlinkQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = std.Io.Dir.cwd().readLink(ctx.io, path, &buf) catch {
         return Value{ .bool = false };
     };
@@ -128,7 +128,7 @@ pub fn children(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
     var entries: std.ArrayList(Value) = .empty;
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        const child_path = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
+        const child_path = std.Io.Dir.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
         entries.append(ctx.allocator, Value{ .pathname = child_path }) catch continue;
     }
     const slice = entries.toOwnedSlice(ctx.allocator) catch return BuiltinError.OutOfMemory;
@@ -138,19 +138,19 @@ pub fn children(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
 /// basename — filename component
 pub fn basename(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    return Value{ .string = std.fs.path.basename(path) };
+    return Value{ .string = std.Io.Dir.path.basename(path) };
 }
 
 /// dirname — parent directory
 pub fn dirname(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    return Value{ .pathname = std.fs.path.dirname(path) orelse "/" };
+    return Value{ .pathname = std.Io.Dir.path.dirname(path) orelse "/" };
 }
 
 /// extname — file extension
 pub fn extname(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    return Value{ .string = std.fs.path.extension(path) };
+    return Value{ .string = std.Io.Dir.path.extension(path) };
 }
 
 /// to_s — convert pathname to string
@@ -162,7 +162,7 @@ pub fn toS(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value 
 /// realpath — resolve symlinks
 pub fn realpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.Io.Dir.cwd().realPathFile(ctx.io, path, &buf) catch {
         return Value{ .pathname = path };
     };
@@ -219,21 +219,21 @@ pub fn atomicWrite(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinE
 /// opt_bin — receiver/"bin" (Formula accessor)
 pub fn optBin(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    const joined = std.fs.path.join(ctx.allocator, &.{ path, "bin" }) catch return BuiltinError.OutOfMemory;
+    const joined = std.Io.Dir.path.join(ctx.allocator, &.{ path, "bin" }) catch return BuiltinError.OutOfMemory;
     return Value{ .pathname = joined };
 }
 
 /// opt_lib — receiver/"lib" (Formula accessor)
 pub fn optLib(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    const joined = std.fs.path.join(ctx.allocator, &.{ path, "lib" }) catch return BuiltinError.OutOfMemory;
+    const joined = std.Io.Dir.path.join(ctx.allocator, &.{ path, "lib" }) catch return BuiltinError.OutOfMemory;
     return Value{ .pathname = joined };
 }
 
 /// opt_include — receiver/"include" (Formula accessor)
 pub fn optInclude(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    const joined = std.fs.path.join(ctx.allocator, &.{ path, "include" }) catch return BuiltinError.OutOfMemory;
+    const joined = std.Io.Dir.path.join(ctx.allocator, &.{ path, "include" }) catch return BuiltinError.OutOfMemory;
     return Value{ .pathname = joined };
 }
 
@@ -243,8 +243,8 @@ pub fn optInclude(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError
 /// The bare current-formula `pkgetc` resolves through path bindings, not here.
 pub fn pkgetc(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    const name = std.fs.path.basename(path);
-    const joined = std.fs.path.join(ctx.allocator, &.{ ctx.malt_prefix, "etc", name }) catch return BuiltinError.OutOfMemory;
+    const name = std.Io.Dir.path.basename(path);
+    const joined = std.Io.Dir.path.join(ctx.allocator, &.{ ctx.malt_prefix, "etc", name }) catch return BuiltinError.OutOfMemory;
     return Value{ .pathname = joined };
 }
 
@@ -284,11 +284,11 @@ fn installSymlinkArg(ctx: ExecCtx, dir: []const u8, arg: Value) BuiltinError!voi
         },
         .array => |items| for (items) |item| {
             const source = try item.asString(ctx.allocator);
-            try linkInto(ctx, dir, source, std.fs.path.basename(source));
+            try linkInto(ctx, dir, source, std.Io.Dir.path.basename(source));
         },
         else => {
             const source = try arg.asString(ctx.allocator);
-            try linkInto(ctx, dir, source, std.fs.path.basename(source));
+            try linkInto(ctx, dir, source, std.Io.Dir.path.basename(source));
         },
     }
 }
@@ -299,9 +299,9 @@ fn installSymlinkArg(ctx: ExecCtx, dir: []const u8, arg: Value) BuiltinError!voi
 fn linkInto(ctx: ExecCtx, dir: []const u8, source: []const u8, name: []const u8) BuiltinError!void {
     if (source.len == 0 or name.len == 0) return;
 
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // Overflow means a pathological path — skip rather than truncate.
-    const link = std.fmt.bufPrint(&link_buf, "{s}/{s}", .{ dir, name }) catch return;
+    const link = std.mem.print(&link_buf, "{s}/{s}", .{ dir, name }) catch return;
 
     sandbox.validateWriteDir(ctx.io, link, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
@@ -337,8 +337,8 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
         if (args.len == 0) return Value{ .array = &.{} };
         const full = args[0].asString(ctx.allocator) catch return Value{ .array = &.{} };
         if (full.len == 0) return Value{ .array = &.{} };
-        base_dir = std.fs.path.dirname(full) orelse ".";
-        pattern = std.fs.path.basename(full);
+        base_dir = std.Io.Dir.path.dirname(full) orelse ".";
+        pattern = std.Io.Dir.path.basename(full);
     }
 
     // Guard against empty/relative base_dir
@@ -353,7 +353,7 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
         if (glob_match.match(pattern, entry.name)) {
-            const child_path = std.fs.path.join(ctx.allocator, &.{ base_dir, entry.name }) catch continue;
+            const child_path = std.Io.Dir.path.join(ctx.allocator, &.{ base_dir, entry.name }) catch continue;
             results.append(ctx.allocator, Value{ .pathname = child_path }) catch continue;
         }
     }
@@ -391,8 +391,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -401,7 +400,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -411,8 +410,7 @@ const Scratch = struct {
 
     /// Absolute path to `sub` (leading slash included); valid until deinit.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -465,11 +463,11 @@ test "write refuses to follow a symlink out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "Cellar", "foo", "1.0" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "Cellar", "foo", "1.0" });
     defer alloc.free(keg);
-    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    const victim = try std.Io.Dir.path.join(alloc, &.{ base, "victim" });
     defer alloc.free(victim);
-    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "pwn" });
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -510,21 +508,21 @@ test "install_symlink keeps a relative in-keg source instead of aborting" {
     defer s.deinit();
     const keg = s.base;
 
-    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    const libexec = try std.Io.Dir.path.join(alloc, &.{ keg, "libexec" });
     defer alloc.free(libexec);
     try std.Io.Dir.cwd().createDirPath(io, libexec);
-    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    const real = try std.Io.Dir.path.join(alloc, &.{ libexec, "tool" });
     defer alloc.free(real);
     (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
 
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .string = "../libexec/tool" }});
 
-    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "tool" });
     defer alloc.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
     try std.Io.Dir.cwd().access(io, link, .{});
@@ -537,9 +535,9 @@ test "install_symlink refuses a relative source that escapes the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, bin);
 
@@ -548,7 +546,7 @@ test "install_symlink refuses a relative source that escapes the keg" {
         BuiltinError.PathSandboxViolation,
         installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .string = "../../outside" }}),
     );
-    const link = try std.fs.path.join(alloc, &.{ bin, "outside" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "outside" });
     defer alloc.free(link);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
 }
@@ -560,13 +558,13 @@ test "install_symlink hash form keeps a relative source under the given name" {
     defer s.deinit();
     const keg = s.base;
 
-    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    const libexec = try std.Io.Dir.path.join(alloc, &.{ keg, "libexec" });
     defer alloc.free(libexec);
     try std.Io.Dir.cwd().createDirPath(io, libexec);
-    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    const real = try std.Io.Dir.path.join(alloc, &.{ libexec, "tool" });
     defer alloc.free(real);
     (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
-    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    const bin = try std.Io.Dir.path.join(alloc, &.{ keg, "bin" });
     defer alloc.free(bin);
 
     const pairs = [_]Value.HashPair{.{
@@ -576,9 +574,9 @@ test "install_symlink hash form keeps a relative source under the given name" {
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .hash = &pairs }});
 
-    const link = try std.fs.path.join(alloc, &.{ bin, "alias" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ bin, "alias" });
     defer alloc.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
     try std.Io.Dir.cwd().access(io, link, .{});
@@ -592,7 +590,7 @@ test "atomic_write leaves the original readable until the new content lands" {
     defer s.deinit();
     const keg = s.base;
 
-    const target = try std.fs.path.join(alloc, &.{ keg, "config" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ keg, "config" });
     defer alloc.free(target);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
@@ -633,11 +631,11 @@ test "atomic_write refuses to follow a symlink out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "Cellar", "foo", "1.0" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "Cellar", "foo", "1.0" });
     defer alloc.free(keg);
-    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    const victim = try std.Io.Dir.path.join(alloc, &.{ base, "victim" });
     defer alloc.free(victim);
-    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "pwn" });
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -676,7 +674,7 @@ test "atomic_write keeps the mode of a target it cannot open for reading" {
     defer s.deinit();
     const keg = s.base;
 
-    const target = try std.fs.path.join(alloc, &.{ keg, "writeonly" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ keg, "writeonly" });
     defer alloc.free(target);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @fromBackingInt(@intCast(0o200)) });
@@ -706,7 +704,7 @@ test "atomic_write keeps the target's existing mode instead of widening it" {
     defer s.deinit();
     const keg = s.base;
 
-    const target = try std.fs.path.join(alloc, &.{ keg, "secret" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ keg, "secret" });
     defer alloc.free(target);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @fromBackingInt(@intCast(0o600)) });

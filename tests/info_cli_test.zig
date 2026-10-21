@@ -40,7 +40,7 @@ const Scratch = struct {
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "db", "Cellar", "Caskroom", "cache/api" };
         for (subs) |s| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, s });
+            const dir = try allocator.print("{s}/{s}", .{ path, s });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
@@ -48,7 +48,7 @@ const Scratch = struct {
         // An inherited MALT_CACHE would miss the seeded records, and a miss
         // aborts just like a refusal does.
         var cache_buf: [512]u8 = undefined;
-        const cache = try std.fmt.bufPrintSentinel(&cache_buf, "{s}/cache", .{path}, 0);
+        const cache = try std.mem.printSentinel(&cache_buf, "{s}/cache", .{path}, 0);
         _ = c.setenv("MALT_CACHE", cache.ptr, 1);
         return .{ .path = path };
     }
@@ -70,12 +70,12 @@ fn unquiet() void {
 
 fn seedFormulaKeg(allocator: std.mem.Allocator, prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
-    const cellar = try std.fmt.allocPrint(allocator, "{s}/Cellar/wget/1.21", .{prefix});
+    const cellar = try allocator.print("{s}/Cellar/wget/1.21", .{prefix});
     defer allocator.free(cellar);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
 
@@ -90,7 +90,7 @@ fn seedFormulaKeg(allocator: std.mem.Allocator, prefix: []const u8) !void {
 
 fn seedCaskRow(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -105,7 +105,7 @@ fn seedCaskRow(prefix: []const u8) !void {
 
 fn seedTapCaskRow(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -250,7 +250,7 @@ test "execute on a missing package offline is an error, not not-installed" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -281,7 +281,7 @@ test "execute on a missing package offline with --json is the same error" {
 
 fn seedApiCache(prefix: []const u8, file: []const u8, body: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/api/{s}", .{ prefix, file });
+    const path = try std.mem.print(&path_buf, "{s}/cache/api/{s}", .{ prefix, file });
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, body);
@@ -362,7 +362,7 @@ fn runInfoAgainstStatus(status: std.http.Status, name: []const u8) !void {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
 
     var server: StatusServer = .{ .io = io, .listener = &listener, .status = status };
     const thread = try std.Thread.spawn(.{}, StatusServer.serve, .{&server});
@@ -408,13 +408,13 @@ test "execute falls back to cached API formula metadata for a not-locally-instal
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
     }
 
-    const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api/formula_jq.json", .{s.path});
+    const cache_path = try testing.allocator.print("{s}/cache/api/formula_jq.json", .{s.path});
     defer testing.allocator.free(cache_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
@@ -449,10 +449,10 @@ test "execute on a tap-cask emits a Tap: line at the bottom of the human dump" {
     const out = try captureExecute(testing.allocator, &.{"deckclip"}, "tap_cask_human");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "deckclip: 1.4.5 (cask)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
-    const installed_idx = std.mem.indexOf(u8, out, "Installed:") orelse return error.NoInstalledLine;
-    const tap_idx = std.mem.indexOf(u8, out, "Tap:") orelse return error.NoTapLine;
+    try testing.expect(std.mem.find(u8, out, "deckclip: 1.4.5 (cask)") != null);
+    try testing.expect(std.mem.find(u8, out, "Tap:          yuzeguitarist/deck") != null);
+    const installed_idx = std.mem.find(u8, out, "Installed:") orelse return error.NoInstalledLine;
+    const tap_idx = std.mem.find(u8, out, "Tap:") orelse return error.NoTapLine;
     try testing.expect(installed_idx < tap_idx);
 }
 
@@ -464,8 +464,8 @@ test "execute on a NULL-tap cask omits the Tap: line entirely" {
     const out = try captureExecute(testing.allocator, &.{"firefox"}, "null_tap_human");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "firefox: 120.0 (cask)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Tap:") == null);
+    try testing.expect(std.mem.find(u8, out, "firefox: 120.0 (cask)") != null);
+    try testing.expect(std.mem.find(u8, out, "Tap:") == null);
 }
 
 test "execute --json on a tap-cask exposes the tap field" {
@@ -517,11 +517,11 @@ test "execute --json on a NULL-tap cask still emits tap as an empty string" {
 /// so `rollback.collectEntries` sees a real retained version for `name`.
 fn seedStoreVersion(prefix: []const u8, sha: []const u8, name: []const u8, pkg_version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
+    const dir = try std.mem.print(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 
     var f_buf: [600]u8 = undefined;
-    const file_path = try std.fmt.bufPrint(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
+    const file_path = try std.mem.print(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
     const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, "{}");
@@ -529,7 +529,7 @@ fn seedStoreVersion(prefix: []const u8, sha: []const u8, name: []const u8, pkg_v
 
 fn seedCaskVersionsHistory(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -557,12 +557,12 @@ test "execute on a formula with retained store versions appends the rollback sec
     const out = try captureExecute(testing.allocator, &.{"wget"}, "fmla_hist_human");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.19") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
+    try testing.expect(std.mem.find(u8, out, "Available rollback versions for wget") != null);
+    try testing.expect(std.mem.find(u8, out, "1.19") != null);
+    try testing.expect(std.mem.find(u8, out, "1.20") != null);
     // Current version must be filtered out of its own listing.
-    const section_idx = std.mem.indexOf(u8, out, "Available rollback versions").?;
-    try testing.expect(std.mem.indexOf(u8, out[section_idx..], "1.21") == null);
+    const section_idx = std.mem.find(u8, out, "Available rollback versions").?;
+    try testing.expect(std.mem.find(u8, out[section_idx..], "1.21") == null);
 }
 
 test "execute --json on a formula with retained store versions populates available_rollback_versions" {
@@ -613,11 +613,11 @@ test "execute on a formula with no retained versions omits the section in human 
     const out = try captureExecute(testing.allocator, &.{"wget"}, "fmla_empty_human");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions") == null);
+    try testing.expect(std.mem.find(u8, out, "Available rollback versions") == null);
     // Existing field block stays byte-identical for the empty-history case.
-    try testing.expect(std.mem.indexOf(u8, out, "wget: stable 1.21\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "From:      homebrew/core\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Installed:") != null);
+    try testing.expect(std.mem.find(u8, out, "wget: stable 1.21\n") != null);
+    try testing.expect(std.mem.find(u8, out, "From:      homebrew/core\n") != null);
+    try testing.expect(std.mem.find(u8, out, "Installed:") != null);
 }
 
 test "execute on a cask with retained cask_versions rows appends the rollback section" {
@@ -628,12 +628,12 @@ test "execute on a cask with retained cask_versions rows appends the rollback se
     const out = try captureExecute(testing.allocator, &.{"flux-markdown"}, "cask_hist_human");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for flux-markdown") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.31.0") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.30.0") != null);
+    try testing.expect(std.mem.find(u8, out, "Available rollback versions for flux-markdown") != null);
+    try testing.expect(std.mem.find(u8, out, "1.31.0") != null);
+    try testing.expect(std.mem.find(u8, out, "1.30.0") != null);
     // Current cask version must not appear in its own rollback listing.
-    const section_idx = std.mem.indexOf(u8, out, "Available rollback versions").?;
-    try testing.expect(std.mem.indexOf(u8, out[section_idx..], "1.32.0") == null);
+    const section_idx = std.mem.find(u8, out, "Available rollback versions").?;
+    try testing.expect(std.mem.find(u8, out[section_idx..], "1.32.0") == null);
 }
 
 test "execute --json on a cask with history populates available_rollback_versions" {
@@ -693,7 +693,7 @@ fn seedWgetRecord(prefix: []const u8) !void {
 }
 
 fn dbPath(buf: []u8, prefix: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintSentinel(buf, "{s}/db/malt.db", .{prefix}, 0);
+    return std.mem.printSentinel(buf, "{s}/db/malt.db", .{prefix}, 0);
 }
 
 /// Runs `execute` in both output modes; each must abort and name the DB.
@@ -709,7 +709,7 @@ fn expectInfoRefusesDb(args: []const []const u8) !void {
         output.setMode(mode);
         err_buf.clearRetainingCapacity();
         try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, args));
-        try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+        try testing.expect(std.mem.find(u8, err_buf.items, "install database") != null);
     }
 }
 
@@ -732,7 +732,7 @@ test "execute reports a db/ directory it cannot look into instead of not-install
     try seedFormulaKeg(testing.allocator, s.path);
     try seedWgetRecord(s.path);
     var dir_buf: [512]u8 = undefined;
-    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.mem.print(&dir_buf, "{s}/db", .{s.path}));
     defer test_io.unwallDir(std.Options.debug_io, walled);
 
     try expectInfoRefusesDb(&.{"wget"});
@@ -779,7 +779,7 @@ test "execute on a prefix with no db/ still falls back to the API record" {
     defer s.deinit(testing.allocator);
     try seedWgetRecord(s.path);
     var dir_buf: [512]u8 = undefined;
-    try test_io.deleteDirAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    try test_io.deleteDirAbsolute(std.Options.debug_io, try std.mem.print(&dir_buf, "{s}/db", .{s.path}));
 
     quiet();
     defer unquiet();
@@ -803,7 +803,7 @@ test "execute --cask reports a casks table it cannot read instead of not-install
 
 fn seedCaskNamedWget(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('wget', 'Wget', '9.9', 'https://example/wget.dmg');");
@@ -831,8 +831,8 @@ test "a bare info on a name shared with a cask shows the formula and says so" {
     const out = try captureBoth(&.{"wget"}, "shared_bare", &err_buf);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) != null);
+    try testing.expect(std.mem.find(u8, out, "1.21") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) != null);
 }
 
 test "info --json on a shared name keeps stdout pure JSON" {
@@ -852,7 +852,7 @@ test "info --json on a shared name keeps stdout pure JSON" {
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
     defer parsed.deinit();
-    try testing.expect(std.mem.indexOf(u8, out, "Treating") == null);
+    try testing.expect(std.mem.find(u8, out, "Treating") == null);
 }
 
 test "info with a kind flag on a shared name stays silent" {
@@ -868,7 +868,7 @@ test "info with a kind flag on a shared name stays silent" {
         const out = try captureBoth(args, "shared_flagged" ++ .{'0' + i}, &err_buf);
         testing.allocator.free(out);
     }
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) == null);
 }
 
 test "a bare info on a formula-only name prints no notice" {
@@ -881,7 +881,7 @@ test "a bare info on a formula-only name prints no notice" {
     const out = try captureBoth(&.{"wget"}, "formula_only", &err_buf);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) == null);
 }
 
 test "a bare info still shows the formula when the casks table cannot be read" {
@@ -890,15 +890,15 @@ test "a bare info still shows the formula when the casks table cannot be read" {
     try seedFormulaKeg(testing.allocator, s.path);
     try seedCaskNamedWget(s.path);
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0), "casks");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0), "casks");
 
     var err_buf: std.ArrayList(u8) = .empty;
     defer err_buf.deinit(testing.allocator);
     const out = try captureBoth(&.{"wget"}, "casks_unreadable", &err_buf);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+    try testing.expect(std.mem.find(u8, out, "1.21") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) == null);
 }
 
 test "execute refuses an unknown flag instead of answering without it" {
@@ -908,5 +908,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--bogus", "wget" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --bogus") != null);
 }

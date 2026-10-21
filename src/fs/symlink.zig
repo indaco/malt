@@ -27,7 +27,7 @@ var scratch_seq: std.atomic.Value(u32) = .init(0);
 /// A created, empty scratch directory. The pid and sequence keep concurrent
 /// test binaries off each other's paths.
 fn scratchRoot(io: std.Io, buf: []u8) ![]const u8 {
-    const root = std.fmt.bufPrint(buf, "/tmp/malt_symlink_{d}_{d}", .{
+    const root = std.mem.print(buf, "/tmp/malt_symlink_{d}_{d}", .{
         std.c.getpid(),
         scratch_seq.fetchAdd(1, .monotonic),
     }) catch unreachable;
@@ -44,11 +44,11 @@ test "a directory link is caught, its target and a missing path are not" {
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
 
     var target_buf: [192]u8 = undefined;
-    const target = try std.fmt.bufPrint(&target_buf, "{s}/target", .{root});
+    const target = try std.mem.print(&target_buf, "{s}/target", .{root});
     try std.Io.Dir.createDirAbsolute(io, target, .default_dir);
 
     var link_buf: [192]u8 = undefined;
-    const link = try std.fmt.bufPrint(&link_buf, "{s}/link", .{root});
+    const link = try std.mem.print(&link_buf, "{s}/link", .{root});
     try std.Io.Dir.symLinkAbsolute(io, target, link, .{ .is_directory = true });
 
     try std.testing.expect(isSymlinkOrUnreadable(io, link));
@@ -56,7 +56,7 @@ test "a directory link is caught, its target and a missing path are not" {
     try std.testing.expect(!isSymlinkOrUnreadable(io, root));
 
     var missing_buf: [192]u8 = undefined;
-    const missing = try std.fmt.bufPrint(&missing_buf, "{s}/absent", .{root});
+    const missing = try std.mem.print(&missing_buf, "{s}/absent", .{root});
     try std.testing.expect(!isSymlinkOrUnreadable(io, missing));
 
     // A dangling link still redirects a create, so it must still read as one.
@@ -79,7 +79,7 @@ test "a relative-target link is caught the same as an absolute one" {
     try dir.symLink(io, "./target", "rel", .{ .is_directory = true });
 
     var link_buf: [192]u8 = undefined;
-    const link = try std.fmt.bufPrint(&link_buf, "{s}/rel", .{root});
+    const link = try std.mem.print(&link_buf, "{s}/rel", .{root});
     try std.testing.expect(isSymlinkOrUnreadable(io, link));
 }
 
@@ -91,11 +91,11 @@ test "a file link is caught, a plain file is not" {
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
 
     var file_buf: [192]u8 = undefined;
-    const file = try std.fmt.bufPrint(&file_buf, "{s}/f", .{root});
+    const file = try std.mem.print(&file_buf, "{s}/f", .{root});
     (try std.Io.Dir.cwd().createFile(io, file, .{})).close(io);
 
     var link_buf: [192]u8 = undefined;
-    const link = try std.fmt.bufPrint(&link_buf, "{s}/f-link", .{root});
+    const link = try std.mem.print(&link_buf, "{s}/f-link", .{root});
     try std.Io.Dir.symLinkAbsolute(io, file, link, .{});
 
     try std.testing.expect(!isSymlinkOrUnreadable(io, file));

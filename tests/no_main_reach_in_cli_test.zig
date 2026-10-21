@@ -56,15 +56,14 @@ fn scanContent(
     failures: *std.ArrayList([]const u8),
 ) !void {
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, content, cursor, import_prefix)) |start| {
+    while (std.mem.findPos(u8, content, cursor, import_prefix)) |start| {
         const path_start = start + import_prefix.len;
-        const end = std.mem.indexOfScalarPos(u8, content, path_start, '"') orelse break;
+        const end = std.mem.findScalarPos(u8, content, path_start, '"') orelse break;
         const import_path = content[path_start..end];
         cursor = end + 1;
 
         if (resolvesIntoMain(import_path)) {
-            const msg = try std.fmt.allocPrint(
-                testing.allocator,
+            const msg = try testing.allocator.print(
                 "{s}/{s} imports {s}",
                 .{ root, rel_path, import_path },
             );

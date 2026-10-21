@@ -49,19 +49,19 @@ const TempCacheDir = struct {
         defer b.deinit();
 
         var buf: [512]u8 = undefined;
-        const seeded = try std.fmt.bufPrint(&buf, "{s}/api/formula_x.json", .{a.path});
+        const seeded = try std.mem.print(&buf, "{s}/api/formula_x.json", .{a.path});
         try test_io.accessAbsolute(std.Options.debug_io, seeded, .{});
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         var api_buf: [512]u8 = undefined;
-        const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
+        const api_dir = try std.mem.print(&api_buf, "{s}/api", .{self.path});
         test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
-        const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
+        const full = try std.mem.print(&path_buf, "{s}/api/{s}", .{ self.path, rel });
         const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, content);
@@ -93,20 +93,20 @@ fn openTestDb() !sqlite.Database {
 /// map path resolves the row. Read-modify-write keeps it simple for tests.
 fn appendVersionsLine(dir: *TempCacheDir, rel: []const u8, name: []const u8, stable: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ dir.path, rel });
+    const full = try std.mem.print(&path_buf, "{s}/api/{s}", .{ dir.path, rel });
     const prev = test_io.readFileAbsoluteAlloc(std.Options.debug_io, dir.allocator, full, 1 << 20) catch
         try dir.allocator.dupe(u8, "");
     defer dir.allocator.free(prev);
-    const combined = try std.fmt.allocPrint(dir.allocator, "{s}{s}\t{s}\t0\n", .{ prev, name, stable });
+    const combined = try dir.allocator.print("{s}{s}\t{s}\t0\n", .{ prev, name, stable });
     defer dir.allocator.free(combined);
     try dir.writeCacheFile(rel, combined);
 }
 
 fn seedFormula(dir: *TempCacheDir, name: []const u8, latest: []const u8) !void {
     var key_buf: [128]u8 = undefined;
-    const file = try std.fmt.bufPrint(&key_buf, "formula_{s}.json", .{name});
+    const file = try std.mem.print(&key_buf, "formula_{s}.json", .{name});
     var body_buf: [256]u8 = undefined;
-    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}}}}", .{ name, latest });
+    const body = try std.mem.print(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}}}}", .{ name, latest });
     try dir.writeCacheFile(file, body);
     // Version side-car drives the map path; the JSON above stays as the
     // per-keg fallback so both routes are exercised by the suite.
@@ -115,10 +115,10 @@ fn seedFormula(dir: *TempCacheDir, name: []const u8, latest: []const u8) !void {
 
 fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
     var key_buf: [128]u8 = undefined;
-    const file = try std.fmt.bufPrint(&key_buf, "cask_{s}.json", .{token});
+    const file = try std.mem.print(&key_buf, "cask_{s}.json", .{token});
     var body_buf: [512]u8 = undefined;
     // parseCask needs `url` too — minimal shape so it returns ok.
-    const body = try std.fmt.bufPrint(
+    const body = try std.mem.print(
         &body_buf,
         "{{\"token\":\"{s}\",\"name\":[\"{s}\"],\"version\":\"{s}\",\"url\":\"https://example.invalid/{s}.dmg\"}}",
         .{ token, token, latest, token },
@@ -126,7 +126,7 @@ fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
     try dir.writeCacheFile(file, body);
     var host_buf: [32]u8 = undefined;
     var side_car_buf: [64]u8 = undefined;
-    const side_car = try std.fmt.bufPrint(&side_car_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&host_buf, .cask)});
+    const side_car = try std.mem.print(&side_car_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&host_buf, .cask)});
     try appendVersionsLine(dir, side_car, token, latest);
 }
 
@@ -434,7 +434,7 @@ test "collectOutdated warns and falls back to per-keg on an empty version map" {
     try testing.expectEqual(@as(usize, 1), out.len);
     try testing.expectEqualStrings("alpha", out[0].name);
     try testing.expectEqualStrings("2.0", out[0].latest);
-    try testing.expect(std.mem.indexOf(u8, warn_buf.items, "falling back") != null);
+    try testing.expect(std.mem.find(u8, warn_buf.items, "falling back") != null);
 }
 
 test "collectOutdated fetch fallback detects an upstream revision-only bump" {
@@ -479,7 +479,7 @@ fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
     const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -488,7 +488,7 @@ fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
 
 fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
     var buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     errdefer db.close();
     try schema.initSchema(&db);
@@ -497,7 +497,7 @@ fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', {d});",
         .{ name, name, name, @intFromBool(pinned) },
@@ -508,7 +508,7 @@ fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
 
 fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', {d});",
         .{ token, token, @intFromBool(pinned) },
@@ -519,7 +519,7 @@ fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
 
 fn insertKegWithTap(db: *sqlite.Database, name: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', '{s}');",
         .{ name, name, name, tap },
@@ -530,7 +530,7 @@ fn insertKegWithTap(db: *sqlite.Database, name: []const u8, tap: []const u8) !vo
 
 fn insertCaskWithTap(db: *sqlite.Database, token: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', '{s}');",
         .{ token, token, tap },
@@ -541,7 +541,7 @@ fn insertCaskWithTap(db: *sqlite.Database, token: []const u8, tap: []const u8) !
 
 fn insertTap(db: *sqlite.Database, name: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO taps (name, url) VALUES ('{s}', 'https://github.com/{s}.git');",
         .{ name, name },
@@ -1098,8 +1098,7 @@ const UpdateEnv = struct {
         const prefix_base = try test_io.uniqueTempPath(testing.allocator, "update_test", suffix);
         defer testing.allocator.free(prefix_base);
         const prefix = try testing.allocator.dupeSentinel(u8, prefix_base, 0);
-        const cache = try std.fmt.allocPrintSentinel(
-            testing.allocator,
+        const cache = try testing.allocator.printSentinel(
             "{s}/cache",
             .{prefix},
             0,
@@ -1107,7 +1106,7 @@ const UpdateEnv = struct {
         test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache);
-        const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+        const db_dir = try testing.allocator.print("{s}/db", .{prefix});
         defer testing.allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
@@ -1126,10 +1125,10 @@ const UpdateEnv = struct {
 
     fn writeApiFile(self: UpdateEnv, rel: []const u8, body: []const u8) !void {
         var dir_buf: [512]u8 = undefined;
-        const api_dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_path});
+        const api_dir = try std.mem.print(&dir_buf, "{s}/api", .{self.cache_path});
         try test_io.cwd().createDirPath(std.Options.debug_io, api_dir);
         var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ api_dir, rel });
+        const path = try std.mem.print(&path_buf, "{s}/{s}", .{ api_dir, rel });
         const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, body);
@@ -1137,7 +1136,7 @@ const UpdateEnv = struct {
 
     fn apiFileExists(self: UpdateEnv, rel: []const u8) bool {
         var path_buf: [512]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.cache_path, rel }) catch return false;
+        const path = std.mem.print(&path_buf, "{s}/api/{s}", .{ self.cache_path, rel }) catch return false;
         test_io.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
         return true;
     }
@@ -1145,7 +1144,7 @@ const UpdateEnv = struct {
 
 fn openUpdateDb(prefix: [:0]const u8) !sqlite.Database {
     var buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     errdefer db.close();
     try schema.initSchema(&db);
@@ -1154,7 +1153,7 @@ fn openUpdateDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertKegV1(db: *sqlite.Database, name: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', 0);",
         .{ name, name, name },
@@ -1229,7 +1228,7 @@ test "update refuses an unknown flag and leaves the API cache intact" {
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, update_mod.execute(&ctx, testing.allocator, &.{"--chck"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --chck") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --chck") != null);
     try testing.expect(env.apiFileExists("formula_alpha.json"));
 }
 
@@ -1246,7 +1245,7 @@ test "update refuses a stray word and leaves the API cache intact" {
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, update_mod.execute(&ctx, testing.allocator, &.{"foo"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown argument for update: 'foo'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown argument for update: 'foo'") != null);
     // After `--` a token is still an argument update does not take.
     try testing.expectError(error.Aborted, update_mod.execute(&ctx, testing.allocator, &.{ "--", "--chck" }));
     try testing.expect(env.apiFileExists("formula_alpha.json"));
@@ -1307,8 +1306,8 @@ test "update under --dry-run keeps the API cache and the snapshot" {
 
     try testing.expect(env.apiFileExists("formula_alpha.json"));
     try testing.expect(outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path) != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would clear the API cache") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Cache cleared") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would clear the API cache") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Cache cleared") == null);
 }
 
 test "update --check under --dry-run leaves the snapshot as it was" {
@@ -1349,7 +1348,7 @@ test "update --check under --dry-run leaves the snapshot as it was" {
     const snap = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path).?;
     defer outdated_mod.freeSnapshot(testing.allocator, snap);
     try testing.expectEqual(marker_ts, snap.generated_at_ms);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would refresh the outdated snapshot") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would refresh the outdated snapshot") != null);
 }
 
 test "update --check under --dry-run still refuses a database from a newer malt" {
@@ -1360,7 +1359,7 @@ test "update --check under --dry-run still refuses a database from a newer malt"
         var db = try openUpdateDb(env.prefix_path);
         defer db.close();
         var sql_buf: [96]u8 = undefined;
-        try db.exec(try std.fmt.bufPrintSentinel(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{schema.known_schema_version + 1}, 0));
+        try db.exec(try std.mem.printSentinel(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{schema.known_schema_version + 1}, 0));
     }
 
     malt.output.setDryRun(true);
@@ -1377,7 +1376,7 @@ test "update --check under --dry-run still refuses a database from a newer malt"
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(error.SchemaTooNew, update_mod.execute(&ctx, testing.allocator, &.{"--check"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would refresh") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would refresh") == null);
 }
 
 test "outdated execute reads a fresh snapshot and never overwrites it" {
@@ -1690,5 +1689,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     malt.output.beginStderrCapture(testing.allocator, &captured);
     defer malt.output.endStderrCapture();
     try testing.expectError(error.Aborted, outdated_mod.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--greedy"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --greedy") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --greedy") != null);
 }

@@ -60,7 +60,7 @@ fn post(peer_status: std.http.Status, peer_body: []const u8, sent: []const u8, m
     const thread = try std.Thread.spawn(.{}, Peer.serveOne, .{out});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/querybatch", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/querybatch", .{port});
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();

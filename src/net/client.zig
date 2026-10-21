@@ -416,7 +416,7 @@ pub const HttpClient = struct {
             if (raw.len == 0) continue;
             // curl reads a scheme-less `host:port` as http; raw, the stdlib
             // parses the host as a URI scheme and the proxy silently vanishes.
-            if (std.mem.indexOf(u8, raw, "://") == null) try map.put(name, try std.mem.concat(arena, u8, &.{ "http://", raw }));
+            if (std.mem.find(u8, raw, "://") == null) try map.put(name, try std.mem.concat(arena, u8, &.{ "http://", raw }));
             // The stdlib parses every variable in one call; a solo pass names
             // the one that fails, with the value as the user set it.
             var solo = std.process.Environ.Map.init(arena);
@@ -497,9 +497,9 @@ pub const HttpClient = struct {
             return null;
 
         var authority = after_scheme;
-        if (std.mem.indexOfAny(u8, authority, "/?#")) |i| authority = authority[0..i];
-        if (std.mem.lastIndexOfScalar(u8, authority, '@')) |i| authority = authority[i + 1 ..];
-        if (std.mem.lastIndexOfScalar(u8, authority, ':')) |i| authority = authority[0..i];
+        if (std.mem.findAny(u8, authority, "/?#")) |i| authority = authority[0..i];
+        if (std.mem.findScalarLast(u8, authority, '@')) |i| authority = authority[i + 1 ..];
+        if (std.mem.findScalarLast(u8, authority, ':')) |i| authority = authority[0..i];
         // A trailing dot is the FQDN root form of the same host (`github.com.`).
         if (authority.len > 0 and authority[authority.len - 1] == '.')
             authority = authority[0 .. authority.len - 1];
@@ -638,7 +638,7 @@ pub const HttpClient = struct {
     fn authHeaderValue(self: *HttpClient, url: []const u8) error{OutOfMemory}!?[]u8 {
         const token = githubApiToken(self.environ) orelse return null;
         if (!githubTokenApplies(url)) return null;
-        return try std.fmt.allocPrint(self.allocator, "token {s}", .{token});
+        return try self.allocator.print("token {s}", .{token});
     }
 
     /// GET with extra headers under `max_blob_bytes`. Caller owns `Response`.
@@ -1860,14 +1860,14 @@ fn formatUri(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
 
     if (fragment) |frag| {
         if (query) |q| {
-            return std.fmt.allocPrint(allocator, "{s}://{s}{s}?{s}#{s}", .{ scheme, host, path, q, frag });
+            return allocator.print("{s}://{s}{s}?{s}#{s}", .{ scheme, host, path, q, frag });
         }
-        return std.fmt.allocPrint(allocator, "{s}://{s}{s}#{s}", .{ scheme, host, path, frag });
+        return allocator.print("{s}://{s}{s}#{s}", .{ scheme, host, path, frag });
     }
     if (query) |q| {
-        return std.fmt.allocPrint(allocator, "{s}://{s}{s}?{s}", .{ scheme, host, path, q });
+        return allocator.print("{s}://{s}{s}?{s}", .{ scheme, host, path, q });
     }
-    return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ scheme, host, path });
+    return allocator.print("{s}://{s}{s}", .{ scheme, host, path });
 }
 
 test "extractEtagFromHead: finds ETag header by exact name" {
@@ -3302,7 +3302,7 @@ test "CountingWriter.sendFile: clamps the source so a file cannot overshoot the 
     // Per-random tmp path so concurrent test processes cannot clobber it.
     var rnd: [8]u8 = undefined;
     io.random(&rnd);
-    const path = try std.fmt.allocPrint(alloc, "/tmp/malt_cap_sendfile_{x}", .{std.mem.bytesToValue(u64, &rnd)});
+    const path = try alloc.print("/tmp/malt_cap_sendfile_{x}", .{std.mem.bytesToValue(u64, &rnd)});
     defer alloc.free(path);
     defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
 
@@ -3456,7 +3456,7 @@ const PoolPeer = struct {
 };
 
 fn poolTestUrl(buf: []u8, listener: *const std.Io.net.Server, path: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ listener.socket.address.getPort(), path });
+    return std.mem.print(buf, "http://127.0.0.1:{d}{s}", .{ listener.socket.address.getPort(), path });
 }
 
 // Two sequential GETs, second status returned. Errors come back as a value so

@@ -18,7 +18,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -48,7 +48,7 @@ test "execute <subcommand> --help prints help without opening the database" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     // Help must win before openDb; a pre-existing db/ would hide a regression.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
 
@@ -63,7 +63,7 @@ test "execute <subcommand> --help prints help without opening the database" {
     };
     for (cases) |args| {
         const io = std.Options.debug_io;
-        const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout", .{prefix});
+        const out_path = try testing.allocator.print("{s}/stdout", .{prefix});
         defer testing.allocator.free(out_path);
         const out = try test_io.createFileAbsolute(io, out_path, .{ .truncate = true, .read = true });
         defer out.close(io);
@@ -77,7 +77,7 @@ test "execute <subcommand> --help prints help without opening the database" {
         const body = try testing.allocator.alloc(u8, (try out.stat(io)).size);
         defer testing.allocator.free(body);
         _ = try out.readPositionalAll(io, body, 0);
-        if (std.mem.indexOf(u8, body, "Usage: malt services") == null) {
+        if (std.mem.find(u8, body, "Usage: malt services") == null) {
             std.debug.print("no help for {s}:\n{s}\n", .{ args[0], body });
             return error.TestExpectedEqual;
         }
@@ -100,7 +100,7 @@ test "execute start/stop/restart/logs on an unregistered service aborts with a m
         output.beginStderrCapture(testing.allocator, &captured);
         defer output.endStderrCapture();
         try testing.expectError(error.Aborted, services_cli.execute(&ctx, testing.allocator, &.{ sub, "nope" }));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "no such service: nope") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "no such service: nope") != null);
     }
 }
 
@@ -137,7 +137,7 @@ test "execute start and status on an unreadable services table surfaces the data
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     {
-        const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
         defer testing.allocator.free(db_path);
         var db = try malt.sqlite.Database.open(db_path);
         defer db.close();
@@ -156,7 +156,7 @@ test "execute start and status on an unreadable services table surfaces the data
     inline for (.{ "start", "status" }) |sub| {
         try testing.expectError(error.DatabaseError, services_cli.execute(&ctx, testing.allocator, &.{ sub, "nope" }));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "no such service") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "no such service") == null);
 }
 
 test "execute start checks the name before taking the lock to refresh overrides" {
@@ -168,7 +168,7 @@ test "execute start checks the name before taking the lock to refresh overrides"
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_path);
     var held = try malt.lock.LockFile.acquire(io, lock_path, 1000);
     defer held.release(io);
@@ -180,7 +180,7 @@ test "execute start checks the name before taking the lock to refresh overrides"
     defer output.endStderrCapture();
     // A lifecycle step that ran first would stall on the held lock and warn.
     try testing.expectError(error.Aborted, services_cli.execute(&ctx, testing.allocator, &.{ "start", "nope" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "another malt command") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "another malt command") == null);
 }
 
 test "execute list on an empty prefix reports no services" {
@@ -304,7 +304,7 @@ test "execute list --json on an empty DB emits `[]`" {
 
 fn seedService(prefix: []const u8, name: []const u8, keg: []const u8, auto_start: bool) !void {
     var path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
     try malt.schema.initSchema(&db);
@@ -322,7 +322,7 @@ fn seedService(prefix: []const u8, name: []const u8, keg: []const u8, auto_start
 
 fn seedScheduledService(prefix: []const u8, name: []const u8, keg: []const u8, schedule: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
     try malt.schema.initSchema(&db);
@@ -360,7 +360,7 @@ test "execute list (human) shows the schedule label" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{"list"});
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "interval 60s") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "interval 60s") != null);
 }
 
 test "execute list --json surfaces the schedule label end-to-end" {
@@ -384,7 +384,7 @@ test "execute list --json surfaces the schedule label end-to-end" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{"list"});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schedule\":\"interval 60s\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"schedule\":\"interval 60s\"") != null);
 }
 
 test "execute list --json on a populated DB emits one object per row" {
@@ -409,15 +409,15 @@ test "execute list --json on a populated DB emits one object per row" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{"list"});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"redis\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"keg_name\":\"redis\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"auto_start\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"postgres\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"keg_name\":\"postgresql@16\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"auto_start\":false") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"redis\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"keg_name\":\"redis\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"auto_start\":true") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"postgres\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"keg_name\":\"postgresql@16\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"auto_start\":false") != null);
     // Runtime probe is best-effort on non-macOS / when launchctl misses;
     // it still must surface a textual state, never a numeric code.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"state\":\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"state\":\"") != null);
     try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"schema_version\":1,\"services\":["));
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
 }
@@ -478,10 +478,10 @@ test "execute status <name> --json emits a single-element array" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{ "status", "redis" });
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"redis\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"redis\"") != null);
     // Only one row in the array — pin the bracketing so `postgres` (not
     // seeded here) can't sneak in via a typo in the filter SQL.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "postgres") == null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "postgres") == null);
     try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"schema_version\":1,\"services\":[{"));
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]}\n"));
 }
@@ -568,7 +568,7 @@ test "execute status by keg name emits the row registered under its launchd labe
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{ "status", "mosquitto" });
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"com.malt.mosquitto\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"com.malt.mosquitto\"") != null);
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]}\n"));
 }
 
@@ -582,10 +582,10 @@ test "execute logs by keg name reads the log under the launchd label" {
     try seedService(prefix, "com.malt.mosquitto", "mosquitto", false);
 
     var dir_buf: [512]u8 = undefined;
-    const log_dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/var/malt/services/com.malt.mosquitto", .{prefix}, 0);
+    const log_dir = try std.mem.printSentinel(&dir_buf, "{s}/var/malt/services/com.malt.mosquitto", .{prefix}, 0);
     try test_io.cwd().createDirPath(std.Options.debug_io, log_dir);
     var log_buf: [512]u8 = undefined;
-    const log_path = try std.fmt.bufPrintSentinel(&log_buf, "{s}/stdout.log", .{log_dir}, 0);
+    const log_path = try std.mem.printSentinel(&log_buf, "{s}/stdout.log", .{log_dir}, 0);
     {
         const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, log_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
@@ -599,7 +599,7 @@ test "execute logs by keg name reads the log under the launchd label" {
     // `cmdLogs` writes straight to `ctx.stdout`, which defaults to a closed
     // handle so a test cannot reach the runner's fd 1.
     var out_buf: [512]u8 = undefined;
-    const out_path = try std.fmt.bufPrintSentinel(&out_buf, "{s}/captured.out", .{prefix}, 0);
+    const out_path = try std.mem.printSentinel(&out_buf, "{s}/captured.out", .{prefix}, 0);
     const out_file = try std.Io.Dir.createFileAbsolute(io, out_path, .{ .truncate = true });
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty, .stdout = out_file };
     try services_cli.execute(&ctx, testing.allocator, &.{ "logs", "mosquitto" });
@@ -609,7 +609,7 @@ test "execute logs by keg name reads the log under the launchd label" {
     defer f.close(io);
     var read_buf: [512]u8 = undefined;
     const n = try f.readPositionalAll(io, &read_buf, 0);
-    try testing.expect(std.mem.indexOf(u8, read_buf[0..n], "MOSQUITTO-LOG-LINE") != null);
+    try testing.expect(std.mem.find(u8, read_buf[0..n], "MOSQUITTO-LOG-LINE") != null);
 }
 
 test "execute status refuses to guess when one formula registers two services" {

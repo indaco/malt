@@ -139,7 +139,7 @@ pub fn includeQ(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinErro
     const s = try receiverStr(ctx.allocator, receiver);
     if (args.len == 0) return Value{ .bool = false };
     const sub_str = try args[0].asString(ctx.allocator);
-    return Value{ .bool = std.mem.indexOf(u8, s, sub_str) != null };
+    return Value{ .bool = std.mem.find(u8, s, sub_str) != null };
 }
 
 /// start_with?(prefix) — check if string starts with prefix
@@ -195,7 +195,7 @@ pub fn concat(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!
     const s = try receiverStr(ctx.allocator, receiver);
     if (args.len == 0) return Value{ .string = s };
     const other = try args[0].asString(ctx.allocator);
-    const result = std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ s, other }) catch return BuiltinError.OutOfMemory;
+    const result = ctx.allocator.print("{s}{s}", .{ s, other }) catch return BuiltinError.OutOfMemory;
     return Value{ .string = result };
 }
 

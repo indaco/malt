@@ -11,16 +11,16 @@ const std = @import("std");
 pub fn adoptLegacy(io: std.Io, prefix: []const u8, cache_dir: []const u8) void {
     var legacy_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // The pre-override layout, spelled out on purpose: this is its one reader.
-    const legacy_root = std.fmt.bufPrint(&legacy_buf, "{s}/cache", .{prefix}) catch return;
+    const legacy_root = std.mem.print(&legacy_buf, "{s}/cache", .{prefix}) catch return;
     if (sameDir(io, legacy_root, cache_dir)) return;
     inline for (.{ "Cask", "Tap" }) |tier| adoptTier(io, legacy_root, cache_dir, tier);
 }
 
 fn adoptTier(io: std.Io, legacy_root: []const u8, cache_dir: []const u8, tier: []const u8) void {
     var legacy_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const legacy = std.fmt.bufPrint(&legacy_buf, "{s}/{s}", .{ legacy_root, tier }) catch return;
+    const legacy = std.mem.print(&legacy_buf, "{s}/{s}", .{ legacy_root, tier }) catch return;
     var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ cache_dir, tier }) catch return;
+    const dest = std.mem.print(&dest_buf, "{s}/{s}", .{ cache_dir, tier }) catch return;
 
     var src_dir = std.Io.Dir.openDirAbsolute(io, legacy, .{ .iterate = true }) catch return;
     defer src_dir.close(io);
@@ -29,10 +29,10 @@ fn adoptTier(io: std.Io, legacy_root: []const u8, cache_dir: []const u8, tier: [
     var it = src_dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        var from_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const from = std.fmt.bufPrint(&from_buf, "{s}/{s}", .{ legacy, entry.name }) catch continue;
-        var to_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const to = std.fmt.bufPrint(&to_buf, "{s}/{s}", .{ dest, entry.name }) catch continue;
+        var from_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const from = std.mem.print(&from_buf, "{s}/{s}", .{ legacy, entry.name }) catch continue;
+        var to_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const to = std.mem.print(&to_buf, "{s}/{s}", .{ dest, entry.name }) catch continue;
         if (std.Io.Dir.accessAbsolute(io, to, .{})) |_| {
             std.Io.Dir.cwd().deleteFile(io, from) catch {};
         } else |_| {
@@ -51,8 +51,8 @@ fn sameDir(io: std.Io, a_path: []const u8, b_path: []const u8) bool {
     defer a_dir.close(io);
     var b_dir = std.Io.Dir.openDirAbsolute(io, b_path, .{}) catch return false;
     defer b_dir.close(io);
-    var a: [std.fs.max_path_bytes]u8 = undefined;
-    var b: [std.fs.max_path_bytes]u8 = undefined;
+    var a: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const na = std.Io.Dir.realPath(a_dir, io, &a) catch return false;
     const nb = std.Io.Dir.realPath(b_dir, io, &b) catch return false;
     return std.mem.eql(u8, a[0..na], b[0..nb]);
@@ -85,8 +85,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -96,7 +95,7 @@ const Scratch = struct {
     }
 
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(self.arena.allocator(), "{s}{s}", .{ self.base, sub }, 0) catch @panic("OOM");
+        return self.arena.allocator().printSentinel("{s}{s}", .{ self.base, sub }, 0) catch @panic("OOM");
     }
 
     fn deinit(self: *Scratch) void {
@@ -200,7 +199,7 @@ test "adoptLegacy moves a Tap archive onto a destination path past 512 bytes" {
     adoptLegacy(dbg_io, s.base, cache_dir);
 
     var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dest = try std.fmt.bufPrint(&dest_buf, "{s}/Tap/x", .{cache_dir});
+    const dest = try std.mem.print(&dest_buf, "{s}/Tap/x", .{cache_dir});
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("tgz", try readSmall(dest, &buf));
 }

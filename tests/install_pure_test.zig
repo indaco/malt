@@ -240,7 +240,7 @@ test "parseRubyFormula refuses when on_arm/on_intel section has no sha256" {
 }
 
 test "parseRubyFormula prefers the platform-specific section when on_arm/on_intel are present" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     // Two sections: on_arm picks the arm binary, on_intel picks the x86 binary.
     const src =
         \\class Hello < Formula
@@ -260,9 +260,9 @@ test "parseRubyFormula prefers the platform-specific section when on_arm/on_inte
     const got = install_rb_parse.parseRubyFormula(src);
     try testing.expect(got != null);
     if (is_arm) {
-        try testing.expect(std.mem.indexOf(u8, got.?.url, "arm") != null);
+        try testing.expect(std.mem.find(u8, got.?.url, "arm") != null);
     } else {
-        try testing.expect(std.mem.indexOf(u8, got.?.url, "intel") != null);
+        try testing.expect(std.mem.find(u8, got.?.url, "intel") != null);
     }
 }
 
@@ -271,7 +271,7 @@ test "parseRubyFormula prefers the platform-specific section when on_arm/on_inte
 // parser must pick the right sha256 and capture the `#{arch}` token so
 // `interpolateUrl` can substitute it before the SHA-verified download.
 test "parseRubyFormula handles cask DSL multi-arch sha256 + arch directive" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src =
         \\cask "rebased" do
         \\  version "1.0.12"
@@ -286,7 +286,7 @@ test "parseRubyFormula handles cask DSL multi-arch sha256 + arch directive" {
     ;
     const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("1.0.12", got.version);
-    try testing.expect(std.mem.indexOf(u8, got.url, "#{arch}") != null);
+    try testing.expect(std.mem.find(u8, got.url, "#{arch}") != null);
     if (is_arm) {
         try testing.expectEqualStrings(
             "3ef9aace106128e78e94777c7fe64228cfa1df816e7cc15b8b1bc054b7df9e9c",
@@ -306,7 +306,7 @@ test "parseRubyFormula handles cask DSL multi-arch sha256 + arch directive" {
 // has no intel-specific suffix). The parser must not collapse an empty
 // captured token into "no arch was set".
 test "parseRubyFormula accepts an empty intel arch token" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src =
         \\cask "tool" do
         \\  version "2.0"
@@ -352,7 +352,7 @@ test "parseRubyFormula handles a cask with no arch directive" {
 // fit `arm: "...", intel: "..."` on one line. The continuation-line
 // branch of the parser must not be required for this case.
 test "parseRubyFormula handles single-line multi-arch sha256" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src =
         \\cask "compact" do
         \\  version "0.1"
@@ -375,7 +375,7 @@ test "parseRubyFormula handles single-line multi-arch sha256" {
 
 // Argument order independent: some casks list intel first.
 test "parseRubyFormula handles intel-first multi-arch ordering" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src =
         \\cask "intel-first" do
         \\  version "0.2"
@@ -401,7 +401,7 @@ test "parseRubyFormula handles intel-first multi-arch ordering" {
 // committed branch. The continuation-line trim must strip the \r so
 // the kwarg parser still sees `intel: "..."`.
 test "parseRubyFormula handles CRLF line endings inside multi-arch sha256" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src = "cask \"crlf\" do\r\n" ++
         "  version \"0.3\"\r\n" ++
         "  on_macos do\r\n" ++
@@ -439,14 +439,14 @@ test "parseRubyFormula does not mis-detect arm: inside quoted values" {
     ;
     const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     // The url should reach the parser intact (#{arch} interpolated later).
-    try testing.expect(std.mem.indexOf(u8, got.url, "notes:arm:thing") != null);
+    try testing.expect(std.mem.find(u8, got.url, "notes:arm:thing") != null);
 }
 
 // A formula that mixes shapes (a global sha256 plus a Hardware::CPU
 // section that only sets url) must still parse — the global fallback
 // loop fills in whichever field the section path missed.
 test "parseRubyFormula falls back to global sha256 when section omits it" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src =
         \\class Mixed < Formula
         \\  version "1.0"
@@ -464,9 +464,9 @@ test "parseRubyFormula falls back to global sha256 when section omits it" {
     const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("7777777777777777777777777777777777777777777777777777777777777777", got.sha256);
     if (is_arm) {
-        try testing.expect(std.mem.indexOf(u8, got.url, "arm") != null);
+        try testing.expect(std.mem.find(u8, got.url, "arm") != null);
     } else {
-        try testing.expect(std.mem.indexOf(u8, got.url, "intel") != null);
+        try testing.expect(std.mem.find(u8, got.url, "intel") != null);
     }
 }
 
@@ -475,7 +475,7 @@ test "parseRubyFormula falls back to global sha256 when section omits it" {
 // arch-blind fallback must not resolve the other arch's self-consistent
 // url+sha256 pair, which would pass the checksum gate on the wrong binary.
 test "parseRubyFormula refuses a top-level arch block for the wrong arch" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src = if (is_arm)
         \\class Foo < Formula
         \\  version "1.2.3"
@@ -501,7 +501,7 @@ test "parseRubyFormula refuses a top-level arch block for the wrong arch" {
 // the parse must return null cleanly — no crash, no partial info, no
 // false claim of success.
 test "parseRubyFormula returns null when current platform's kwarg is missing" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     const src_arm_only =
         \\cask "arm-only" do
         \\  version "0.5"
@@ -754,11 +754,11 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0/bin", .{prefix});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/foo/1.0/bin", .{prefix});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
-    const file = try std.fmt.allocPrint(testing.allocator, "{s}/foo", .{keg_dir});
+    const file = try testing.allocator.print("{s}/foo", .{keg_dir});
     defer testing.allocator.free(file);
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, file, .{});
@@ -768,7 +768,7 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
 
     install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "foo", "1.0");
 
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, cellar_dir, .{}));
 }
@@ -1049,7 +1049,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
 
     const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "include", "share", "sbin", "etc", "tmp", "cache", "db" };
     for (subs) |s| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, s });
+        const p = try testing.allocator.print("{s}/{s}", .{ prefix, s });
         defer testing.allocator.free(p);
         var d = try test_io.openDirAbsolute(std.Options.debug_io, p, .{});
         d.close(std.Options.debug_io);
@@ -1153,10 +1153,10 @@ test "routePostInstallOutcome: clean flog prints a 'completed' info line" {
     const out = try runRoute(&flog, "wget", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for wget") != null);
+    try testing.expect(std.mem.find(u8, out, "post_install completed for wget") != null);
     // Never suggest the Ruby fallback on clean runs.
-    try testing.expect(std.mem.indexOf(u8, out, "--use-system-ruby") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "fatal") == null);
+    try testing.expect(std.mem.find(u8, out, "--use-system-ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "fatal") == null);
 }
 
 test "routePostInstallOutcome: non-fatal entry surfaces the --use-system-ruby hint" {
@@ -1173,9 +1173,9 @@ test "routePostInstallOutcome: non-fatal entry surfaces the --use-system-ruby hi
     defer testing.allocator.free(out);
 
     // Downgrade: "completed" must NOT appear — silent skip ≠ success.
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "--use-system-ruby=wget") != null);
+    try testing.expect(std.mem.find(u8, out, "post_install completed") == null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") != null);
+    try testing.expect(std.mem.find(u8, out, "--use-system-ruby=wget") != null);
 }
 
 test "routePostInstallOutcome: --use-system-ruby=NAME in scope triggers the Ruby fallback banner" {
@@ -1202,9 +1202,9 @@ test "routePostInstallOutcome: --use-system-ruby=NAME in scope triggers the Ruby
     // The script's soft-fail rescue catches undefined-helper errors
     // and exits 0, so the route reports `ran_via_ruby` with the
     // "(via system Ruby)" suffix on the completion line.
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for openssl@3 (via system Ruby)") != null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.find(u8, out, "post_install completed for openssl@3 (via system Ruby)") != null);
 }
 
 test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {
@@ -1222,9 +1222,9 @@ test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {
     const out = try runRoute(&flog, "evil", scope[0..]);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "post_install DSL failed for evil (fatal)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
+    try testing.expect(std.mem.find(u8, out, "post_install DSL failed for evil (fatal)") != null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "post_install completed") == null);
 }
 
 // Migrating ruby from Homebrew shouldn't require `--use-system-ruby=ruby` — the
@@ -1245,9 +1245,9 @@ test "routePostInstallOutcome: ruby keg auto-routes to system Ruby with no flag"
     const out = try runRoute(&flog, "ruby", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "use --use-system-ruby=ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.find(u8, out, "use --use-system-ruby=ruby") == null);
 }
 
 test "routePostInstallOutcome: ruby@N keg also auto-routes to system Ruby" {
@@ -1264,8 +1264,8 @@ test "routePostInstallOutcome: ruby@N keg also auto-routes to system Ruby" {
     const out = try runRoute(&flog, "ruby@3.4", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") == null);
 }
 
 // Negative: lookalikes must NOT inherit the auto-include — only the
@@ -1279,8 +1279,8 @@ test "routePostInstallOutcome: ruby-lookalike kegs still need the explicit flag"
     const out = try runRoute(&flog, "rubygems", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped (use --use-system-ruby=rubygems") != null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped (use --use-system-ruby=rubygems") != null);
 }
 
 test "routePostInstallOutcome: scope with unrelated names is ignored" {
@@ -1293,8 +1293,8 @@ test "routePostInstallOutcome: scope with unrelated names is ignored" {
     const out = try runRoute(&flog, "foo", scope[0..]);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped (use --use-system-ruby=foo") != null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped (use --use-system-ruby=foo") != null);
 }
 
 // Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) gate the re-run
@@ -1317,9 +1317,9 @@ test "routePostInstallOutcome: auto-included ruby keg skips re-run when DSL did 
     const out = try runRoute(&flog, "ruby@3.4", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "(via system Ruby)") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "(via system Ruby)") == null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") != null);
 }
 
 // Negative pin on the same axis: when the DSL handled none of the body,
@@ -1341,8 +1341,8 @@ test "routePostInstallOutcome: auto-included ruby keg falls back when DSL did no
     const out = try runRoute(&flog, "ruby@3.4", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") == null);
 }
 
 // JSON mirror for the auto-include skip path: status is partially_skipped,
@@ -1357,8 +1357,8 @@ test "routePostInstallOutcome: --json reports partially_skipped for ruby keg wit
     const out = try runRouteCaptureStdout(&flog, "ruby@3.4", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"partially_skipped\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"ran_via_ruby\"") == null);
+    try testing.expect(std.mem.find(u8, out, "\"status\":\"partially_skipped\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"status\":\"ran_via_ruby\"") == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,10 +1379,10 @@ test "routePostInstallOutcome: --verbose dumps unknown_method entries after the 
     const out = try runRoute(&flog, "foo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") != null);
     // Both reasons surface, with/without source location.
-    try testing.expect(std.mem.indexOf(u8, out, "foo:4:6: [unknown_method] quiet_system") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "foo: [unsupported_node] default_args") != null);
+    try testing.expect(std.mem.find(u8, out, "foo:4:6: [unknown_method] quiet_system") != null);
+    try testing.expect(std.mem.find(u8, out, "foo: [unsupported_node] default_args") != null);
 }
 
 test "routePostInstallOutcome: --debug surfaces fatal entries alongside the hint" {
@@ -1404,9 +1404,9 @@ test "routePostInstallOutcome: --debug surfaces fatal entries alongside the hint
     const out = try runRoute(&flog, "foo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[unknown_method] helper") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[parse_error] unexpected token") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") != null);
+    try testing.expect(std.mem.find(u8, out, "[unknown_method] helper") != null);
+    try testing.expect(std.mem.find(u8, out, "[parse_error] unexpected token") != null);
 }
 
 test "routePostInstallOutcome: fatal + --debug also prints non-fatal context" {
@@ -1422,10 +1422,10 @@ test "routePostInstallOutcome: fatal + --debug also prints non-fatal context" {
     const out = try runRoute(&flog, "z", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "DSL failed for z (fatal)") != null);
+    try testing.expect(std.mem.find(u8, out, "DSL failed for z (fatal)") != null);
     // Sandbox violation surfaces via renderFatal; tangential helper via renderUnknown.
-    try testing.expect(std.mem.indexOf(u8, out, "[sandbox_violation] /etc/passwd") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[unknown_method] tangential_helper") != null);
+    try testing.expect(std.mem.find(u8, out, "[sandbox_violation] /etc/passwd") != null);
+    try testing.expect(std.mem.find(u8, out, "[unknown_method] tangential_helper") != null);
 }
 
 test "routePostInstallOutcome: renders recorded diagnostic notes at the completion seam" {
@@ -1438,7 +1438,7 @@ test "routePostInstallOutcome: renders recorded diagnostic notes at the completi
     const out = try runRoute(&flog, "demo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "x boom") != null);
+    try testing.expect(std.mem.find(u8, out, "x boom") != null);
 }
 
 test "routePostInstallOutcome: surfaces the dropped_oom notice" {
@@ -1451,7 +1451,7 @@ test "routePostInstallOutcome: surfaces the dropped_oom notice" {
     const out = try runRoute(&flog, "demo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "dropped an entry due to OOM") != null);
+    try testing.expect(std.mem.find(u8, out, "dropped an entry due to OOM") != null);
 }
 
 // Byte-identical-envelope guard: diagnostics (notes / dropped_oom) live in
@@ -1466,9 +1466,9 @@ test "routePostInstallOutcome: a notes-only log still reports completed and rend
     const out = try runRoute(&flog, "demo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for demo") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "x boom") != null); // still surfaced
+    try testing.expect(std.mem.find(u8, out, "post_install completed for demo") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.find(u8, out, "x boom") != null); // still surfaced
 }
 
 test "routePostInstallOutcome: dropped_oom alone does not downgrade the routing decision" {
@@ -1479,8 +1479,8 @@ test "routePostInstallOutcome: dropped_oom alone does not downgrade the routing 
     const out = try runRoute(&flog, "demo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for demo") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.find(u8, out, "post_install completed for demo") != null);
+    try testing.expect(std.mem.find(u8, out, "partially skipped") == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,11 +1527,11 @@ test "routePostInstallOutcome: --json emits one status line with escaped name" {
 
     // Shape: `{"event":"post_install","name":"llvm@21","status":"partially_skipped","entries":[...]}\n`
     try testing.expect(std.mem.endsWith(u8, out, "\n"));
-    try testing.expect(std.mem.indexOf(u8, out, "\"event\":\"post_install\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"name\":\"llvm@21\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"partially_skipped\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"reason\":\"unknown_method\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"detail\":\"write_config_files\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"event\":\"post_install\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"name\":\"llvm@21\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"status\":\"partially_skipped\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"reason\":\"unknown_method\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"detail\":\"write_config_files\"") != null);
 
     // Round-trip through std.json to confirm the line is parser-clean.
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
@@ -1545,8 +1545,8 @@ test "routePostInstallOutcome: --json status=completed for clean flog" {
     defer flog.deinit();
     const out = try runRouteCaptureStdout(&flog, "wget", &.{});
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"completed\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"entries\":[]") != null);
+    try testing.expect(std.mem.find(u8, out, "\"status\":\"completed\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"entries\":[]") != null);
 }
 
 test "routePostInstallOutcome: --json status=fatal on sandbox violation" {
@@ -1555,7 +1555,7 @@ test "routePostInstallOutcome: --json status=fatal on sandbox violation" {
     flog.log(.{ .formula = "bad", .reason = .sandbox_violation, .detail = "/etc/passwd", .loc = null });
     const out = try runRouteCaptureStdout(&flog, "bad", &.{});
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"fatal\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"status\":\"fatal\"") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1731,12 +1731,12 @@ test "drive: no DSL source and no scope match emits the unified skip hint" {
 
     // The skip hint is the byte-for-byte string both install and migrate
     // must print so scripted users see the same "opt in" message.
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         buf.items,
         "post_install skipped (use --use-system-ruby=__nonexistent_test_formula_xyz__ or brew install __nonexistent_test_formula_xyz__)",
     ) != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Running post_install") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "Running post_install") == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,7 +1836,7 @@ test "driveSteps executes a steps-migrated formula and routes 'completed'" {
     var rand: [8]u8 = undefined;
     io.random(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
-    const prefix = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_drivesteps_{s}", .{hex[0..]});
+    const prefix = try testing.allocator.print("/tmp/malt_drivesteps_{s}", .{hex[0..]});
     defer testing.allocator.free(prefix);
     try std.Io.Dir.cwd().createDirPath(io, prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
@@ -1849,9 +1849,9 @@ test "driveSteps executes a steps-migrated formula and routes 'completed'" {
     defer testing.allocator.free(r.out);
 
     try testing.expect(r.handled);
-    try testing.expect(std.mem.indexOf(u8, r.out, "post_install completed for glow") != null);
+    try testing.expect(std.mem.find(u8, r.out, "post_install completed for glow") != null);
 
-    const made = try std.fmt.allocPrint(testing.allocator, "{s}/var/log/glow", .{prefix});
+    const made = try testing.allocator.print("{s}/var/log/glow", .{prefix});
     defer testing.allocator.free(made);
     var dir = std.Io.Dir.openDirAbsolute(io, made, .{}) catch return error.TestUnexpectedResult;
     dir.close(io);
@@ -1874,7 +1874,7 @@ test "driveSteps routes unsupported step types to the loud partial skip" {
     var rand: [8]u8 = undefined;
     io.random(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
-    const prefix = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_drivesteps_{s}", .{hex[0..]});
+    const prefix = try testing.allocator.print("/tmp/malt_drivesteps_{s}", .{hex[0..]});
     defer testing.allocator.free(prefix);
     try std.Io.Dir.cwd().createDirPath(io, prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
@@ -1889,6 +1889,6 @@ test "driveSteps routes unsupported step types to the loud partial skip" {
     defer testing.allocator.free(r.out);
 
     try testing.expect(r.handled);
-    try testing.expect(std.mem.indexOf(u8, r.out, "partially skipped") != null);
-    try testing.expect(std.mem.indexOf(u8, r.out, "--use-system-ruby") != null);
+    try testing.expect(std.mem.find(u8, r.out, "partially skipped") != null);
+    try testing.expect(std.mem.find(u8, r.out, "--use-system-ruby") != null);
 }

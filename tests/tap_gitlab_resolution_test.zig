@@ -95,7 +95,7 @@ test "gitlab resolve: a recorded commits/HEAD body yields the sha and its raw .r
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
 
     var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitlab, url, null);
     defer res.deinit();
@@ -136,7 +136,7 @@ test "gitlab resolve: the API request carries PRIVATE-TOKEN when MALT_GITLAB_TOK
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
 
     var res = try tap.resolveHeadCommit(io, envWithGitlabToken(), testing.allocator, false, .gitlab, url, null);
     defer res.deinit();
@@ -157,7 +157,7 @@ test "gitlab raw fetch: getRawFile carries PRIVATE-TOKEN — raw lives on the in
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/grp/tap/-/raw/{s}/Formula/glow.rb", .{ port, fixture_sha });
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/grp/tap/-/raw/{s}/Formula/glow.rb", .{ port, fixture_sha });
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, envWithGitlabToken(), testing.allocator);

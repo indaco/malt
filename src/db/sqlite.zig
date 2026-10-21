@@ -117,7 +117,7 @@ pub const Statement = struct {
 };
 
 // Worst case every path byte is percent-encoded, plus the scheme and query.
-const snapshot_uri_len = std.fs.max_path_bytes * 3 + 64;
+const snapshot_uri_len = std.Io.Dir.max_path_bytes * 3 + 64;
 
 /// Existence via SQLite's VFS. A wrong answer is safe for both uses: a
 /// missed -wal yields an older but consistent copy, a missed db/ a refusal.
@@ -162,8 +162,8 @@ fn copyInto(dst: *c.sqlite3, buf: []u8, path: [:0]const u8, immutable: bool) err
     };
     if (c.sqlite3_open_v2(uri.ptr, &src, c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_URI, null) != c.SQLITE_OK) {
         const absent = src != null and c.sqlite3_system_errno(src) == @backingInt(std.posix.E.NOENT);
-        const dir = std.fs.path.dirname(path) orelse return if (absent) error.Absent else error.OpenFailed;
-        const dir_z = std.fmt.bufPrintSentinel(buf, "{s}", .{dir}, 0) catch return error.OpenFailed;
+        const dir = std.Io.Dir.path.dirname(path) orelse return if (absent) error.Absent else error.OpenFailed;
+        const dir_z = std.mem.printSentinel(buf, "{s}", .{dir}, 0) catch return error.OpenFailed;
         return if (absent and vfsExists(dir_z)) error.Absent else error.OpenFailed;
     }
     _ = c.sqlite3_busy_timeout(src.?, 5000);
@@ -174,7 +174,7 @@ fn copyInto(dst: *c.sqlite3, buf: []u8, path: [:0]const u8, immutable: bool) err
 }
 
 fn walPath(buf: []u8, path: []const u8) SqliteError![:0]const u8 {
-    return std.fmt.bufPrintSentinel(buf, "{s}-wal", .{path}, 0) catch SqliteError.OpenFailed;
+    return std.mem.printSentinel(buf, "{s}-wal", .{path}, 0) catch SqliteError.OpenFailed;
 }
 
 /// `copyInto` with an absent file read as the empty database `open` would make.
@@ -273,8 +273,8 @@ pub const Database = struct {
     }
 
     /// Execute one or more SQL statements that return no result rows.
-    /// String literals and `bufPrintSentinel` output coerce to `[:0]const u8`; dynamic
-    /// SQL should be built with `bufPrintSentinel` or an ArrayList plus a trailing 0.
+    /// String literals and `std.mem.printSentinel` output coerce to `[:0]const u8`; dynamic
+    /// SQL should be built with `std.mem.printSentinel` or an ArrayList plus a trailing 0.
     pub fn exec(self: *Database, sql: [:0]const u8) SqliteError!void {
         const rc = c.sqlite3_exec(self._handle, sql.ptr, null, null, null);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.ExecFailed);
@@ -371,8 +371,8 @@ test "errMsg returns the underlying SQLite error string after a failed exec" {
     try testing.expect(msg.len > 0);
     // SQLite's parse error includes the offending token; assert on a stable
     // substring rather than the full message.
-    try testing.expect(std.mem.indexOf(u8, msg, "syntax error") != null or
-        std.mem.indexOf(u8, msg, "near \"NOT\"") != null);
+    try testing.expect(std.mem.find(u8, msg, "syntax error") != null or
+        std.mem.find(u8, msg, "near \"NOT\"") != null);
 }
 
 test "errMsg surfaces a UNIQUE constraint violation message" {
@@ -387,7 +387,7 @@ test "errMsg surfaces a UNIQUE constraint violation message" {
     try stmt.bindText(1, "a");
     try testing.expectError(SqliteError.ConstraintViolation, stmt.step());
     const msg = db.errMsg();
-    try testing.expect(std.mem.indexOf(u8, msg, "UNIQUE") != null);
+    try testing.expect(std.mem.find(u8, msg, "UNIQUE") != null);
 }
 
 test "bindText copies bound bytes at bind time, so caller may free before step" {
@@ -422,7 +422,7 @@ test "Database.open closes the handle when a PRAGMA fails after a successful ope
     // sqlite3_open_v2 never reads the header, so a non-database file fails the
     // first PRAGMA - the only path that abandons a constructed Database.
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-notadb-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-notadb-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     {
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
@@ -448,14 +448,14 @@ test "Database.open closes the handle when a PRAGMA fails after a successful ope
 fn deleteWithSidecars(io: std.Io, path: []const u8) void {
     for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
         var buf: [80]u8 = undefined;
-        const file = std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable;
+        const file = std.mem.print(&buf, "{s}{s}", .{ path, suffix }) catch unreachable;
         std.Io.Dir.cwd().deleteFile(io, file) catch {};
     }
 }
 
 test "Database.close releases the connection at once when no statement is alive" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-clean-close-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-clean-close-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     defer deleteWithSidecars(io, path);
 
@@ -475,7 +475,7 @@ test "Database.close releases the connection once a straggling statement finaliz
     // File-backed on purpose: an in-memory connection owns no fd, so the
     // probe would pass vacuously against the legacy close.
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-close-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-close-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     defer deleteWithSidecars(io, path);
 
@@ -503,7 +503,7 @@ test "Database.open waits out a lock held by another connection instead of faili
     // A rollback-journal DB under a write lock makes the WAL pragma return
     // BUSY; that is a wait, not an unopenable database.
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-busy-open-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-busy-open-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -534,7 +534,7 @@ fn countRows(db: *Database) !i64 {
 
 test "openSnapshot on an absent file hands back an empty database and creates nothing" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-absent-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-absent-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -546,23 +546,23 @@ test "openSnapshot on an absent file hands back an empty database and creates no
 
     for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
         var buf: [80]u8 = undefined;
-        try testing.expect(!fileExists(io, try std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix })));
+        try testing.expect(!fileExists(io, try std.mem.print(&buf, "{s}{s}", .{ path, suffix })));
     }
 }
 
 test "openSnapshot refuses a path whose directory is missing, as open does" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-nodir-{d}/malt.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-nodir-{d}/malt.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
 
     try testing.expectError(SqliteError.OpenFailed, Database.open(path));
     try testing.expectError(SqliteError.OpenFailed, Database.openSnapshot(io, path));
-    try testing.expect(!fileExists(io, std.fs.path.dirname(path).?));
+    try testing.expect(!fileExists(io, std.Io.Dir.path.dirname(path).?));
 }
 
 test "openSnapshot reads a WAL database without changing a byte or leaving a sidecar" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-wal-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-wal-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -586,13 +586,13 @@ test "openSnapshot reads a WAL database without changing a byte or leaving a sid
     try testing.expectEqualSlices(u8, before, after);
     for ([_][]const u8{ "-wal", "-shm" }) |suffix| {
         var buf: [80]u8 = undefined;
-        try testing.expect(!fileExists(io, try std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix })));
+        try testing.expect(!fileExists(io, try std.mem.print(&buf, "{s}{s}", .{ path, suffix })));
     }
 }
 
 test "openSnapshot sees rows a live writer has committed but not yet checkpointed" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-live-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-live-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -601,7 +601,7 @@ test "openSnapshot sees rows a live writer has committed but not yet checkpointe
     defer writer.close();
     try writer.exec("PRAGMA wal_autocheckpoint=0; CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3);");
     var wal_buf: [80]u8 = undefined;
-    try testing.expect(fileExists(io, try std.fmt.bufPrint(&wal_buf, "{s}-wal", .{path})));
+    try testing.expect(fileExists(io, try std.mem.print(&wal_buf, "{s}-wal", .{path})));
 
     var db = try Database.openSnapshot(io, path);
     defer db.close();
@@ -610,7 +610,7 @@ test "openSnapshot sees rows a live writer has committed but not yet checkpointe
 
 test "openSnapshot reports an unreadable database as a failure, never as empty" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-walled-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-walled-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -631,12 +631,12 @@ test "openSnapshot reports an unreadable database as a failure, never as empty" 
 
 test "openSnapshot copies a database whose path carries URI metacharacters" {
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-snap-%?#-{d}", .{std.c.getpid()});
+    const dir = try std.mem.print(&dir_buf, "/tmp/malt-snap-%?#-{d}", .{std.c.getpid()});
     const io = std.Options.debug_io;
     try std.Io.Dir.cwd().createDirPath(io, dir);
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     var path_buf: [80]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{dir}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "{s}/malt.db", .{dir}, 0);
     {
         var seed = try Database.open(path);
         defer seed.close();
@@ -652,12 +652,12 @@ test "openSnapshot reports a directory it cannot look into as a failure, never a
     // The file may well be there; only a definite ENOENT starts empty.
     if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-snap-walled-dir-{d}", .{std.c.getpid()});
+    const dir = try std.mem.print(&dir_buf, "/tmp/malt-snap-walled-dir-{d}", .{std.c.getpid()});
     const io = std.Options.debug_io;
     try std.Io.Dir.cwd().createDirPath(io, dir);
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     var path_buf: [80]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{dir}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "{s}/malt.db", .{dir}, 0);
     {
         var seed = try Database.open(path);
         seed.close();
@@ -672,7 +672,7 @@ test "openSnapshot reports a directory it cannot look into as a failure, never a
 
 test "openSnapshot redoes a copy the file changed under, so a checkpoint cannot tear it" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-race-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-race-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -707,7 +707,7 @@ test "openSnapshot gives up on a file that keeps changing rather than leave side
     // A locked read of a WAL file with no -wal would create -wal/-shm and,
     // read-only, never remove them.
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-churn-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-churn-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);
@@ -733,7 +733,7 @@ test "openSnapshot gives up on a file that keeps changing rather than leave side
     try testing.expectEqual(max_unlocked_copies, Writer.writes);
     for ([_][]const u8{ "-wal", "-shm" }) |suffix| {
         var buf: [80]u8 = undefined;
-        try testing.expect(!fileExists(io, try std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix })));
+        try testing.expect(!fileExists(io, try std.mem.print(&buf, "{s}{s}", .{ path, suffix })));
     }
 }
 
@@ -741,7 +741,7 @@ test "openSnapshot rereads when a -wal appears during the copy, though the file 
     // Frames in a new -wal are invisible to the unlocked copy and leave the
     // file's stamp alone; only the -wal itself says the copy may be stale.
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-snap-latewal-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-snap-latewal-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     deleteWithSidecars(io, path);
     defer deleteWithSidecars(io, path);

@@ -40,8 +40,7 @@ const Scratch = struct {
 
     /// Absolute path to `sub` inside the scratch tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) []const u8 {
-        return std.fmt.allocPrint(
-            self.arena.allocator(),
+        return self.arena.allocator().print(
             "{s}/{s}",
             .{ self.base, sub },
         ) catch @panic("OOM");

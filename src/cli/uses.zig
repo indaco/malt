@@ -173,7 +173,7 @@ pub fn freeDependents(allocator: std.mem.Allocator, deps: [][]const u8) void {
 pub fn writeHuman(stdout: *std.Io.Writer, target: []const u8, dependents: [][]const u8) !void {
     if (dependents.len == 0) {
         var buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(
+        const line = std.mem.print(
             &buf,
             "No installed formula uses {s}.\n",
             .{target},

@@ -59,8 +59,8 @@ test "header singular vs plural noun is selected by count" {
     rep.header(1, "package", "packages");
     rep.header(10, "package", "packages");
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "removing 1 package\n") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "removing 10 packages\n") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "removing 1 package\n") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "removing 10 packages\n") != null);
 }
 
 test "header reads 'would remove' under dry-run" {
@@ -72,9 +72,9 @@ test "header reads 'would remove' under dry-run" {
     var rep = report.Reporter.init("store-orphans", true);
     rep.header(3, "entry", "entries");
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "would remove 3 entries") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "would remove 3 entries") != null);
     // Defensive: dry-run path must not say "removing".
-    try testing.expect(std.mem.indexOf(u8, buf.items, "removing 3") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "removing 3") == null);
 }
 
 // ── Reporter.item + cap ─────────────────────────────────────────────────────
@@ -105,13 +105,13 @@ test "item caps the listed entries at default_item_cap and prints the more line"
     var lines = std.mem.splitScalar(u8, buf.items, '\n');
     var bullets: usize = 0;
     while (lines.next()) |ln| {
-        if (std.mem.indexOf(u8, ln, "    - ") != null) bullets += 1;
+        if (std.mem.find(u8, ln, "    - ") != null) bullets += 1;
     }
     try testing.expectEqual(@as(usize, report.default_item_cap), bullets);
 
     // Tail line names the remaining count.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "… 5 more") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "use --verbose") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "… 5 more") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "use --verbose") != null);
 }
 
 test "verbose mode bypasses the cap and prints every item" {
@@ -128,10 +128,10 @@ test "verbose mode bypasses the cap and prints every item" {
     var lines = std.mem.splitScalar(u8, buf.items, '\n');
     var bullets: usize = 0;
     while (lines.next()) |ln| {
-        if (std.mem.indexOf(u8, ln, "    - ") != null) bullets += 1;
+        if (std.mem.find(u8, ln, "    - ") != null) bullets += 1;
     }
     try testing.expectEqual(@as(usize, names.len), bullets);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "more (use --verbose") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "more (use --verbose") == null);
 }
 
 test "short_hash item format truncates long SHAs but leaves short labels alone" {
@@ -145,10 +145,10 @@ test "short_hash item format truncates long SHAs but leaves short labels alone" 
     rep.item("f81449aaecf0d71e3679c230904eaaf746b2fc61b3186870a8c2f33e38eb8404");
     rep.item("short");
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "    - f81449aaecf0…\n") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "    - short\n") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "    - f81449aaecf0…\n") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "    - short\n") != null);
     // Full SHA must NOT leak when the format asks for short hashes.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "f81449aaecf0d71e3679c230904eaaf7") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "f81449aaecf0d71e3679c230904eaaf7") == null);
 }
 
 // ── Reporter.empty / note ───────────────────────────────────────────────────
@@ -162,7 +162,7 @@ test "empty emits a dim 'nothing to remove' line under the scope name" {
     var rep = report.Reporter.init("stale-casks", false);
     rep.empty("nothing to remove");
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "stale-casks: nothing to remove") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "stale-casks: nothing to remove") != null);
 }
 
 // ── Summary table ──────────────────────────────────────────────────────────
@@ -182,19 +182,19 @@ test "Summary.render emits one row per scope plus a total line" {
 
     summary.render();
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Summary") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "Summary") != null);
     // Each scope name appears as a row.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "unused-deps") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "store-orphans") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "cache") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "unused-deps") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "store-orphans") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "cache") != null);
     // Total row carries the summed count (10 + 57 + 0 = 67) and a bytes value.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "total") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "67") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "total") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "67") != null);
     // Two rule lines bracket the body.
     var rules: usize = 0;
     var lines = std.mem.splitScalar(u8, buf.items, '\n');
     while (lines.next()) |ln| {
-        if (std.mem.indexOf(u8, ln, "----------") != null) rules += 1;
+        if (std.mem.find(u8, ln, "----------") != null) rules += 1;
     }
     try testing.expectEqual(@as(usize, 2), rules);
 }

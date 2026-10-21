@@ -307,7 +307,7 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
         if (try stmt.step()) {
             const sql_ptr = stmt.columnText(0) orelse "";
             const sql = std.mem.sliceTo(sql_ptr, 0);
-            if (std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") != null) {
+            if (std.mem.find(u8, sql, "UNIQUE(name, version, revision)") != null) {
                 already_migrated = true;
             }
         }
@@ -871,7 +871,7 @@ fn canonicalizeTaps(db: *sqlite.Database) sqlite.SqliteError!void {
 
             var canon_buf: [tap_slug_cap]u8 = undefined;
             const canon = tap_slug.canonicalTapSlug(&canon_buf, name) orelse continue;
-            const slash = std.mem.indexOfScalar(u8, canon, '/').?;
+            const slash = std.mem.findScalar(u8, canon, '/').?;
 
             // The row that can actually fetch wins a collision.
             var want_buf: [tap_slug_cap]u8 = undefined;
@@ -897,10 +897,10 @@ fn canonicalizeTaps(db: *sqlite.Database) sqlite.SqliteError!void {
                 // Rewrite only the trailing `/<owner>/<repo>`: no URL
                 // shape is assumed beyond the repo being the last segment.
                 var tail_buf: [tap_slug_cap * 2]u8 = undefined;
-                const tail = std.fmt.bufPrint(&tail_buf, "/{s}/{s}", .{ owner, repo }) catch "";
+                const tail = std.mem.print(&tail_buf, "/{s}/{s}", .{ owner, repo }) catch "";
                 var new_buf: [1024]u8 = undefined;
                 if (tail.len != 0 and std.mem.endsWith(u8, url, tail)) {
-                    const fixed = std.fmt.bufPrint(&new_buf, "{s}/{s}/{s}", .{
+                    const fixed = std.mem.print(&new_buf, "{s}/{s}/{s}", .{
                         url[0 .. url.len - tail.len], canon[0..slash], want_repo,
                     }) catch "";
                     if (fixed.len != 0) try write.bindText(6, fixed) else try write.bindNull(6);
@@ -981,7 +981,7 @@ fn canonicalizeKegs(db: *sqlite.Database) sqlite.SqliteError!void {
             const rewritable = full.len > tap.len and
                 std.mem.startsWith(u8, full, tap) and full[tap.len] == '/';
             const fixed = if (rewritable)
-                std.fmt.bufPrint(&full_buf, "{s}{s}", .{ canon, full[tap.len..] }) catch ""
+                std.mem.print(&full_buf, "{s}{s}", .{ canon, full[tap.len..] }) catch ""
             else
                 "";
             if (fixed.len != 0) try stage.bindText(3, fixed) else try stage.bindNull(3);
@@ -1117,15 +1117,15 @@ test "fresh DB ships kegs at the v5 UNIQUE without a rebuild (v5 shape)" {
     const sql = try kegsCreateSql(&db, &buf);
 
     // Unquoted name: the rebuild's RENAME tail would have quoted it.
-    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE kegs") != null);
-    const unique = std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") orelse
+    try testing.expect(std.mem.find(u8, sql, "CREATE TABLE kegs") != null);
+    const unique = std.mem.find(u8, sql, "UNIQUE(name, version, revision)") orelse
         return error.TestExpectedV5Unique;
     // Inline, i.e. created — not appended by the v9→v10 ALTER.
-    const isolated = std.mem.indexOf(u8, sql, "bin_isolated") orelse
+    const isolated = std.mem.find(u8, sql, "bin_isolated") orelse
         return error.TestExpectedBinIsolated;
     try testing.expect(isolated < unique);
     // Same for the v15 column: inline, not appended by the v14→v15 ALTER.
-    const tap_commit = std.mem.indexOf(u8, sql, "tap_commit_sha") orelse
+    const tap_commit = std.mem.find(u8, sql, "tap_commit_sha") orelse
         return error.TestExpectedTapCommitSha;
     try testing.expect(tap_commit < unique);
 
@@ -1554,7 +1554,7 @@ test "v4→v5 migration is idempotent when kegs already carries the v5 UNIQUE" {
 
     var buf: [1024]u8 = undefined;
     const sql = try kegsCreateSql(&db, &buf);
-    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE \"kegs\"") == null);
+    try testing.expect(std.mem.find(u8, sql, "CREATE TABLE \"kegs\"") == null);
 
     try testing.expectEqual(known_schema_version, try currentVersion(&db));
 
@@ -1635,8 +1635,8 @@ test "migrate leaves PRAGMA foreign_keys ON after a successful v5 rebuild" {
     // leaves the table name quoted; a direct CREATE does not.
     var buf: [1024]u8 = undefined;
     const sql = try kegsCreateSql(&db, &buf);
-    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE \"kegs\"") != null);
-    try testing.expect(std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") != null);
+    try testing.expect(std.mem.find(u8, sql, "CREATE TABLE \"kegs\"") != null);
+    try testing.expect(std.mem.find(u8, sql, "UNIQUE(name, version, revision)") != null);
 
     // The seeded row and its FK child survived the copy.
     var stmt = try db.prepare(
@@ -2444,7 +2444,7 @@ test "initSchema refuses exactly one version past the known max without writing"
 
     try db.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);");
     var buf: [64]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(&buf, "INSERT INTO schema_version (version) VALUES ({d});", .{known_schema_version + 1}, 0);
+    const sql = try std.mem.printSentinel(&buf, "INSERT INTO schema_version (version) VALUES ({d});", .{known_schema_version + 1}, 0);
     try db.exec(sql);
 
     try testing.expectError(error.SchemaTooNew, initSchema(&db));
@@ -2474,12 +2474,12 @@ fn refcountColumns(db: *sqlite.Database) !i64 {
 
 test "a preview must not commit a migration: the snapshot migrates, the file stays at v15" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-preview-v15-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-preview-v15-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     const cwd = std.Io.Dir.cwd();
     defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
         var buf: [80]u8 = undefined;
-        cwd.deleteFile(io, std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
+        cwd.deleteFile(io, std.mem.print(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
     };
     {
         // A v15 file: v16 dropped store_refs.refcount.

@@ -44,7 +44,7 @@ pub fn lookupSha256(checksums_txt: []const u8, archive_name: []const u8) ?[]cons
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (line.len < 66) continue; // 64 hex + 2 spaces + >=1 name char
         // GoReleaser writes `<hex>  <name>` with two spaces.
-        const sep = std.mem.indexOf(u8, line, "  ") orelse continue;
+        const sep = std.mem.find(u8, line, "  ") orelse continue;
         if (sep != 64) continue;
         const name = line[sep + 2 ..];
         if (!std.mem.eql(u8, name, archive_name)) continue;
@@ -174,14 +174,14 @@ fn resolveTrustedCosign(
     // would never match a prefix given in the other form. Falls back to the
     // literal when the prefix does not exist yet - nothing can resolve inside
     // a prefix that is not there.
-    var prefix_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var prefix_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prefix_real = if (std.Io.Dir.cwd().realPathFile(io, prefix, &prefix_buf)) |pn|
         prefix_buf[0..pn]
     else |_|
         prefix;
 
     // An explicit path is checked as given; a bare name is searched on PATH.
-    if (std.mem.indexOfScalar(u8, bin, '/') != null) {
+    if (std.mem.findScalar(u8, bin, '/') != null) {
         const n = std.Io.Dir.cwd().realPathFile(io, bin, out) catch return error.CosignNotFound;
         if (resolvedInsidePrefix(out[0..n], prefix_real)) return error.CosignUntrusted;
         return out[0..n];
@@ -189,9 +189,9 @@ fn resolveTrustedCosign(
 
     const path_env = std.process.Environ.getPosix(environ, "PATH") orelse return error.CosignNotFound;
     var it = std.mem.tokenizeScalar(u8, path_env, ':');
-    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    var probe: [std.Io.Dir.max_path_bytes]u8 = undefined;
     while (it.next()) |dir| {
-        const cand = std.fmt.bufPrint(&probe, "{s}/{s}", .{ dir, bin }) catch continue;
+        const cand = std.mem.print(&probe, "{s}/{s}", .{ dir, bin }) catch continue;
         // Mere existence is the wrong test: execvp walks past an entry it
         // cannot exec, so a non-executable file (or a directory) named
         // `cosign` earlier on PATH would end the search here while the real
@@ -215,7 +215,7 @@ pub fn verifyCosignBlob(io: std.Io, args: CosignBlob) CosignError!void {
     // A path with a slash makes the spawn skip its own PATH search, so the
     // vetted binary is the one that runs. The residual TOCTOU is accepted:
     // closing it needs fexecve, which std.process.spawn does not expose.
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var resolved_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cosign_bin = try resolveTrustedCosign(io, args.cosign_bin, args.prefix, args.environ, &resolved_buf);
 
     const argv = [_][]const u8{
@@ -260,13 +260,13 @@ test "verifyCosignBlob refuses a cosign that lives inside the prefix" {
 
     // Stand up a fake prefix with an executable `cosign` in its bin/, exactly
     // where a package (or one of the path-traversal bugs) could drop one.
-    const prefix = try std.fmt.allocPrint(a, "/tmp/malt_cosign_trust_{d}", .{std.c.getpid()});
+    const prefix = try a.print("/tmp/malt_cosign_trust_{d}", .{std.c.getpid()});
     defer a.free(prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    const bin = try a.print("{s}/bin", .{prefix});
     defer a.free(bin);
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    const shim = try std.fmt.allocPrint(a, "{s}/cosign", .{bin});
+    const shim = try a.print("{s}/cosign", .{bin});
     defer a.free(shim);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, shim, .{ .truncate = true });
@@ -290,7 +290,7 @@ test "verifyCosignBlob refuses a cosign that lives inside the prefix" {
     }));
 
     // PATH form: same shim, found by search, same refusal.
-    const path_val = try std.fmt.allocPrintSentinel(a, "PATH={s}", .{bin}, 0);
+    const path_val = try a.printSentinel("PATH={s}", .{bin}, 0);
     defer a.free(path_val);
     const entries = [_:null]?[*:0]const u8{path_val.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
@@ -312,20 +312,20 @@ test "an unexecutable PATH entry does not end the search short of the prefix" {
     // Two directories on PATH, the decoy first: a plain file and a directory,
     // both named `cosign`, neither of which execvp would run. If the guard
     // stops at either, the shim in the prefix is spawned unchecked.
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_cosign_decoy_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_cosign_decoy_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
 
-    const decoy_dir = try std.fmt.allocPrint(a, "{s}/decoy", .{root});
+    const decoy_dir = try a.print("{s}/decoy", .{root});
     defer a.free(decoy_dir);
-    const prefix = try std.fmt.allocPrint(a, "{s}/prefix", .{root});
+    const prefix = try a.print("{s}/prefix", .{root});
     defer a.free(prefix);
-    const prefix_bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    const prefix_bin = try a.print("{s}/bin", .{prefix});
     defer a.free(prefix_bin);
     try std.Io.Dir.cwd().createDirPath(io, decoy_dir);
     try std.Io.Dir.cwd().createDirPath(io, prefix_bin);
 
-    const shim = try std.fmt.allocPrint(a, "{s}/cosign", .{prefix_bin});
+    const shim = try a.print("{s}/cosign", .{prefix_bin});
     defer a.free(shim);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, shim, .{ .truncate = true });
@@ -334,7 +334,7 @@ test "an unexecutable PATH entry does not end the search short of the prefix" {
         try f.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
     }
 
-    const path_val = try std.fmt.allocPrintSentinel(a, "PATH={s}:{s}", .{ decoy_dir, prefix_bin }, 0);
+    const path_val = try a.printSentinel("PATH={s}:{s}", .{ decoy_dir, prefix_bin }, 0);
     defer a.free(path_val);
     const entries = [_:null]?[*:0]const u8{path_val.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
@@ -349,7 +349,7 @@ test "an unexecutable PATH entry does not end the search short of the prefix" {
     };
 
     // Decoy 1: a readable, non-executable regular file.
-    const decoy = try std.fmt.allocPrint(a, "{s}/cosign", .{decoy_dir});
+    const decoy = try a.print("{s}/cosign", .{decoy_dir});
     defer a.free(decoy);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, decoy, .{ .truncate = true });
@@ -371,21 +371,21 @@ test "the resolver pins the spawn to the candidate it vetted" {
     // The decoy passes `access(X_OK)` but `execve` rejects it with ENOENT, so
     // the kernel's own PATH walk would carry on into the prefix. The resolver
     // must hand back the decoy, which is what pins the spawn away from there.
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_cosign_pin_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_cosign_pin_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
 
-    const decoy_dir = try std.fmt.allocPrint(a, "{s}/decoy", .{root});
+    const decoy_dir = try a.print("{s}/decoy", .{root});
     defer a.free(decoy_dir);
-    const prefix = try std.fmt.allocPrint(a, "{s}/prefix", .{root});
+    const prefix = try a.print("{s}/prefix", .{root});
     defer a.free(prefix);
-    const prefix_bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    const prefix_bin = try a.print("{s}/bin", .{prefix});
     defer a.free(prefix_bin);
     try std.Io.Dir.cwd().createDirPath(io, decoy_dir);
     try std.Io.Dir.cwd().createDirPath(io, prefix_bin);
 
     for ([_][]const u8{ decoy_dir, prefix_bin }) |dir| {
-        const p = try std.fmt.allocPrint(a, "{s}/cosign", .{dir});
+        const p = try a.print("{s}/cosign", .{dir});
         defer a.free(p);
         const f = try std.Io.Dir.createFileAbsolute(io, p, .{ .truncate = true });
         defer f.close(io);
@@ -393,12 +393,12 @@ test "the resolver pins the spawn to the candidate it vetted" {
         try f.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
     }
 
-    const path_val = try std.fmt.allocPrintSentinel(a, "PATH={s}:{s}", .{ decoy_dir, prefix_bin }, 0);
+    const path_val = try a.printSentinel("PATH={s}:{s}", .{ decoy_dir, prefix_bin }, 0);
     defer a.free(path_val);
     const entries = [_:null]?[*:0]const u8{path_val.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = try resolveTrustedCosign(io, "cosign", prefix, environ, &buf);
     try std.testing.expect(std.mem.endsWith(u8, got, "/decoy/cosign"));
     try std.testing.expect(!resolvedInsidePrefix(got, prefix));
@@ -406,7 +406,7 @@ test "the resolver pins the spawn to the candidate it vetted" {
 
 test "the resolver reports not-found rather than trusting an unresolvable name" {
     const io = std.Options.debug_io;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     // An explicit path that does not exist: the spawn would have failed the
     // same way, so the error stays CosignNotFound.
@@ -431,7 +431,7 @@ test "the resolver reports not-found rather than trusting an unresolvable name" 
 }
 
 test "an empty prefix disables the guard and passes the name through" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = try resolveTrustedCosign(std.Options.debug_io, "cosign", "", .empty, &buf);
     try std.testing.expectEqualStrings("cosign", got);
 }
@@ -442,20 +442,20 @@ test "a PATH entry symlinked into the prefix is refused" {
 
     // The link sits outside the prefix but its target does not. Vetting the
     // resolved path is what catches this; comparing the candidate would not.
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_cosign_link_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_cosign_link_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
 
-    const outside = try std.fmt.allocPrint(a, "{s}/outside", .{root});
+    const outside = try a.print("{s}/outside", .{root});
     defer a.free(outside);
-    const prefix = try std.fmt.allocPrint(a, "{s}/prefix", .{root});
+    const prefix = try a.print("{s}/prefix", .{root});
     defer a.free(prefix);
-    const prefix_bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    const prefix_bin = try a.print("{s}/bin", .{prefix});
     defer a.free(prefix_bin);
     try std.Io.Dir.cwd().createDirPath(io, outside);
     try std.Io.Dir.cwd().createDirPath(io, prefix_bin);
 
-    const target = try std.fmt.allocPrint(a, "{s}/cosign", .{prefix_bin});
+    const target = try a.print("{s}/cosign", .{prefix_bin});
     defer a.free(target);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .truncate = true });
@@ -463,12 +463,12 @@ test "a PATH entry symlinked into the prefix is refused" {
         try f.writeStreamingAll(io, "#!/nonexistent/interp\n");
         try f.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
     }
-    const link = try std.fmt.allocPrint(a, "{s}/cosign", .{outside});
+    const link = try a.print("{s}/cosign", .{outside});
     defer a.free(link);
     try std.Io.Dir.symLinkAbsolute(io, target, link, .{});
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_val = try std.fmt.allocPrintSentinel(a, "PATH={s}", .{outside}, 0);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_val = try a.printSentinel("PATH={s}", .{outside}, 0);
     defer a.free(path_val);
     const entries = [_:null]?[*:0]const u8{path_val.ptr};
     try std.testing.expectError(error.CosignUntrusted, resolveTrustedCosign(
@@ -490,14 +490,14 @@ test "a candidate that cannot be resolved is skipped, never trusted" {
     // An executable, prefix-external cosign the walk reaches and accepts on
     // every check but the last: an undersized output buffer makes realpath
     // fail there. The candidate must be skipped, not handed to the spawn.
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_cosign_unres_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_cosign_unres_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
 
-    const dir = try std.fmt.allocPrint(a, "{s}/bin", .{root});
+    const dir = try a.print("{s}/bin", .{root});
     defer a.free(dir);
     try std.Io.Dir.cwd().createDirPath(io, dir);
-    const cosign = try std.fmt.allocPrint(a, "{s}/cosign", .{dir});
+    const cosign = try a.print("{s}/cosign", .{dir});
     defer a.free(cosign);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, cosign, .{ .truncate = true });
@@ -506,7 +506,7 @@ test "a candidate that cannot be resolved is skipped, never trusted" {
         try f.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
     }
 
-    const path_val = try std.fmt.allocPrintSentinel(a, "PATH={s}", .{dir}, 0);
+    const path_val = try a.printSentinel("PATH={s}", .{dir}, 0);
     defer a.free(path_val);
     const entries = [_:null]?[*:0]const u8{path_val.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };

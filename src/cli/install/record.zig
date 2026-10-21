@@ -352,7 +352,7 @@ pub fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
 
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
+        const dir_path = std.mem.print(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
         std.Io.Dir.createDirAbsolute(ctx.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,

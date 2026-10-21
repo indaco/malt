@@ -154,7 +154,7 @@ test "resolveBottleFor takes the host's tag on current arch, never a newer one" 
     var formula = try formula_mod.parseFormula(alloc, json);
     defer formula.deinit();
 
-    const arm = builtin.cpu.arch == .aarch64;
+    const arm = builtin.target.cpu.arch == .aarch64;
     const tahoe = try formula_mod.resolveBottleFor(&formula, 26);
     try testing.expectEqualStrings(if (arm) &@as([64]u8, @splat('a')) else &@as([64]u8, @splat('c')), tahoe.sha256);
     const sequoia = try formula_mod.resolveBottleFor(&formula, 15);
@@ -270,7 +270,7 @@ test "parse formula with realistic Homebrew API service shape" {
 // Wrap a `service` block in an otherwise-minimal formula and parse it, so the
 // schedule tests vary only the part under test.
 fn parseWithService(alloc: std.mem.Allocator, service_block: []const u8) !formula_mod.Formula {
-    const json = try std.fmt.allocPrint(alloc,
+    const json = try alloc.print(
         \\{{
         \\  "name": "svc", "full_name": "svc", "tap": "homebrew/core",
         \\  "desc": "", "homepage": "", "revision": 0, "keg_only": false,

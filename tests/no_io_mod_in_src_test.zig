@@ -54,9 +54,8 @@ fn scanRoot(io: std.Io, root: []const u8, failures: *std.ArrayList([]const u8)) 
         _ = try file.readPositionalAll(io, content, 0);
 
         for (forbidden_substrings) |needle| {
-            if (std.mem.indexOf(u8, content, needle)) |_| {
-                const msg = try std.fmt.allocPrint(
-                    testing.allocator,
+            if (std.mem.find(u8, content, needle)) |_| {
+                const msg = try testing.allocator.print(
                     "{s}/{s} contains forbidden substring \"{s}\"",
                     .{ root, entry.path, needle },
                 );

@@ -28,24 +28,24 @@ pub fn buildPlan(
 
     const linked = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
     for (linked) |name| {
-        const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name }) catch return Error.OutOfMemory;
+        const path = allocator.print("{s}/{s}", .{ prefix, name }) catch return Error.OutOfMemory;
         list.append(allocator, .{ .path = path, .category = .linked_dir }) catch return Error.OutOfMemory;
     }
 
     list.append(allocator, .{
-        .path = std.fmt.allocPrint(allocator, "{s}/opt", .{prefix}) catch return Error.OutOfMemory,
+        .path = allocator.print("{s}/opt", .{prefix}) catch return Error.OutOfMemory,
         .category = .opt,
     }) catch return Error.OutOfMemory;
     list.append(allocator, .{
-        .path = std.fmt.allocPrint(allocator, "{s}/Cellar", .{prefix}) catch return Error.OutOfMemory,
+        .path = allocator.print("{s}/Cellar", .{prefix}) catch return Error.OutOfMemory,
         .category = .cellar,
     }) catch return Error.OutOfMemory;
     list.append(allocator, .{
-        .path = std.fmt.allocPrint(allocator, "{s}/Caskroom", .{prefix}) catch return Error.OutOfMemory,
+        .path = allocator.print("{s}/Caskroom", .{prefix}) catch return Error.OutOfMemory,
         .category = .caskroom,
     }) catch return Error.OutOfMemory;
     list.append(allocator, .{
-        .path = std.fmt.allocPrint(allocator, "{s}/store", .{prefix}) catch return Error.OutOfMemory,
+        .path = allocator.print("{s}/store", .{prefix}) catch return Error.OutOfMemory,
         .category = .store,
     }) catch return Error.OutOfMemory;
 
@@ -55,11 +55,11 @@ pub fn buildPlan(
     }
 
     list.append(allocator, .{
-        .path = std.fmt.allocPrint(allocator, "{s}/tmp", .{prefix}) catch return Error.OutOfMemory,
+        .path = allocator.print("{s}/tmp", .{prefix}) catch return Error.OutOfMemory,
         .category = .tmp,
     }) catch return Error.OutOfMemory;
     list.append(allocator, .{
-        .path = std.fmt.allocPrint(allocator, "{s}/db", .{prefix}) catch return Error.OutOfMemory,
+        .path = allocator.print("{s}/db", .{prefix}) catch return Error.OutOfMemory,
         .category = .db,
     }) catch return Error.OutOfMemory;
     list.append(allocator, .{
@@ -252,7 +252,7 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     try util.confirmScope(opts.yes, "purge", "wipe");
 
     var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return .{};
+    const lock_path = std.mem.print(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return .{};
     var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 30_000) catch null;
 
     var removed: usize = 0;
@@ -311,7 +311,7 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     verifyWipe(io, plan);
 
     var sum_buf: [128]u8 = undefined;
-    const sum = std.fmt.bufPrint(&sum_buf, "removed {d} target(s), skipped {d}", .{ removed, skipped }) catch "";
+    const sum = std.mem.print(&sum_buf, "removed {d} target(s), skipped {d}", .{ removed, skipped }) catch "";
     output.success("{s}", .{sum});
     return .{ .removed = freed_paths, .bytes = freedBytes(sizes, freed) };
 }
@@ -346,8 +346,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -359,8 +358,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -490,7 +488,7 @@ test "writeManifest writes the same tap-qualified cask and service rows as mt ba
 
     const got = try std.Io.Dir.cwd().readFileAlloc(io, dest, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(got);
-    try std.testing.expect(std.mem.indexOf(u8, got, "cask bar 2.0\ncask acme/tools/foo 1.0\nservice svc\n") != null);
+    try std.testing.expect(std.mem.find(u8, got, "cask bar 2.0\ncask acme/tools/foo 1.0\nservice svc\n") != null);
 }
 
 test "writeManifest refuses a database whose tables cannot be read and leaves no manifest" {

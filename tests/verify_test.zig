@@ -118,7 +118,7 @@ fn writeFakeCosign(path: []const u8, exit_code: u8) !void {
     const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const script = try std.fmt.bufPrint(&buf, "#!/bin/sh\nexit {d}\n", .{exit_code});
+    const script = try std.mem.print(&buf, "#!/bin/sh\nexit {d}\n", .{exit_code});
     try f.writeStreamingAll(std.Options.debug_io, script);
     try f.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(@intCast(0o755)));
 }
@@ -168,7 +168,7 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const fake_cosign = try std.fmt.allocPrint(testing.allocator, "{s}/cosign", .{dir});
+    const fake_cosign = try testing.allocator.print("{s}/cosign", .{dir});
     defer testing.allocator.free(fake_cosign);
     try writeFakeCosign(fake_cosign, 0);
 
@@ -182,7 +182,7 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     orig_buf[orig_raw.len] = 0;
 
     var new_path_buf: [8192]u8 = undefined;
-    const new_path = try std.fmt.bufPrintSentinel(&new_path_buf, "{s}:{s}", .{ dir, orig_raw }, 0);
+    const new_path = try std.mem.printSentinel(&new_path_buf, "{s}:{s}", .{ dir, orig_raw }, 0);
     if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
     defer _ = if (orig_raw.len == 0) unsetenv("PATH") else setenv("PATH", @ptrCast(&orig_buf), 1);
 
@@ -214,10 +214,10 @@ const Fixture = struct {
         fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
 
-        const tarball = try std.fmt.allocPrint(allocator, "{s}/malt.tgz", .{dir});
-        const checksums = try std.fmt.allocPrint(allocator, "{s}/checksums.txt", .{dir});
-        const sigstore = try std.fmt.allocPrint(allocator, "{s}/checksums.txt.sigstore.json", .{dir});
-        const cosign_bin = try std.fmt.allocPrint(allocator, "{s}/fake_cosign", .{dir});
+        const tarball = try allocator.print("{s}/malt.tgz", .{dir});
+        const checksums = try allocator.print("{s}/checksums.txt", .{dir});
+        const sigstore = try allocator.print("{s}/checksums.txt.sigstore.json", .{dir});
+        const cosign_bin = try allocator.print("{s}/fake_cosign", .{dir});
 
         try writeFile(tarball, tarball_bytes);
         try writeFile(checksums, checksums_bytes);
@@ -348,13 +348,13 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const tarball = try std.fmt.allocPrint(testing.allocator, "{s}/malt.tgz", .{dir});
+    const tarball = try testing.allocator.print("{s}/malt.tgz", .{dir});
     defer testing.allocator.free(tarball);
-    const checksums = try std.fmt.allocPrint(testing.allocator, "{s}/checksums.txt", .{dir});
+    const checksums = try testing.allocator.print("{s}/checksums.txt", .{dir});
     defer testing.allocator.free(checksums);
-    const sigstore = try std.fmt.allocPrint(testing.allocator, "{s}/checksums.txt.sigstore.json", .{dir});
+    const sigstore = try testing.allocator.print("{s}/checksums.txt.sigstore.json", .{dir});
     defer testing.allocator.free(sigstore);
-    const cosign_bin = try std.fmt.allocPrint(testing.allocator, "{s}/fake_cosign", .{dir});
+    const cosign_bin = try testing.allocator.print("{s}/fake_cosign", .{dir});
     defer testing.allocator.free(cosign_bin);
 
     // Stream-write the tarball while hashing the same bytes. A 64 KiB
@@ -378,8 +378,7 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
 
-    const line = try std.fmt.allocPrint(
-        testing.allocator,
+    const line = try testing.allocator.print(
         "{s}  {s}\n",
         .{ hex, ARCHIVE_NAME },
     );
@@ -409,8 +408,7 @@ test "verifyAll accepts a multi-chunk tarball whose hash matches" {
     defer testing.allocator.free(payload);
 
     const hex = sha256Hex(payload);
-    const line = try std.fmt.allocPrint(
-        testing.allocator,
+    const line = try testing.allocator.print(
         "{s}  {s}\n",
         .{ hex, ARCHIVE_NAME },
     );
@@ -428,8 +426,7 @@ test "verifyAll rejects a multi-chunk tarball whose content was tampered" {
     defer testing.allocator.free(payload);
 
     const hex = sha256Hex(payload);
-    const line = try std.fmt.allocPrint(
-        testing.allocator,
+    const line = try testing.allocator.print(
         "{s}  {s}\n",
         .{ hex, ARCHIVE_NAME },
     );
@@ -472,16 +469,16 @@ test "the spawned cosign is the one the guard resolved" {
     fs_compat.deleteTreeAbsolute(dio, root) catch {};
     defer fs_compat.deleteTreeAbsolute(dio, root) catch {};
 
-    const decoy_dir = try std.fmt.allocPrint(a, "{s}/decoy", .{root});
+    const decoy_dir = try a.print("{s}/decoy", .{root});
     defer a.free(decoy_dir);
-    const prefix = try std.fmt.allocPrint(a, "{s}/prefix", .{root});
+    const prefix = try a.print("{s}/prefix", .{root});
     defer a.free(prefix);
-    const prefix_bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    const prefix_bin = try a.print("{s}/bin", .{prefix});
     defer a.free(prefix_bin);
     try std.Io.Dir.cwd().createDirPath(dio, decoy_dir);
     try std.Io.Dir.cwd().createDirPath(dio, prefix_bin);
 
-    const decoy = try std.fmt.allocPrint(a, "{s}/cosign", .{decoy_dir});
+    const decoy = try a.print("{s}/cosign", .{decoy_dir});
     defer a.free(decoy);
     {
         const f = try fs_compat.createFileAbsolute(dio, decoy, .{});
@@ -491,7 +488,7 @@ test "the spawned cosign is the one the guard resolved" {
     }
 
     // The rubber stamp: runnable, exits 0, and inside malt's own prefix.
-    const shim = try std.fmt.allocPrint(a, "{s}/cosign", .{prefix_bin});
+    const shim = try a.print("{s}/cosign", .{prefix_bin});
     defer a.free(shim);
     try writeFakeCosign(shim, 0);
 
@@ -504,7 +501,7 @@ test "the spawned cosign is the one the guard resolved" {
     orig_buf[orig_raw.len] = 0;
 
     var path_buf: [8192]u8 = undefined;
-    const new_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}:{s}", .{ decoy_dir, prefix_bin }, 0);
+    const new_path = try std.mem.printSentinel(&path_buf, "{s}:{s}", .{ decoy_dir, prefix_bin }, 0);
     if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
     defer _ = if (orig_raw.len == 0) unsetenv("PATH") else setenv("PATH", @ptrCast(&orig_buf), 1);
 

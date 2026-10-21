@@ -363,7 +363,7 @@ fn installTapRb(
     // `kegs.tap`/`casks.tap` and the resolve URLs all inherit it, so
     // canonicalizing here is what keeps one tap from splitting in two.
     var tap_slug_raw_buf: [tap_mod.max_slug_len]u8 = undefined;
-    const tap_slug_raw = std.fmt.bufPrint(&tap_slug_raw_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
+    const tap_slug_raw = std.mem.print(&tap_slug_raw_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
         return InstallError.FormulaNotFound;
     var tap_slug_buf: [tap_mod.max_slug_len]u8 = undefined;
     const tap_slug = tap_mod.canonicalTapSlug(&tap_slug_buf, tap_slug_raw) orelse
@@ -687,7 +687,7 @@ pub fn installLocalFormula(
     // Formula name comes from the basename minus `.rb` — mirrors
     // Homebrew's convention where `wget.rb` installs `wget`. This is
     // the canonical surface for the cellar path, bin name, and DB row.
-    const base = std.fs.path.basename(realpath);
+    const base = std.Io.Dir.path.basename(realpath);
     if (!std.mem.endsWith(u8, base, ".rb") or base.len <= 3) {
         sink.err("Local formula must end in .rb: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
@@ -759,7 +759,7 @@ fn warnUnverified(label: []const u8) void {
 fn kegHasLinkableContent(io: std.Io, keg_path: []const u8) bool {
     for (linker_mod.Linker.linkable_dirs) |sub| {
         var buf: [512]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ keg_path, sub }) catch continue;
+        const path = std.mem.print(&buf, "{s}/{s}", .{ keg_path, sub }) catch continue;
         var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch continue;
         defer dir.close(io);
         var it = dir.iterate();
@@ -797,7 +797,7 @@ fn singlePayloadDir(io: std.Io, keg_path: []const u8, out: []u8) ?[]const u8 {
 
 fn firstEntryName(io: std.Io, keg_path: []const u8, wrapper: []const u8, out: []u8) ?[]const u8 {
     var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ keg_path, wrapper }) catch return null;
+    const path = std.mem.print(&path_buf, "{s}/{s}", .{ keg_path, wrapper }) catch return null;
     var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return null;
     defer dir.close(io);
     var it = dir.iterate();
@@ -842,8 +842,8 @@ fn hoistSingleWrapperDir(io: std.Io, keg_path: []const u8) bool {
         const name = firstEntryName(io, keg_path, wrapper, &name_buf) orelse break;
         var from_buf: [1024]u8 = undefined;
         var to_buf: [1024]u8 = undefined;
-        const from = std.fmt.bufPrint(&from_buf, "{s}/{s}/{s}", .{ keg_path, wrapper, name }) catch return false;
-        const to = std.fmt.bufPrint(&to_buf, "{s}/{s}", .{ keg_path, name }) catch return false;
+        const from = std.mem.print(&from_buf, "{s}/{s}/{s}", .{ keg_path, wrapper, name }) catch return false;
+        const to = std.mem.print(&to_buf, "{s}/{s}", .{ keg_path, name }) catch return false;
         // Extraction pre-creates an empty `bin`, and relocation drops its own
         // markers here. Clear only an empty dir; anything still standing is
         // something the archive must not be allowed to overwrite.
@@ -853,7 +853,7 @@ fn hoistSingleWrapperDir(io: std.Io, keg_path: []const u8) bool {
     }
 
     var wrapper_path_buf: [1024]u8 = undefined;
-    const wrapper_path = std.fmt.bufPrint(&wrapper_path_buf, "{s}/{s}", .{ keg_path, wrapper }) catch return false;
+    const wrapper_path = std.mem.print(&wrapper_path_buf, "{s}/{s}", .{ keg_path, wrapper }) catch return false;
     // deleteDir, not deleteTree: a leftover entry means the hoist was partial
     // and its bytes must not be thrown away silently.
     std.Io.Dir.cwd().deleteDir(io, wrapper_path) catch return false;
@@ -936,7 +936,7 @@ pub fn formatTapDownloadName(
     ext: []const u8,
     pid: i32,
 ) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/tmp/tap_download.{d}{s}", .{ prefix, pid, ext });
+    return std.mem.print(buf, "{s}/tmp/tap_download.{d}{s}", .{ prefix, pid, ext });
 }
 
 /// Shared "from parsed `.rb` to linked keg" path, used by the tap and
@@ -1157,11 +1157,11 @@ pub fn materializeRubyFormula(
 
     // Extract to Cellar directly (tap-style binaries are simple archives).
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, resolved.name, pkg_version }) catch
+    const cellar_path = std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, resolved.name, pkg_version }) catch
         return InstallError.CellarFailed;
 
     var parent_buf: [512]u8 = undefined;
-    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, resolved.name }) catch
+    const parent = std.mem.print(&parent_buf, "{s}/Cellar/{s}", .{ prefix, resolved.name }) catch
         return InstallError.CellarFailed;
     // Extracting through a symlinked package dir writes the keg wherever the
     // link points, so refuse instead of following it.
@@ -1190,7 +1190,7 @@ pub fn materializeRubyFormula(
     };
 
     var bin_buf: [512]u8 = undefined;
-    const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{cellar_path}) catch
+    const bin_path = std.mem.print(&bin_buf, "{s}/bin", .{cellar_path}) catch
         return InstallError.CellarFailed;
     std.Io.Dir.createDirAbsolute(ctx.io, bin_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
@@ -1222,7 +1222,7 @@ pub fn materializeRubyFormula(
         // upstream's is `<tool>-<os>-<arch>`, so neither ever matches.
         .raw_binary => {
             var dest_buf: [512]u8 = undefined;
-            const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ bin_path, target_binary }) catch
+            const dest = std.mem.print(&dest_buf, "{s}/{s}", .{ bin_path, target_binary }) catch
                 return InstallError.CellarFailed;
             // Verbatim, and executable from the first byte on disk: the asset is
             // usually signed, and any edit makes an arm64 binary unrunnable.
@@ -1263,9 +1263,9 @@ pub fn materializeRubyFormula(
         var dest_buf: [512]u8 = undefined;
         while (walker.next(ctx.io) catch null) |entry| {
             if (entry.kind != .file) continue;
-            const basename = std.fs.path.basename(entry.path);
+            const basename = std.Io.Dir.path.basename(entry.path);
             if (std.mem.eql(u8, basename, target_binary)) {
-                const dest_name = std.fmt.bufPrint(&dest_buf, "bin/{s}", .{basename}) catch continue;
+                const dest_name = std.mem.print(&dest_buf, "bin/{s}", .{basename}) catch continue;
                 std.Io.Dir.copyFile(cellar_dir, entry.path, cellar_dir, dest_name, ctx.io, .{}) catch continue;
                 const bin_file = cellar_dir.openFile(ctx.io, dest_name, .{ .mode = .read_write }) catch continue;
                 defer bin_file.close(ctx.io);
@@ -1431,12 +1431,12 @@ pub fn commitAndSweep(
 fn parkKeg(io: std.Io, buf: []u8, prefix: []const u8, name: []const u8, cellar_path: []const u8) ?[]const u8 {
     std.Io.Dir.accessAbsolute(io, cellar_path, .{}) catch return null;
     var tmp_buf: [512]u8 = undefined;
-    const tmp = std.fmt.bufPrint(&tmp_buf, "{s}/tmp", .{prefix}) catch return null;
+    const tmp = std.mem.print(&tmp_buf, "{s}/tmp", .{prefix}) catch return null;
     std.Io.Dir.createDirAbsolute(io, tmp, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return null,
     };
-    const aside = std.fmt.bufPrint(buf, "{s}/keg-aside.{d}.{s}", .{ tmp, std.c.getpid(), name }) catch return null;
+    const aside = std.mem.print(buf, "{s}/keg-aside.{d}.{s}", .{ tmp, std.c.getpid(), name }) catch return null;
     std.Io.Dir.cwd().deleteTree(io, aside) catch {};
     std.Io.Dir.renameAbsolute(cellar_path, aside, io) catch return null;
     return aside;
@@ -1701,7 +1701,7 @@ fn writeJsonBody(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []con
             '\t' => try out.appendSlice(allocator, "\\t"),
             0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
                 var hex_buf: [6]u8 = undefined;
-                const seq = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                const seq = std.mem.print(&hex_buf, "\\u{x:0>4}", .{c}) catch unreachable;
                 try out.appendSlice(allocator, seq);
             },
             else => try out.append(allocator, c),
@@ -2140,9 +2140,9 @@ test "finalizeTapCaskInstall fails loud when the cask DB row cannot persist" {
     try std.testing.expectEqual(InstallError.RecordFailed, finalize_err.?);
 
     // Substring is the public contract for the regression skip-classifier.
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "failed to record installed cask") != null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "failed to record installed cask") != null);
     // Success line must never fire on a failed persist.
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "deckclip 1.4.5 installed") == null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "deckclip 1.4.5 installed") == null);
 }
 
 const test_io = std.Options.debug_io;
@@ -2152,8 +2152,7 @@ var hoist_seq: std.atomic.Value(u32) = .init(0);
 /// Stands in for std.testing.tmpDir, which builds under .zig-cache - a tree the
 /// build system rewrites underneath concurrent test runs.
 fn hoistScratch(comptime tag: []const u8, allocator: std.mem.Allocator) ![:0]const u8 {
-    const raw = try std.fmt.allocPrintSentinel(
-        allocator,
+    const raw = try allocator.printSentinel(
         "/tmp/malt_hoist_" ++ tag ++ "_{d}_{d}",
         .{ std.c.getpid(), hoist_seq.fetchAdd(1, .monotonic) },
         0,
@@ -2170,10 +2169,10 @@ test "hoistSingleWrapperDir flattens a prebuilt archive nested under one dir" {
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var bin_buf: [512]u8 = undefined;
-    const nested_bin = try std.fmt.bufPrint(&bin_buf, "{s}/mongodb-macos-aarch64--8.3.7/bin", .{keg});
+    const nested_bin = try std.mem.print(&bin_buf, "{s}/mongodb-macos-aarch64--8.3.7/bin", .{keg});
     try std.Io.Dir.cwd().createDirPath(test_io, nested_bin);
     var exe_buf: [512]u8 = undefined;
-    const nested_exe = try std.fmt.bufPrint(&exe_buf, "{s}/mongod", .{nested_bin});
+    const nested_exe = try std.mem.print(&exe_buf, "{s}/mongod", .{nested_bin});
     (try std.Io.Dir.createFileAbsolute(test_io, nested_exe, .{})).close(test_io);
 
     try std.testing.expect(!kegHasLinkableContent(test_io, keg));
@@ -2190,12 +2189,12 @@ test "hoistSingleWrapperDir flattens past malt's markers and a pre-created empty
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/bin", .{keg}));
-    (try std.Io.Dir.createFileAbsolute(test_io, try std.fmt.bufPrint(&buf, "{s}/.malt-reloc-version", .{keg}), .{})).close(test_io);
-    const nested = try std.fmt.bufPrint(&buf, "{s}/mongodb-macos-aarch64--8.3.7/bin", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/bin", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&buf, "{s}/.malt-reloc-version", .{keg}), .{})).close(test_io);
+    const nested = try std.mem.print(&buf, "{s}/mongodb-macos-aarch64--8.3.7/bin", .{keg});
     try std.Io.Dir.cwd().createDirPath(test_io, nested);
     var exe_buf: [512]u8 = undefined;
-    (try std.Io.Dir.createFileAbsolute(test_io, try std.fmt.bufPrint(&exe_buf, "{s}/mongod", .{nested}), .{})).close(test_io);
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&exe_buf, "{s}/mongod", .{nested}), .{})).close(test_io);
 
     try std.testing.expect(!kegHasLinkableContent(test_io, keg));
     _ = hoistSingleWrapperDir(test_io, keg);
@@ -2210,8 +2209,8 @@ test "hoistSingleWrapperDir leaves a keg whose payload is already at the root" {
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/bin", .{keg}));
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/share", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/bin", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/share", .{keg}));
 
     _ = hoistSingleWrapperDir(test_io, keg);
     var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{ .iterate = true });
@@ -2231,7 +2230,7 @@ test "hoistSingleWrapperDir leaves a source tree that flattens to nothing linkab
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-1.0/src", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-1.0/src", .{keg}));
 
     _ = hoistSingleWrapperDir(test_io, keg);
     try std.testing.expect(!kegHasLinkableContent(test_io, keg));
@@ -2246,8 +2245,8 @@ test "hoistSingleWrapperDir leaves a keg holding two payload directories" {
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-a-1.0/bin", .{keg}));
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-b-1.0/bin", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-a-1.0/bin", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-b-1.0/bin", .{keg}));
 
     var name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
     try std.testing.expect(singlePayloadDir(test_io, keg, &name_buf) == null);
@@ -2262,8 +2261,8 @@ test "singlePayloadDir refuses a keg with a stray file beside the wrapper" {
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-1.0/bin", .{keg}));
-    (try std.Io.Dir.createFileAbsolute(test_io, try std.fmt.bufPrint(&buf, "{s}/README", .{keg}), .{})).close(test_io);
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-1.0/bin", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&buf, "{s}/README", .{keg}), .{})).close(test_io);
 
     var name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
     try std.testing.expect(singlePayloadDir(test_io, keg, &name_buf) == null);
@@ -2278,13 +2277,13 @@ test "hoistSingleWrapperDir refuses to overwrite a file already at the keg root"
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    const marker = try std.fmt.bufPrint(&buf, "{s}/.malt-reloc-version", .{keg});
+    const marker = try std.mem.print(&buf, "{s}/.malt-reloc-version", .{keg});
     var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
     defer keg_dir.close(test_io);
     try keg_dir.writeFile(test_io, .{ .sub_path = ".malt-reloc-version", .data = "7" });
 
     var nest_buf: [512]u8 = undefined;
-    const nested = try std.fmt.bufPrint(&nest_buf, "{s}/tool-1.0", .{keg});
+    const nested = try std.mem.print(&nest_buf, "{s}/tool-1.0", .{keg});
     try std.Io.Dir.cwd().createDirPath(test_io, nested);
     try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
 
@@ -2312,7 +2311,7 @@ test "hoistSingleWrapperDir will not replace a dangling dotfile symlink at the k
     try keg_dir.symLink(test_io, "nowhere", ".malt-reloc-version", .{});
 
     var buf: [512]u8 = undefined;
-    const nested = try std.fmt.bufPrint(&buf, "{s}/tool-1.0", .{keg});
+    const nested = try std.mem.print(&buf, "{s}/tool-1.0", .{keg});
     try std.Io.Dir.cwd().createDirPath(test_io, nested);
     try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
 
@@ -2321,7 +2320,7 @@ test "hoistSingleWrapperDir will not replace a dangling dotfile symlink at the k
     // The link is still a link, not the archive's file.
     var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var target_buf: [512]u8 = undefined;
-    const link_path = try std.fmt.bufPrint(&target_buf, "{s}/.malt-reloc-version", .{keg});
+    const link_path = try std.mem.print(&target_buf, "{s}/.malt-reloc-version", .{keg});
     const n = try std.Io.Dir.readLinkAbsolute(test_io, link_path, &link_buf);
     try std.testing.expectEqualStrings("nowhere", link_buf[0..n]);
 }

@@ -61,7 +61,7 @@ const TempDb = struct {
         const dir = try test_io.uniqueTempPath(arena.allocator(), "deps_test", tag);
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
+        const path = try std.mem.printSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -256,13 +256,13 @@ const TempCacheDir = struct {
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
         var api_buf: [512]u8 = undefined;
-        const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
+        const api_dir = try std.mem.print(&api_buf, "{s}/api", .{self.path});
         test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
-        const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
+        const full = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
         const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, json);
@@ -333,10 +333,10 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     // the realistic shape of a healthy install. Plant both before
     // pointing MALT_PREFIX at the sandbox so the resolver sees beta as
     // present and short-circuits before walking gamma.
-    const beta_cellar = try std.fmt.allocPrint(alloc, "{s}/Cellar/beta/1.0", .{tdb.dir});
+    const beta_cellar = try alloc.print("{s}/Cellar/beta/1.0", .{tdb.dir});
     defer alloc.free(beta_cellar);
     try test_io.cwd().createDirPath(std.Options.debug_io, beta_cellar);
-    const opt_parent = try std.fmt.allocPrint(alloc, "{s}/opt", .{tdb.dir});
+    const opt_parent = try alloc.print("{s}/opt", .{tdb.dir});
     defer alloc.free(opt_parent);
     try test_io.cwd().createDirPath(std.Options.debug_io, opt_parent);
     var opt_dir = try test_io.openDirAbsolute(std.Options.debug_io, opt_parent, .{});
@@ -345,7 +345,7 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
 
     _ = try insertKegWithCellar(&tdb.db, "beta", "dependency", beta_cellar);
 
-    const prefix_z = try std.fmt.allocPrintSentinel(alloc, "{s}", .{tdb.dir}, 0);
+    const prefix_z = try alloc.printSentinel("{s}", .{tdb.dir}, 0);
     defer alloc.free(prefix_z);
     _ = c_env.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer _ = c_env.unsetenv("MALT_PREFIX");
@@ -370,10 +370,10 @@ test "resolve fails loudly when the root formula JSON is missing" {
     // Mark the root as a known-404 so fetchFormula returns NotFound without
     // touching the network.
     var api_dir_buf: [512]u8 = undefined;
-    const api_dir = try std.fmt.bufPrint(&api_dir_buf, "{s}/api", .{dir.path});
+    const api_dir = try std.mem.print(&api_dir_buf, "{s}/api", .{dir.path});
     try test_io.makeDirAbsolute(std.Options.debug_io, api_dir);
     var marker_buf: [512]u8 = undefined;
-    const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_nope.404", .{dir.path});
+    const marker = try std.mem.print(&marker_buf, "{s}/api/formula_nope.404", .{dir.path});
     const f = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     f.close(std.Options.debug_io);
 
@@ -406,7 +406,7 @@ test "resolve fails the resolve when a dep's sub-fetch fails" {
     // leave its closure silently truncated.
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"missing\"]}");
     var marker_buf: [512]u8 = undefined;
-    const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
+    const marker = try std.mem.print(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
     const f = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     f.close(std.Options.debug_io);
 
@@ -559,7 +559,7 @@ const TempPrefix = struct {
         errdefer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
 
         var db_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{root}, 0);
+        const db_path = try std.mem.printSentinel(&db_buf, "{s}/malt.db", .{root}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -574,19 +574,19 @@ const TempPrefix = struct {
 
     fn cellarFor(self: *const TempPrefix, name: []const u8, version: []const u8) ![]const u8 {
         var cellar_root_buf: [512]u8 = undefined;
-        const cellar_root = try std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{self.root});
+        const cellar_root = try std.mem.print(&cellar_root_buf, "{s}/Cellar", .{self.root});
         test_io.makeDirAbsolute(std.Options.debug_io, cellar_root) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var name_buf: [512]u8 = undefined;
-        const name_dir = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ cellar_root, name });
+        const name_dir = try std.mem.print(&name_buf, "{s}/{s}", .{ cellar_root, name });
         test_io.makeDirAbsolute(std.Options.debug_io, name_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ name_dir, version });
+        const path = try std.mem.print(&path_buf, "{s}/{s}", .{ name_dir, version });
         test_io.makeDirAbsolute(std.Options.debug_io, path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
@@ -596,7 +596,7 @@ const TempPrefix = struct {
 
     fn readOptLink(self: *const TempPrefix, name: []const u8, buf: []u8) ![]u8 {
         var path_buf: [512]u8 = undefined;
-        const opt_path = try std.fmt.bufPrint(&path_buf, "{s}/opt/{s}", .{ self.root, name });
+        const opt_path = try std.mem.print(&path_buf, "{s}/opt/{s}", .{ self.root, name });
         return test_io.readLinkAbsolute(std.Options.debug_io, opt_path, buf);
     }
 };
@@ -610,12 +610,12 @@ test "ensureOptLink recreates a missing opt/<name> symlink" {
     _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
 
     // Precondition: no opt/ symlink yet.
-    var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var miss_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, p.readOptLink("zstd", &miss_buf));
 
     deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd");
 
-    var got_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var got_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
     try testing.expectEqualStrings(cellar, target);
 }
@@ -631,7 +631,7 @@ test "ensureOptLink is idempotent when the symlink is already correct" {
     deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd"); // first call creates
     deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd"); // second call must be a no-op
 
-    var got_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var got_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
     try testing.expectEqualStrings(cellar, target);
 }
@@ -642,7 +642,7 @@ test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
 
     // Pre-create a symlink to an OLD cellar path that the DB no longer knows.
     var opt_parent_buf: [512]u8 = undefined;
-    const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{p.root});
+    const opt_parent = try std.mem.print(&opt_parent_buf, "{s}/opt", .{p.root});
     try test_io.makeDirAbsolute(std.Options.debug_io, opt_parent);
     var dir = try test_io.openDirAbsolute(std.Options.debug_io, opt_parent, .{});
     defer dir.close(std.Options.debug_io);
@@ -655,7 +655,7 @@ test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
 
     deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd");
 
-    var got_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var got_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
     try testing.expectEqualStrings(cellar, target);
 }
@@ -667,7 +667,7 @@ test "ensureOptLink silently skips names the DB does not know" {
     // No DB row for 'ghost' → ensureOptLink must be a no-op, not panic.
     deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "ghost");
 
-    var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var miss_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, p.readOptLink("ghost", &miss_buf));
 }
 

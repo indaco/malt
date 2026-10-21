@@ -48,7 +48,7 @@ pub fn fetchPostInstallFromGitHubTagged(
     const expected_hash = pins.expectedSha256(name) orelse return .fetch_failed;
 
     var url_buf: [512]u8 = undefined;
-    const url = std.fmt.bufPrint(
+    const url = std.mem.print(
         &url_buf,
         "https://raw.githubusercontent.com/Homebrew/homebrew-core/{s}/Formula/{c}/{s}.rb",
         .{ &pins.homebrew_core_commit_sha, name[0], name },
@@ -159,9 +159,9 @@ const DefSpan = struct {
 /// Find the named def (`def <name>`) at class-body indent and return its span.
 fn findDefBlock(source: []const u8, name: []const u8) ?DefSpan {
     var buf: [64]u8 = undefined;
-    const marker = std.fmt.bufPrint(&buf, "def {s}", .{name}) catch return null;
+    const marker = std.mem.print(&buf, "def {s}", .{name}) catch return null;
     var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, source, pos, marker)) |idx| {
+    while (std.mem.findPos(u8, source, pos, marker)) |idx| {
         const span = defSpanAt(source, idx) orelse {
             pos = idx + marker.len;
             continue;
@@ -176,7 +176,7 @@ fn findDefBlock(source: []const u8, name: []const u8) ?DefSpan {
 /// `pos`. Returns null when no more defs at that indent exist.
 fn findAnyDefBlockAtIndent(source: []const u8, start: usize, indent: usize) ?DefSpan {
     var pos = start;
-    while (std.mem.indexOfPos(u8, source, pos, "def ")) |idx| {
+    while (std.mem.findPos(u8, source, pos, "def ")) |idx| {
         const span = defSpanAt(source, idx) orelse {
             pos = idx + 4;
             continue;
@@ -311,8 +311,7 @@ fn uniqueDir(io: std.Io, suffix: []const u8) ![]u8 {
     var rand: [8]u8 = undefined;
     io.random(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
-    const p = try std.fmt.allocPrint(
-        testing.allocator,
+    const p = try testing.allocator.print(
         "/tmp/malt_ruby_source_{s}_{s}",
         .{ hex[0..], suffix },
     );
@@ -332,7 +331,7 @@ test "extractPostInstallFromSource handles an in-memory Ruby body" {
     const body = extractPostInstallFromSource(testing.allocator, src);
     try testing.expect(body != null);
     defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "mkdir_p \"etc\"") != null);
+    try testing.expect(std.mem.find(u8, body.?, "mkdir_p \"etc\"") != null);
 }
 
 test "extractPostInstallFromSource returns null when no post_install exists" {
@@ -350,7 +349,7 @@ test "extractPostInstallFromSource handles post_install at the top level (no ind
     const body = extractPostInstallFromSource(testing.allocator, src);
     try testing.expect(body != null);
     defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "touch \"foo\"") != null);
+    try testing.expect(std.mem.find(u8, body.?, "touch \"foo\"") != null);
 }
 
 test "extractPostInstallFromSource prepends sibling defs so helpers resolve" {
@@ -371,11 +370,11 @@ test "extractPostInstallFromSource prepends sibling defs so helpers resolve" {
     defer testing.allocator.free(body.?);
 
     // Sibling def appears before post_install body content.
-    const idx_sibling = std.mem.indexOf(u8, body.?, "def helper") orelse return error.TestUnexpectedResult;
-    const idx_call = std.mem.indexOf(u8, body.?, "  helper\n") orelse return error.TestUnexpectedResult;
+    const idx_sibling = std.mem.find(u8, body.?, "def helper") orelse return error.TestUnexpectedResult;
+    const idx_call = std.mem.find(u8, body.?, "  helper\n") orelse return error.TestUnexpectedResult;
     try testing.expect(idx_sibling < idx_call);
     // `def post_install` itself is NOT repeated in the body — only its body.
-    try testing.expect(std.mem.indexOf(u8, body.?, "def post_install") == null);
+    try testing.expect(std.mem.find(u8, body.?, "def post_install") == null);
 }
 
 test "extractPostInstallFromSource collects multiple sibling defs in file order" {
@@ -403,9 +402,9 @@ test "extractPostInstallFromSource collects multiple sibling defs in file order"
     const body = extractPostInstallFromSource(testing.allocator, src);
     try testing.expect(body != null);
     defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "def macos_post_install") != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "def linux_post_install") != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "if OS.mac?") != null);
+    try testing.expect(std.mem.find(u8, body.?, "def macos_post_install") != null);
+    try testing.expect(std.mem.find(u8, body.?, "def linux_post_install") != null);
+    try testing.expect(std.mem.find(u8, body.?, "if OS.mac?") != null);
 }
 
 test "extractPostInstallFromSource skips nested defs inside post_install body" {
@@ -422,7 +421,7 @@ test "extractPostInstallFromSource skips nested defs inside post_install body" {
     const body = extractPostInstallFromSource(testing.allocator, src);
     try testing.expect(body != null);
     defer testing.allocator.free(body.?);
-    try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, body.?, "def post_install"));
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, body.?, "def post_install"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, body.?, "ohai \"hi\""));
 }
 
@@ -431,7 +430,7 @@ test "extractPostInstallBody returns null when the file has no post_install" {
     const tap = try uniqueDir(io, "no_postinstall");
     defer testing.allocator.free(tap);
     defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
+    const rb = try testing.allocator.print("{s}/hello.rb", .{tap});
     defer testing.allocator.free(rb);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
@@ -450,7 +449,7 @@ test "extractPostInstallBody captures the body between def post_install and matc
     const tap = try uniqueDir(io, "with_postinstall");
     defer testing.allocator.free(tap);
     defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
+    const rb = try testing.allocator.print("{s}/hello.rb", .{tap});
     defer testing.allocator.free(rb);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
@@ -468,8 +467,8 @@ test "extractPostInstallBody captures the body between def post_install and matc
     const body = extractPostInstallBody(io, testing.allocator, rb);
     try testing.expect(body != null);
     defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "mkdir_p \"etc/hello\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "touch \"etc/hello/config\"") != null);
+    try testing.expect(std.mem.find(u8, body.?, "mkdir_p \"etc/hello\"") != null);
+    try testing.expect(std.mem.find(u8, body.?, "touch \"etc/hello/config\"") != null);
 }
 
 test "hasPostInstallStepsBlock detects a declarative steps block" {
@@ -501,7 +500,7 @@ test "rbHasPostInstallSteps reads the block from a formula .rb on disk" {
     const tap = try uniqueDir(io, "steps_only");
     defer testing.allocator.free(tap);
     defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/glow.rb", .{tap});
+    const rb = try testing.allocator.print("{s}/glow.rb", .{tap});
     defer testing.allocator.free(rb);
     {
         const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
@@ -526,7 +525,7 @@ test "post_install readers refuse a formula source past the size bound" {
     const tap = try uniqueDir(io, "oversize");
     defer testing.allocator.free(tap);
     defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/huge.rb", .{tap});
+    const rb = try testing.allocator.print("{s}/huge.rb", .{tap});
     defer testing.allocator.free(rb);
 
     // The head is a COMPLETE post_install block, so a reader that truncated

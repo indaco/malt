@@ -55,9 +55,9 @@ fn serveStub(s: *Stub) void {
             var req = srv.receiveHead() catch break;
             served_here = true;
             const target = req.head.target;
-            if (std.mem.indexOf(u8, target, "/token") != null) {
+            if (std.mem.find(u8, target, "/token") != null) {
                 req.respond("{\"token\":\"t1\"}", .{}) catch return;
-            } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
+            } else if (std.mem.find(u8, target, "/blobs/") != null) {
                 s.blob_count += 1;
                 if (s.flag_on_blob) |n| {
                     if (s.blob_count == n) malt.signals.setInterruptedForTest(true);
@@ -118,7 +118,7 @@ fn setupPrefix(tag: []const u8) ![:0]u8 {
     defer testing.allocator.free(base);
     const path = try testing.allocator.dupeSentinel(u8, base, 0);
     inline for (.{ "store", "tmp", "db" }) |sub| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ path, sub });
+        const dir = try testing.allocator.print("{s}/{s}", .{ path, sub });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
@@ -132,7 +132,7 @@ fn setupPrefix(tag: []const u8) ![:0]u8 {
 /// a leak pass as a clean run.
 fn countTmpEntries(prefix: []const u8) !usize {
     var buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "{s}/tmp", .{prefix});
+    const path = try std.mem.print(&buf, "{s}/tmp", .{prefix});
     var dir = try test_io.openDirAbsolute(std.Options.debug_io, path, .{ .iterate = true });
     defer dir.close(std.Options.debug_io);
     var it = dir.iterate();
@@ -171,7 +171,7 @@ fn runDownload(tag: []const u8, corrupt_body: bool, flag_on_blob: ?usize) !Run {
     const port = listener.socket.address.getPort();
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -274,7 +274,7 @@ test "an uninterrupted transient failure still burns the full retry budget" {
     try testing.expectError(malt.install_record.InstallError.DownloadFailed, run.result);
     try testing.expectEqual(@as(usize, 3), run.blob_gets);
     try testing.expectEqual(@as(usize, 1), run.sink.errs);
-    try testing.expect(std.mem.indexOf(u8, run.sink.text(), "after 3 attempts") != null);
+    try testing.expect(std.mem.find(u8, run.sink.text(), "after 3 attempts") != null);
 }
 
 test "a cancel keeps a real mismatch diagnostic but drops the attempts line" {
@@ -292,8 +292,8 @@ test "a cancel keeps a real mismatch diagnostic but drops the attempts line" {
     try testing.expectError(malt.install_record.InstallError.DownloadFailed, run.result);
     try testing.expectEqual(@as(usize, 1), run.blob_gets);
     try testing.expectEqual(@as(usize, 1), run.sink.errs);
-    try testing.expect(std.mem.indexOf(u8, run.sink.text(), "Sha256Mismatch") != null);
-    try testing.expect(std.mem.indexOf(u8, run.sink.text(), "after 3 attempts") == null);
+    try testing.expect(std.mem.find(u8, run.sink.text(), "Sha256Mismatch") != null);
+    try testing.expect(std.mem.find(u8, run.sink.text(), "after 3 attempts") == null);
 }
 
 test "an interrupt before the last attempt stops the retry loop at two requests" {

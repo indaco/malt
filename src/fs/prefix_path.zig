@@ -78,7 +78,7 @@ fn validateHead(path: []const u8) PrefixError!void {
     if (path.len == 0) return PrefixError.Empty;
     if (path.len > max_root_len) return PrefixError.TooLong;
     if (path[0] != '/') return PrefixError.NotAbsolute;
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return PrefixError.EmbeddedNul;
+    if (std.mem.findScalar(u8, path, 0) != null) return PrefixError.EmbeddedNul;
 }
 
 fn validateComponents(path: []const u8) PrefixError!void {
@@ -126,7 +126,7 @@ comptime {
 /// reserved headroom at build time.
 pub fn join(buf: []u8, base: []const u8, comptime suffix: []const u8) error{NameTooLong}![]u8 {
     comptime std.debug.assert(suffix.len <= max_path_suffix);
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ base, suffix }) catch error.NameTooLong;
+    return std.mem.print(buf, "{s}{s}", .{ base, suffix }) catch error.NameTooLong;
 }
 
 /// NUL-terminated variant of `join` for `sqlite.Database.open` sites that
@@ -134,7 +134,7 @@ pub fn join(buf: []u8, base: []const u8, comptime suffix: []const u8) error{Name
 /// `error.NameTooLong`.
 pub fn joinZ(buf: []u8, base: []const u8, comptime suffix: []const u8) error{NameTooLong}![:0]u8 {
     comptime std.debug.assert(suffix.len <= max_path_suffix);
-    return std.fmt.bufPrintSentinel(buf, "{s}{s}", .{ base, suffix }, 0) catch error.NameTooLong;
+    return std.mem.printSentinel(buf, "{s}{s}", .{ base, suffix }, 0) catch error.NameTooLong;
 }
 
 /// True only when nothing at all exists at `path`. A path that cannot be
@@ -153,7 +153,7 @@ pub fn dirMissing(io: std.Io, path: []const u8) bool {
                 cwd.access(io, p, .{}) catch return false;
                 return true;
             } else |ae| if (ae != error.FileNotFound) return false;
-            p = std.fs.path.dirname(p) orelse return true;
+            p = std.Io.Dir.path.dirname(p) orelse return true;
         }
     };
     dir.close(io);
@@ -390,7 +390,7 @@ var scratch_seq = std.atomic.Value(u32).init(0);
 /// concurrent test runs, so it is no place for fixtures.
 fn scratchDir(buf: []u8) ![]const u8 {
     const io = std.Options.debug_io;
-    const base = try std.fmt.bufPrint(buf, "/tmp/malt_prefix_path_{d}_{d}", .{
+    const base = try std.mem.print(buf, "/tmp/malt_prefix_path_{d}_{d}", .{
         std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic),
     });
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
@@ -399,7 +399,7 @@ fn scratchDir(buf: []u8) ![]const u8 {
 }
 
 fn sub(buf: []u8, base: []const u8, rel: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ base, rel }) catch unreachable;
+    return std.mem.print(buf, "{s}/{s}", .{ base, rel }) catch unreachable;
 }
 
 test "dirMissing: a path that does not exist, or whose parent does not, is missing" {

@@ -32,7 +32,7 @@ fn restoreMaltPrefix(old: [:0]const u8) void {
 }
 
 fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "/tmp/malt_cellar_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
+    const path = try allocator.print("/tmp/malt_cellar_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer allocator.free(path);
     const z = try allocator.allocSentinel(u8, path.len, 0);
     @memcpy(z, path);
@@ -41,15 +41,15 @@ fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
 }
 
 fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver_dir: []const u8) !void {
-    const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
+    const keg = try allocator.print("{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
     defer allocator.free(keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
-    const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
+    const bin_dir = try allocator.print("{s}/bin", .{keg});
     defer allocator.free(bin_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
-    const script_path = try std.fmt.allocPrint(allocator, "{s}/bin/hello", .{keg});
+    const script_path = try allocator.print("{s}/bin/hello", .{keg});
     defer allocator.free(script_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, script_path, .{});
@@ -57,11 +57,11 @@ fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []
         f.close(std.Options.debug_io);
     }
 
-    const lib_dir = try std.fmt.allocPrint(allocator, "{s}/lib", .{keg});
+    const lib_dir = try allocator.print("{s}/lib", .{keg});
     defer allocator.free(lib_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, lib_dir);
 
-    const pc_path = try std.fmt.allocPrint(allocator, "{s}/lib/test.pc", .{keg});
+    const pc_path = try allocator.print("{s}/lib/test.pc", .{keg});
     defer allocator.free(pc_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, pc_path, .{});
@@ -74,15 +74,15 @@ fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []
 /// a token whose value is a path inside another keg, so relocation cannot
 /// derive it from the prefix alone.
 fn createPlaceholderBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver_dir: []const u8) !void {
-    const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
+    const keg = try allocator.print("{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
     defer allocator.free(keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
-    const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
+    const bin_dir = try allocator.print("{s}/bin", .{keg});
     defer allocator.free(bin_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
-    const script_path = try std.fmt.allocPrint(allocator, "{s}/bin/wrapper", .{keg});
+    const script_path = try allocator.print("{s}/bin/wrapper", .{keg});
     defer allocator.free(script_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, script_path, .{});
     try f.writeStreamingAll(
@@ -101,11 +101,11 @@ fn createPerlBottleFixture(
     name: []const u8,
     rb_source: []const u8,
 ) !void {
-    const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/1.0/bin", .{ prefix, sha, name });
+    const keg = try allocator.print("{s}/store/{s}/{s}/1.0/bin", .{ prefix, sha, name });
     defer allocator.free(keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
-    const script_path = try std.fmt.allocPrint(allocator, "{s}/tool", .{keg});
+    const script_path = try allocator.print("{s}/tool", .{keg});
     defer allocator.free(script_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, script_path, .{
@@ -115,11 +115,11 @@ fn createPerlBottleFixture(
         f.close(std.Options.debug_io);
     }
 
-    const brew_dir = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/1.0/.brew", .{ prefix, sha, name });
+    const brew_dir = try allocator.print("{s}/store/{s}/{s}/1.0/.brew", .{ prefix, sha, name });
     defer allocator.free(brew_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, brew_dir);
 
-    const rb_path = try std.fmt.allocPrint(allocator, "{s}/{s}.rb", .{ brew_dir, name });
+    const rb_path = try allocator.print("{s}/{s}.rb", .{ brew_dir, name });
     defer allocator.free(rb_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, rb_path, .{});
     try f.writeStreamingAll(std.Options.debug_io, rb_source);
@@ -129,7 +129,7 @@ fn createPerlBottleFixture(
 fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     const dirs = [_][]const u8{ "store", "Cellar", "opt", "bin", "lib" };
     for (dirs) |d| {
-        const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, d });
+        const p = try allocator.print("{s}/{s}", .{ prefix, d });
         defer allocator.free(p);
         test_io.cwd().createDirPath(std.Options.debug_io, p) catch {};
     }
@@ -195,12 +195,12 @@ test "materialize handles version with revision suffix" {
 
     // Verify flat structure: Cellar/pcre2/10.47/bin/hello should exist
     var bin_buf: [512]u8 = undefined;
-    const bin_path = try std.fmt.bufPrint(&bin_buf, "{s}/bin/hello", .{keg.path});
+    const bin_path = try std.mem.print(&bin_buf, "{s}/bin/hello", .{keg.path});
     try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 
     // Verify no extra nesting: Cellar/pcre2/10.47/pcre2/ should NOT exist
     var nested_buf: [512]u8 = undefined;
-    const nested_path = try std.fmt.bufPrint(&nested_buf, "{s}/pcre2", .{keg.path});
+    const nested_path = try std.mem.print(&nested_buf, "{s}/pcre2", .{keg.path});
     const nested_exists = blk: {
         test_io.accessAbsolute(std.Options.debug_io, nested_path, .{}) catch break :blk false;
         break :blk true;
@@ -225,14 +225,13 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
     try createBottleFixture(testing.allocator, prefix, sha_stale_keg, "lld@21", "21.1.8_1");
 
     // Plant a stale keg at the exact destination malt is about to write.
-    const stale_keg = try std.fmt.allocPrint(
-        testing.allocator,
+    const stale_keg = try testing.allocator.print(
         "{s}/Cellar/lld@21/21.1.8_1",
         .{prefix},
     );
     defer testing.allocator.free(stale_keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, stale_keg);
-    const stale_file = try std.fmt.allocPrint(testing.allocator, "{s}/STALE_FILE", .{stale_keg});
+    const stale_file = try testing.allocator.print("{s}/STALE_FILE", .{stale_keg});
     defer testing.allocator.free(stale_file);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, stale_file, .{});
@@ -261,7 +260,7 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
 
     // Fresh content from the bottle is in place.
     var bin_buf: [512]u8 = undefined;
-    const bin_path = try std.fmt.bufPrint(&bin_buf, "{s}/bin/hello", .{keg.path});
+    const bin_path = try std.mem.print(&bin_buf, "{s}/bin/hello", .{keg.path});
     try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 }
 
@@ -292,7 +291,7 @@ test "materialize handles exact version match (no revision)" {
     defer testing.allocator.free(keg.path);
 
     var buf: [512]u8 = undefined;
-    const bin_path = try std.fmt.bufPrint(&buf, "{s}/bin/hello", .{keg.path});
+    const bin_path = try std.mem.print(&buf, "{s}/bin/hello", .{keg.path});
     try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 }
 
@@ -327,16 +326,16 @@ test "placeholder substitution runs for relocatable bottles" {
     defer testing.allocator.free(keg.path);
 
     var script_buf: [512]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/hello", .{keg.path});
+    const script_path = try std.mem.print(&script_buf, "{s}/bin/hello", .{keg.path});
     const content = try readFile(testing.allocator, script_path);
     defer testing.allocator.free(content);
 
     // Must NOT contain any unreplaced @@...@@ tokens
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PREFIX@@") == null);
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_PREFIX@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_CELLAR@@") == null);
 
     // Must contain the actual malt prefix
-    try testing.expect(std.mem.indexOf(u8, content, prefix) != null);
+    try testing.expect(std.mem.find(u8, content, prefix) != null);
 }
 
 test "relocation substitutes the caller-resolved dependency placeholder" {
@@ -355,7 +354,7 @@ test "relocation substitutes the caller-resolved dependency placeholder" {
     defer restoreMaltPrefix(old_env);
 
     var value_buf: [512]u8 = undefined;
-    const value = try std.fmt.bufPrint(
+    const value = try std.mem.print(
         &value_buf,
         "{s}/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
         .{prefix},
@@ -375,12 +374,12 @@ test "relocation substitutes the caller-resolved dependency placeholder" {
     defer testing.allocator.free(keg.path);
 
     var script_buf: [512]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/wrapper", .{keg.path});
+    const script_path = try std.mem.print(&script_buf, "{s}/bin/wrapper", .{keg.path});
     const content = try readFile(testing.allocator, script_path);
     defer testing.allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_JAVA@@") == null);
-    try testing.expect(std.mem.indexOf(u8, content, value) != null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_JAVA@@") == null);
+    try testing.expect(std.mem.find(u8, content, value) != null);
 }
 
 test "relocation leaves an unresolved dependency placeholder in place" {
@@ -412,13 +411,13 @@ test "relocation leaves an unresolved dependency placeholder in place" {
     defer testing.allocator.free(keg.path);
 
     var script_buf: [512]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/wrapper", .{keg.path});
+    const script_path = try std.mem.print(&script_buf, "{s}/bin/wrapper", .{keg.path});
     const content = try readFile(testing.allocator, script_path);
     defer testing.allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_JAVA@@") != null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_JAVA@@") != null);
     // The prefix-derived tokens still relocate — only the extra one is withheld.
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_CELLAR@@") == null);
 }
 
 test "relocation substitutes the perl shebang placeholder" {
@@ -456,12 +455,12 @@ test "relocation substitutes the perl shebang placeholder" {
     defer testing.allocator.free(keg.path);
 
     var script_buf: [512]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/tool", .{keg.path});
+    const script_path = try std.mem.print(&script_buf, "{s}/bin/tool", .{keg.path});
     const content = try readFile(testing.allocator, script_path);
     defer testing.allocator.free(content);
 
     var want_buf: [512]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "#!{s}/opt/perl/bin/perl\n", .{prefix});
+    const want = try std.mem.print(&want_buf, "#!{s}/opt/perl/bin/perl\n", .{prefix});
     try testing.expect(std.mem.startsWith(u8, content, want));
 
     // The rewrite goes through a replace, not a plain write: losing the exec
@@ -482,11 +481,11 @@ test "relocation substitutes the repository and library placeholders" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/pkg/1.0/lib", .{ prefix, sha_repo_library });
+    const keg_dir = try testing.allocator.print("{s}/store/{s}/pkg/1.0/lib", .{ prefix, sha_repo_library });
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
-    const mk_path = try std.fmt.allocPrint(testing.allocator, "{s}/Makefile", .{keg_dir});
+    const mk_path = try testing.allocator.print("{s}/Makefile", .{keg_dir});
     defer testing.allocator.free(mk_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, mk_path, .{});
@@ -514,19 +513,19 @@ test "relocation substitutes the repository and library placeholders" {
     defer testing.allocator.free(keg.path);
 
     var out_buf: [512]u8 = undefined;
-    const out_path = try std.fmt.bufPrint(&out_buf, "{s}/lib/Makefile", .{keg.path});
+    const out_path = try std.mem.print(&out_buf, "{s}/lib/Makefile", .{keg.path});
     const content = try readFile(testing.allocator, out_path);
     defer testing.allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_") == null);
 
     var want_buf: [512]u8 = undefined;
-    const want_repo = try std.fmt.bufPrint(&want_buf, "REPO={s}\n", .{prefix});
-    try testing.expect(std.mem.indexOf(u8, content, want_repo) != null);
+    const want_repo = try std.mem.print(&want_buf, "REPO={s}\n", .{prefix});
+    try testing.expect(std.mem.find(u8, content, want_repo) != null);
 
     var lib_buf: [512]u8 = undefined;
-    const want_lib = try std.fmt.bufPrint(&lib_buf, "LIB={s}/Library\n", .{prefix});
-    try testing.expect(std.mem.indexOf(u8, content, want_lib) != null);
+    const want_lib = try std.mem.print(&lib_buf, "LIB={s}/Library\n", .{prefix});
+    try testing.expect(std.mem.find(u8, content, want_lib) != null);
 }
 
 test "relocation falls back to the system perl when no perl is brewed" {
@@ -564,11 +563,11 @@ test "relocation falls back to the system perl when no perl is brewed" {
     defer testing.allocator.free(keg.path);
 
     var script_buf: [512]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/tool", .{keg.path});
+    const script_path = try std.mem.print(&script_buf, "{s}/bin/tool", .{keg.path});
     const content = try readFile(testing.allocator, script_path);
     defer testing.allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PERL@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_PERL@@") == null);
     try testing.expect(std.mem.startsWith(u8, content, "#!/usr/bin/perl"));
 }
 
@@ -599,16 +598,16 @@ test "placeholder substitution replaces multiple tokens in single file" {
     defer testing.allocator.free(keg.path);
 
     var pc_buf: [512]u8 = undefined;
-    const pc_path = try std.fmt.bufPrint(&pc_buf, "{s}/lib/test.pc", .{keg.path});
+    const pc_path = try std.mem.print(&pc_buf, "{s}/lib/test.pc", .{keg.path});
     const content = try readFile(testing.allocator, pc_path);
     defer testing.allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PREFIX@@") == null);
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_PREFIX@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_CELLAR@@") == null);
 
     var cellar_str_buf: [256]u8 = undefined;
-    const expected_cellar = try std.fmt.bufPrint(&cellar_str_buf, "{s}/Cellar", .{prefix});
-    try testing.expect(std.mem.indexOf(u8, content, expected_cellar) != null);
+    const expected_cellar = try std.mem.print(&cellar_str_buf, "{s}/Cellar", .{prefix});
+    try testing.expect(std.mem.find(u8, content, expected_cellar) != null);
 }
 
 test "files with no placeholders are left unchanged" {
@@ -620,15 +619,15 @@ test "files with no placeholders are left unchanged" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/noop/1.0", .{ prefix, sha_no_placeholder });
+    const keg_dir = try testing.allocator.print("{s}/store/{s}/noop/1.0", .{ prefix, sha_no_placeholder });
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg_dir});
+    const bin_dir = try testing.allocator.print("{s}/bin", .{keg_dir});
     defer testing.allocator.free(bin_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/bin/clean", .{keg_dir});
+    const file_path = try testing.allocator.print("{s}/bin/clean", .{keg_dir});
     defer testing.allocator.free(file_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
@@ -653,7 +652,7 @@ test "files with no placeholders are left unchanged" {
     defer testing.allocator.free(keg.path);
 
     var buf: [512]u8 = undefined;
-    const out_path = try std.fmt.bufPrint(&buf, "{s}/bin/clean", .{keg.path});
+    const out_path = try std.mem.print(&buf, "{s}/bin/clean", .{keg.path});
     const content = try readFile(testing.allocator, out_path);
     defer testing.allocator.free(content);
 
@@ -669,15 +668,15 @@ test "binary files are skipped by text patching without error" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/binpkg/1.0", .{ prefix, sha_binary_skip });
+    const keg_dir = try testing.allocator.print("{s}/store/{s}/binpkg/1.0", .{ prefix, sha_binary_skip });
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg_dir});
+    const bin_dir = try testing.allocator.print("{s}/bin", .{keg_dir});
     defer testing.allocator.free(bin_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/bin/fakemach", .{keg_dir});
+    const file_path = try testing.allocator.print("{s}/bin/fakemach", .{keg_dir});
     defer testing.allocator.free(file_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
@@ -702,12 +701,12 @@ test "binary files are skipped by text patching without error" {
     defer testing.allocator.free(keg.path);
 
     var buf: [512]u8 = undefined;
-    const out_path = try std.fmt.bufPrint(&buf, "{s}/bin/fakemach", .{keg.path});
+    const out_path = try std.mem.print(&buf, "{s}/bin/fakemach", .{keg.path});
     const content = try readFile(testing.allocator, out_path);
     defer testing.allocator.free(content);
 
     // Text patcher skips binary files (null bytes detected), so placeholder remains
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PREFIX@@") != null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_PREFIX@@") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +770,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
     testing.allocator.free(keg_pre.path);
     try relocated_mod.save(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "cached", "1.0");
     // Wipe the just-built Cellar entry — the cache must rebuild it.
-    const cellar_keg_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/cached/1.0", .{prefix});
+    const cellar_keg_path = try testing.allocator.print("{s}/Cellar/cached/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg_path);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg_path);
 
@@ -791,13 +790,13 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
     defer testing.allocator.free(keg.path);
 
     var buf: [512]u8 = undefined;
-    const bin_path = try std.fmt.bufPrint(&buf, "{s}/bin/hello", .{keg.path});
+    const bin_path = try std.mem.print(&buf, "{s}/bin/hello", .{keg.path});
     const content = try readFile(testing.allocator, bin_path);
     defer testing.allocator.free(content);
     // Cache-hit short-circuit skips placeholder substitution, so the
     // cached file content is preserved verbatim. The cache was populated
     // from a successful pipeline run, so placeholders are already gone.
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PREFIX@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_PREFIX@@") == null);
 }
 
 test "materializeWithCellar populates the relocated cache after a cold install" {
@@ -934,12 +933,12 @@ test "materializeWithCellar refuses a warm hit under a label the snapshot was no
 
 /// Both receipt fields must flip together, so pin the pair as one check.
 fn expectDependencyReceipt(allocator: std.mem.Allocator, keg_path: []const u8) !void {
-    const receipt_path = try std.fmt.allocPrint(allocator, "{s}/INSTALL_RECEIPT.json", .{keg_path});
+    const receipt_path = try allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_path});
     defer allocator.free(receipt_path);
     const raw = try readFile(allocator, receipt_path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"installed_on_request\": false") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"installed_as_dependency\": true") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"installed_on_request\": false") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"installed_as_dependency\": true") != null);
 }
 
 test "materializeWithCellar writes a dependency receipt when the keg is not on request" {
@@ -979,7 +978,7 @@ test "materializeFromLocalCellar writes a dependency receipt when the keg is not
     try setupMaltDirs(testing.allocator, prefix);
     // The store fixture doubles as the sibling brew keg to copy from.
     try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
-    const src_keg = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/dep/1.0", .{ prefix, valid_test_sha });
+    const src_keg = try testing.allocator.print("{s}/store/{s}/dep/1.0", .{ prefix, valid_test_sha });
     defer testing.allocator.free(src_keg);
 
     const old_env = setMaltPrefix(prefix);
@@ -1027,7 +1026,7 @@ test "materializeWithCellar warm path rewrites the receipt with the current inst
     );
     testing.allocator.free(first.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
-    const cellar_keg_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/flip/1.0", .{prefix});
+    const cellar_keg_path = try testing.allocator.print("{s}/Cellar/flip/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg_path);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg_path);
 
@@ -1090,7 +1089,7 @@ fn writeBinary(path: []const u8, bytes: []const u8) !void {
 }
 
 fn fileExists(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !bool {
-    const p = try std.fmt.allocPrint(allocator, fmt, args);
+    const p = try allocator.print(fmt, args);
     defer allocator.free(p);
     test_io.accessAbsolute(std.Options.debug_io, p, .{}) catch return false;
     return true;
@@ -1128,18 +1127,18 @@ test "materializeWithCellar rebuilds a cached keg whose binary would abort dyld"
     // verification this keg is served verbatim forever.
     const bad = try buildRpathMachO(testing.allocator, "/opt/malt/lib", 32, "/opt/malt/lib", 32);
     defer testing.allocator.free(bad);
-    const cached_bin = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
+    const cached_bin = try testing.allocator.print("{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
     defer testing.allocator.free(cached_bin);
     try writeBinary(cached_bin, bad);
 
     // Drop the mark so the entry looks like one a pre-verification malt wrote
     // — the only shape that can carry an unchecked keg.
-    const mark = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
+    const mark = try testing.allocator.print("{s}/store-relocated/v{d}/{s}.verified", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
     defer testing.allocator.free(mark);
     try test_io.deleteFileAbsolute(std.Options.debug_io, mark);
 
     // Force the warm path: no Cellar keg, cache entry present.
-    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/poisoned/1.0", .{prefix});
+    const cellar_keg = try testing.allocator.print("{s}/Cellar/poisoned/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg);
 
@@ -1194,11 +1193,11 @@ test "materializeWithCellar trusts a snapshot it already verified" {
     // of scope — this pins the skip so it cannot be dropped by accident.
     const bad = try buildRpathMachO(testing.allocator, "/opt/malt/lib", 32, "/opt/malt/lib", 32);
     defer testing.allocator.free(bad);
-    const cached_bin = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
+    const cached_bin = try testing.allocator.print("{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
     defer testing.allocator.free(cached_bin);
     try writeBinary(cached_bin, bad);
 
-    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/trusted/1.0", .{prefix});
+    const cellar_keg = try testing.allocator.print("{s}/Cellar/trusted/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg);
 
@@ -1237,7 +1236,7 @@ test "materializeWithCellar refuses a keg whose binary kept an unsubstituted pla
     // wide enough that substitution would otherwise fit in place.
     const bytes = try buildRpathMachO(testing.allocator, "@@HOMEBREW_PREFIX@@/lib", 96, "/opt/malt/opt/x/lib", 40);
     defer testing.allocator.free(bytes);
-    const store_bin = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/unpatched/2.0/bin/stuck", .{ prefix, valid_test_sha });
+    const store_bin = try testing.allocator.print("{s}/store/{s}/unpatched/2.0/bin/stuck", .{ prefix, valid_test_sha });
     defer testing.allocator.free(store_bin);
     try writeBinary(store_bin, bytes);
     {
@@ -1328,7 +1327,7 @@ test "a missing keg source never creates the Cellar/{name}/ parent dir" {
 
     // Cellar/ghost/ must not exist on disk after the failure.
     var parent_buf: [512]u8 = undefined;
-    const parent = try std.fmt.bufPrint(&parent_buf, "{s}/Cellar/ghost", .{prefix});
+    const parent = try std.mem.print(&parent_buf, "{s}/Cellar/ghost", .{prefix});
     const parent_exists = blk: {
         test_io.accessAbsolute(std.Options.debug_io, parent, .{}) catch break :blk false;
         break :blk true;
@@ -1347,7 +1346,7 @@ test "failed materialize leaves sibling versions untouched" {
 
     // Pre-populate Cellar/keeper/1.0/ — this simulates an existing installed
     // version that a later failed materialize of keeper 2.0 must NOT delete.
-    const keeper_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/keeper/1.0", .{prefix});
+    const keeper_dir = try testing.allocator.print("{s}/Cellar/keeper/1.0", .{prefix});
     defer testing.allocator.free(keeper_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keeper_dir);
 
@@ -1370,7 +1369,7 @@ test "failed materialize leaves sibling versions untouched" {
     // Cellar/keeper/1.0 must still be there: the refusal short-circuits
     // before anything under Cellar/keeper/ is touched.
     var alive_buf: [512]u8 = undefined;
-    const alive = try std.fmt.bufPrint(&alive_buf, "{s}/Cellar/keeper/1.0", .{prefix});
+    const alive = try std.mem.print(&alive_buf, "{s}/Cellar/keeper/1.0", .{prefix});
     try test_io.accessAbsolute(std.Options.debug_io, alive, .{});
 }
 
@@ -1381,7 +1380,7 @@ test "patchTextFiles replaces all placeholder occurrences" {
         testing.allocator.free(dir);
     }
 
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/multi.txt", .{dir});
+    const file_path = try testing.allocator.print("{s}/multi.txt", .{dir});
     defer testing.allocator.free(file_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
@@ -1400,10 +1399,10 @@ test "patchTextFiles replaces all placeholder occurrences" {
     const content = try readFile(testing.allocator, file_path);
     defer testing.allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PREFIX@@") == null);
-    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
-    try testing.expect(std.mem.indexOf(u8, content, "/opt/malt") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "/opt/malt/Cellar") != null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_PREFIX@@") == null);
+    try testing.expect(std.mem.find(u8, content, "@@HOMEBREW_CELLAR@@") == null);
+    try testing.expect(std.mem.find(u8, content, "/opt/malt") != null);
+    try testing.expect(std.mem.find(u8, content, "/opt/malt/Cellar") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,8 +1467,7 @@ fn buildMinimalMachOWithRpath(
 test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" {
     // Use a SHORT test prefix so the rewritten path definitely fits in the
     // original load-command slot. `/tmp/mp-{hex}` is ~14 bytes.
-    const prefix_str = try std.fmt.allocPrint(
-        testing.allocator,
+    const prefix_str = try testing.allocator.print(
         "/tmp/mp-{x}",
         .{test_io.randomInt(std.Options.debug_io, u32)},
     );
@@ -1487,16 +1485,14 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ac".*)));
     const name = "relfake";
     const version = "1.0";
-    const keg_bin_dir = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg_bin_dir = try testing.allocator.print(
         "{s}/store/{s}/{s}/{s}/bin",
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin_dir);
 
-    const bin_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const bin_path = try testing.allocator.print(
         "{s}/fakebin",
         .{keg_bin_dir},
     );
@@ -1532,8 +1528,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     defer testing.allocator.free(keg.path);
 
     // Re-parse the patched binary and validate the load-command path.
-    const out_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const out_path = try testing.allocator.print(
         "{s}/bin/fakebin",
         .{keg.path},
     );
@@ -1550,14 +1545,14 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
 
     // Negative invariant: no placeholder tokens anywhere.
     for (parsed.paths) |lcp| {
-        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") == null);
-        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") == null);
+        try testing.expect(std.mem.find(u8, lcp.path, "@@HOMEBREW_PREFIX@@") == null);
+        try testing.expect(std.mem.find(u8, lcp.path, "@@HOMEBREW_CELLAR@@") == null);
     }
 
     // Positive invariant: at least one load command now holds the new prefix.
     var found_new_prefix = false;
     for (parsed.paths) |lcp| {
-        if (std.mem.indexOf(u8, lcp.path, prefix) != null) {
+        if (std.mem.find(u8, lcp.path, prefix) != null) {
             found_new_prefix = true;
             break;
         }
@@ -1566,7 +1561,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
 
     // Spot-check the specific expected result.
     var expected_buf: [256]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/lib/test", .{prefix});
+    const expected = try std.mem.print(&expected_buf, "{s}/lib/test", .{prefix});
     var found_exact = false;
     for (parsed.paths) |lcp| {
         if (std.mem.eql(u8, lcp.path, expected)) {
@@ -1655,8 +1650,7 @@ fn buildFatMachOWithRpath(
 
 test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice" {
     // Short prefix (well within the 13-byte budget).
-    const prefix_str = try std.fmt.allocPrint(
-        testing.allocator,
+    const prefix_str = try testing.allocator.print(
         "/tmp/mp-{x}",
         .{test_io.randomInt(std.Options.debug_io, u32)},
     );
@@ -1674,16 +1668,14 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("bd".*)));
     const name = "fatfake";
     const version = "1.0";
-    const keg_bin_dir = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg_bin_dir = try testing.allocator.print(
         "{s}/store/{s}/{s}/{s}/bin",
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin_dir);
 
-    const bin_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const bin_path = try testing.allocator.print(
         "{s}/fatbin",
         .{keg_bin_dir},
     );
@@ -1717,8 +1709,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     defer testing.allocator.free(keg.path);
 
     // Re-parse the patched fat binary and assert BOTH slices are clean.
-    const out_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const out_path = try testing.allocator.print(
         "{s}/bin/fatbin",
         .{keg.path},
     );
@@ -1734,23 +1725,22 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     try testing.expectEqual(@as(usize, 2), parsed.paths.len);
 
     var expected_buf: [256]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/lib/fat", .{prefix});
+    const expected = try std.mem.print(&expected_buf, "{s}/lib/fat", .{prefix});
 
     for (parsed.paths) |lcp| {
-        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") == null);
+        try testing.expect(std.mem.find(u8, lcp.path, "@@HOMEBREW_PREFIX@@") == null);
         try testing.expectEqualStrings(expected, lcp.path);
     }
 
     // Additional belt-and-suspenders check: the raw file bytes contain no
     // `@@HOMEBREW_` at all, ruling out the possibility that one slice was
     // patched and the other left alone.
-    try testing.expect(std.mem.indexOf(u8, data, "@@HOMEBREW_") == null);
+    try testing.expect(std.mem.find(u8, data, "@@HOMEBREW_") == null);
 }
 
 test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" {
     // Same fixture strategy, different token.
-    const prefix_str = try std.fmt.allocPrint(
-        testing.allocator,
+    const prefix_str = try testing.allocator.print(
         "/tmp/mp-{x}",
         .{test_io.randomInt(std.Options.debug_io, u32)},
     );
@@ -1767,16 +1757,14 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ce".*)));
     const name = "cellarfake";
     const version = "2.0";
-    const keg_bin_dir = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg_bin_dir = try testing.allocator.print(
         "{s}/store/{s}/{s}/{s}/bin",
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin_dir);
 
-    const bin_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const bin_path = try testing.allocator.print(
         "{s}/fakelib",
         .{keg_bin_dir},
     );
@@ -1809,8 +1797,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     );
     defer testing.allocator.free(keg.path);
 
-    const out_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const out_path = try testing.allocator.print(
         "{s}/bin/fakelib",
         .{keg.path},
     );
@@ -1823,7 +1810,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     defer parsed.deinit();
 
     var expected_buf: [256]u8 = undefined;
-    const expected = try std.fmt.bufPrint(
+    const expected = try std.mem.print(
         &expected_buf,
         "{s}/Cellar/openssl@3/3.0/lib",
         .{prefix},
@@ -1831,7 +1818,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
 
     var found = false;
     for (parsed.paths) |lcp| {
-        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") == null);
+        try testing.expect(std.mem.find(u8, lcp.path, "@@HOMEBREW_CELLAR@@") == null);
         if (std.mem.eql(u8, lcp.path, expected)) found = true;
     }
     try testing.expect(found);
@@ -1848,12 +1835,12 @@ fn writeAbs(path: []const u8, content: []const u8) !void {
 }
 
 fn overlayFixture(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
-    const keg = try std.fmt.allocPrint(allocator, "{s}/Cellar/fc/1.0", .{prefix});
+    const keg = try allocator.print("{s}/Cellar/fc/1.0", .{prefix});
     errdefer allocator.free(keg);
-    const etc_dir = try std.fmt.allocPrint(allocator, "{s}/.bottle/etc/fonts", .{keg});
+    const etc_dir = try allocator.print("{s}/.bottle/etc/fonts", .{keg});
     defer allocator.free(etc_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, etc_dir);
-    const conf = try std.fmt.allocPrint(allocator, "{s}/fonts.conf", .{etc_dir});
+    const conf = try allocator.print("{s}/fonts.conf", .{etc_dir});
     defer allocator.free(conf);
     try writeAbs(conf, "<fontconfig>poured</fontconfig>\n");
     return keg;
@@ -1868,22 +1855,22 @@ test "installBottleEtcVar pours a missing overlay file into the prefix" {
     const keg = try overlayFixture(testing.allocator, prefix);
     defer testing.allocator.free(keg);
     // A var payload rides the same overlay mechanism as etc.
-    const var_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.bottle/var/db", .{keg});
+    const var_dir = try testing.allocator.print("{s}/.bottle/var/db", .{keg});
     defer testing.allocator.free(var_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, var_dir);
-    const seed = try std.fmt.allocPrint(testing.allocator, "{s}/seed", .{var_dir});
+    const seed = try testing.allocator.print("{s}/seed", .{var_dir});
     defer testing.allocator.free(seed);
     try writeAbs(seed, "seed\n");
 
     cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
 
-    const conf_path = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts/fonts.conf", .{prefix});
+    const conf_path = try testing.allocator.print("{s}/etc/fonts/fonts.conf", .{prefix});
     defer testing.allocator.free(conf_path);
     const poured = try readFile(testing.allocator, conf_path);
     defer testing.allocator.free(poured);
     try testing.expectEqualStrings("<fontconfig>poured</fontconfig>\n", poured);
 
-    const seed_path = try std.fmt.allocPrint(testing.allocator, "{s}/var/db/seed", .{prefix});
+    const seed_path = try testing.allocator.print("{s}/var/db/seed", .{prefix});
     defer testing.allocator.free(seed_path);
     const seeded = try readFile(testing.allocator, seed_path);
     defer testing.allocator.free(seeded);
@@ -1899,10 +1886,10 @@ test "installBottleEtcVar keeps a user-modified config and writes the new defaul
     const keg = try overlayFixture(testing.allocator, prefix);
     defer testing.allocator.free(keg);
 
-    const live_dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts", .{prefix});
+    const live_dir = try testing.allocator.print("{s}/etc/fonts", .{prefix});
     defer testing.allocator.free(live_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, live_dir);
-    const live = try std.fmt.allocPrint(testing.allocator, "{s}/fonts.conf", .{live_dir});
+    const live = try testing.allocator.print("{s}/fonts.conf", .{live_dir});
     defer testing.allocator.free(live);
     try writeAbs(live, "<fontconfig>user-edited</fontconfig>\n");
 
@@ -1912,7 +1899,7 @@ test "installBottleEtcVar keeps a user-modified config and writes the new defaul
     defer testing.allocator.free(kept);
     try testing.expectEqualStrings("<fontconfig>user-edited</fontconfig>\n", kept);
 
-    const default_path = try std.fmt.allocPrint(testing.allocator, "{s}.default", .{live});
+    const default_path = try testing.allocator.print("{s}.default", .{live});
     defer testing.allocator.free(default_path);
     const dflt = try readFile(testing.allocator, default_path);
     defer testing.allocator.free(dflt);
@@ -1928,16 +1915,16 @@ test "installBottleEtcVar leaves an identical config alone" {
     const keg = try overlayFixture(testing.allocator, prefix);
     defer testing.allocator.free(keg);
 
-    const live_dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts", .{prefix});
+    const live_dir = try testing.allocator.print("{s}/etc/fonts", .{prefix});
     defer testing.allocator.free(live_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, live_dir);
-    const live = try std.fmt.allocPrint(testing.allocator, "{s}/fonts.conf", .{live_dir});
+    const live = try testing.allocator.print("{s}/fonts.conf", .{live_dir});
     defer testing.allocator.free(live);
     try writeAbs(live, "<fontconfig>poured</fontconfig>\n");
 
     cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
 
-    const default_path = try std.fmt.allocPrint(testing.allocator, "{s}.default", .{live});
+    const default_path = try testing.allocator.print("{s}.default", .{live});
     defer testing.allocator.free(default_path);
     try testing.expectError(
         error.FileNotFound,
@@ -1951,13 +1938,13 @@ test "installBottleEtcVar no-ops for kegs without a bottle overlay" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/plain/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/plain/1.0", .{prefix});
     defer testing.allocator.free(keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
     cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
 
-    const etc_path = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{prefix});
+    const etc_path = try testing.allocator.print("{s}/etc", .{prefix});
     defer testing.allocator.free(etc_path);
     try testing.expectError(
         error.FileNotFound,
@@ -1979,14 +1966,13 @@ test "warm cache-hit reinstall re-pours a wiped overlay config" {
     // Cold install: bottle fixture carrying an etc overlay populates the
     // relocated cache and pours the config.
     try createBottleFixture(testing.allocator, prefix, valid_test_sha, "fc", "1.0");
-    const overlay_dir = try std.fmt.allocPrint(
-        testing.allocator,
+    const overlay_dir = try testing.allocator.print(
         "{s}/store/{s}/fc/1.0/.bottle/etc/fonts",
         .{ prefix, valid_test_sha },
     );
     defer testing.allocator.free(overlay_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, overlay_dir);
-    const overlay_conf = try std.fmt.allocPrint(testing.allocator, "{s}/fonts.conf", .{overlay_dir});
+    const overlay_conf = try testing.allocator.print("{s}/fonts.conf", .{overlay_dir});
     defer testing.allocator.free(overlay_conf);
     try writeAbs(overlay_conf, "<fontconfig>poured</fontconfig>\n");
 
@@ -2006,16 +1992,16 @@ test "warm cache-hit reinstall re-pours a wiped overlay config" {
 
     // Wipe the poured config and the Cellar entry; the reinstall must take
     // the cache short-circuit AND restore the config.
-    const live_conf = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts/fonts.conf", .{prefix});
+    const live_conf = try testing.allocator.print("{s}/etc/fonts/fonts.conf", .{prefix});
     defer testing.allocator.free(live_conf);
     const poured_cold = try readFile(testing.allocator, live_conf);
     defer testing.allocator.free(poured_cold);
     try testing.expectEqualStrings("<fontconfig>poured</fontconfig>\n", poured_cold);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, live_conf);
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/fc/1.0", .{prefix});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/fc/1.0", .{prefix});
     defer testing.allocator.free(keg_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, keg_dir);
-    const store_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, valid_test_sha });
+    const store_dir = try testing.allocator.print("{s}/store/{s}", .{ prefix, valid_test_sha });
     defer testing.allocator.free(store_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, store_dir);
 
@@ -2045,15 +2031,15 @@ test "installBottleEtcVar creates empty overlay directories hooks rely on" {
     }
     // dbus ships `.bottle/var/lib/dbus/` with no files; post_install's
     // dbus-uuidgen expects the directory to exist.
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/dbus/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/dbus/1.0", .{prefix});
     defer testing.allocator.free(keg);
-    const empty_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.bottle/var/lib/dbus", .{keg});
+    const empty_dir = try testing.allocator.print("{s}/.bottle/var/lib/dbus", .{keg});
     defer testing.allocator.free(empty_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, empty_dir);
 
     cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
 
-    const poured_dir = try std.fmt.allocPrint(testing.allocator, "{s}/var/lib/dbus", .{prefix});
+    const poured_dir = try testing.allocator.print("{s}/var/lib/dbus", .{prefix});
     defer testing.allocator.free(poured_dir);
     var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, poured_dir, .{});
     dir.close(std.Options.debug_io);
@@ -2077,20 +2063,20 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
         testing.allocator.free(victim);
     }
-    const canary = try std.fmt.allocPrint(testing.allocator, "{s}/1.0/SENTINEL", .{victim});
+    const canary = try testing.allocator.print("{s}/1.0/SENTINEL", .{victim});
     defer testing.allocator.free(canary);
     {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/1.0", .{victim});
+        const dir = try testing.allocator.print("{s}/1.0", .{victim});
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         (try test_io.createFileAbsolute(std.Options.debug_io, canary, .{})).close(std.Options.debug_io);
     }
 
-    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/probe", .{prefix});
+    const pkg_dir = try testing.allocator.print("{s}/Cellar/probe", .{prefix});
     defer testing.allocator.free(pkg_dir);
     try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
 
-    const src_keg = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/probe/1.0", .{ prefix, sha_symlinked_pkg });
+    const src_keg = try testing.allocator.print("{s}/store/{s}/probe/1.0", .{ prefix, sha_symlinked_pkg });
     defer testing.allocator.free(src_keg);
 
     const old_env = setMaltPrefix(prefix);
@@ -2127,7 +2113,7 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
     ));
 
     try test_io.accessAbsolute(std.Options.debug_io, canary, .{});
-    const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/1.0/INSTALL_RECEIPT.json", .{victim});
+    const leaked = try testing.allocator.print("{s}/1.0/INSTALL_RECEIPT.json", .{victim});
     defer testing.allocator.free(leaked);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
 }

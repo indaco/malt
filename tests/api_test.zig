@@ -71,13 +71,13 @@ const TempCacheDir = struct {
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         // Make cache_dir/api first
         var api_buf: [512]u8 = undefined;
-        const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
+        const api_dir = try std.mem.print(&api_buf, "{s}/api", .{self.path});
         test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
-        const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
+        const full = try std.mem.print(&path_buf, "{s}/api/{s}", .{ self.path, rel });
         const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, content);
@@ -291,7 +291,7 @@ test "readCache treats an oversized cache file as a miss so a fetch can replace 
     try dir.writeCacheFile("formula_huge.json", "{}");
 
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_huge.json", .{dir.path});
+    const path = try std.mem.print(&path_buf, "{s}/api/formula_huge.json", .{dir.path});
     const f = try test_io.cwd().openFile(std.Options.debug_io, path, .{ .mode = .read_write });
     defer f.close(std.Options.debug_io);
     try f.setLength(std.Options.debug_io, client_mod.HttpClient.max_metadata_bytes + 1);
@@ -373,7 +373,7 @@ test "cachedExists ignores stale mtime — existence is the only check" {
 
     try dir.writeCacheFile("cask_old.json", "{}");
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/cask_old.json", .{dir.path});
+    const full = try std.mem.print(&path_buf, "{s}/api/cask_old.json", .{dir.path});
     const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
     defer file.close(std.Options.debug_io);
     try file.setTimestamps(std.Options.debug_io, .{
@@ -484,7 +484,7 @@ test "fetchFormula under offline serves a stale cache hit (no TTL gate)" {
 
     // Backdate mtime so the regular TTL would reject it.
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_jq.json", .{dir.path});
+    const full = try std.mem.print(&path_buf, "{s}/api/formula_jq.json", .{dir.path});
     const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
     defer file.close(std.Options.debug_io);
     try file.setTimestamps(std.Options.debug_io, .{
@@ -639,7 +639,7 @@ fn stopServer(io: std.Io, listener: *net.Server, stop: *std.atomic.Value(bool), 
 /// it as stale and the next fetch takes the refresh path.
 fn backdateIndex(dir_path: []const u8, rel: []const u8) !void {
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ dir_path, rel });
+    const full = try std.mem.print(&path_buf, "{s}/api/{s}", .{ dir_path, rel });
     const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
     defer file.close(std.Options.debug_io);
     try file.setTimestamps(std.Options.debug_io, .{
@@ -651,7 +651,7 @@ fn backdateIndex(dir_path: []const u8, rel: []const u8) !void {
 /// Read an `api/<rel>` cache file into caller-owned bytes, or null if absent.
 fn readCacheFileAlloc(allocator: std.mem.Allocator, dir_path: []const u8, rel: []const u8) !?[]const u8 {
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ dir_path, rel });
+    const full = try std.mem.print(&path_buf, "{s}/api/{s}", .{ dir_path, rel });
     const file = test_io.cwd().openFile(std.Options.debug_io, full, .{}) catch return null;
     defer file.close(std.Options.debug_io);
     const s = try file.stat(std.Options.debug_io);
@@ -687,7 +687,7 @@ test "fetchVersionsIndex under offline serves a stale side-car (no TTL gate)" {
 
     // Backdate mtime so the freshness gate would reject it.
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_formula.txt", .{dir.path});
+    const full = try std.mem.print(&path_buf, "{s}/api/versions_formula.txt", .{dir.path});
     const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
     defer file.close(std.Options.debug_io);
     try file.setTimestamps(std.Options.debug_io, .{
@@ -745,7 +745,7 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
 
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     // Names first (search's path), then versions. The second call must
     // read the side-car the first download already wrote — no re-fetch.
@@ -777,7 +777,7 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
 
     // invalidateCache wipes api/ wholesale → the versions side-car too.
     var vpath_buf: [512]u8 = undefined;
-    const vpath = try std.fmt.bufPrint(&vpath_buf, "{s}/api/versions_formula.txt", .{dir.path});
+    const vpath = try std.mem.print(&vpath_buf, "{s}/api/versions_formula.txt", .{dir.path});
     try test_io.accessAbsolute(io, vpath, .{});
     api.invalidateCache();
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, vpath, .{}));
@@ -824,7 +824,7 @@ test "a warm ETag without the bottles side-car refetches instead of trusting a 3
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
@@ -879,7 +879,7 @@ test "a stale side-car with an unchanged dump refreshes via 304, no re-download"
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
@@ -945,7 +945,7 @@ test "a changed dump (new ETag) re-extracts both side-cars and stores the new ET
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
@@ -994,7 +994,7 @@ test "a first-ever fetch (no stored ETag) does an unconditional GET and stores t
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
@@ -1050,7 +1050,7 @@ test "a 200 without an ETag header clears a previously stored ETag" {
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
@@ -1099,7 +1099,7 @@ test "an implausibly large stored ETag is ignored and the GET goes out unconditi
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
@@ -1153,7 +1153,7 @@ test "a 304 with a missing side-car drops the ETag and surfaces ApiUnreachable" 
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     try testing.expectError(api_mod.ApiError.ApiUnreachable, api.fetchVersionsIndex(.formula));
 
@@ -1205,7 +1205,7 @@ test "a 304 cannot serve a cask side-car this host never wrote" {
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.cask);
     defer testing.allocator.free(versions);
@@ -1216,7 +1216,7 @@ test "a 304 cannot serve a cask side-car this host never wrote" {
     try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
     try testing.expectEqualStrings("firefox\t126.0\t0\n", versions);
     var name_buf: [64]u8 = undefined;
-    const own = try std.fmt.bufPrint(&name_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&key_buf, .cask)});
+    const own = try std.mem.print(&name_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&key_buf, .cask)});
     const stored = (try readCacheFileAlloc(testing.allocator, dir.path, own)).?;
     defer testing.allocator.free(stored);
     try testing.expectEqualStrings("firefox\t126.0\t0\n", stored);
@@ -1248,7 +1248,7 @@ test "the conditional refresh is kind-agnostic: a cask 304 refreshes and keeps c
     // The cask side-car carries the writing host in its name.
     var key_buf: [32]u8 = undefined;
     var name_buf: [64]u8 = undefined;
-    const versions_file = try std.fmt.bufPrint(&name_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&key_buf, .cask)});
+    const versions_file = try std.mem.print(&name_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&key_buf, .cask)});
     try dir.writeCacheFile(versions_file, seeded);
     try dir.writeCacheFile("names_cask.txt", "firefox\n");
     try dir.writeCacheFile("cask.etag", etag);
@@ -1260,7 +1260,7 @@ test "the conditional refresh is kind-agnostic: a cask 304 refreshes and keeps c
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const versions = try api.fetchVersionsIndex(.cask);
     defer testing.allocator.free(versions);
@@ -1319,7 +1319,7 @@ test "a refresh that is neither 200 nor 304 surfaces ApiUnreachable" {
     defer http.deinit();
     var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
     var base_buf: [64]u8 = undefined;
-    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    api.base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     try testing.expectError(api_mod.ApiError.ApiUnreachable, api.fetchVersionsIndex(.formula));
 
@@ -1335,7 +1335,7 @@ test "readNotFoundCache returns false for stale marker" {
     // Create a 404 marker with an ancient mtime (1970).
     try dir.writeCacheFile("formula_old.404", "");
     var path_buf: [512]u8 = undefined;
-    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_old.404", .{dir.path});
+    const full = try std.mem.print(&path_buf, "{s}/api/formula_old.404", .{dir.path});
     // Reopen and set mtime back via posix.utimensat-like helper.
     const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
     defer file.close(std.Options.debug_io);
@@ -1356,7 +1356,7 @@ test "BrewApi cache round-trips under a cache dir past 512 bytes" {
     defer base.deinit();
 
     const seg = &@as([200]u8, @splat('c'));
-    const long = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/{s}/{s}", .{ base.path, seg, seg, seg });
+    const long = try testing.allocator.print("{s}/{s}/{s}/{s}", .{ base.path, seg, seg, seg });
     defer testing.allocator.free(long);
     try testing.expect(long.len > 512);
     try test_io.cwd().createDirPath(std.Options.debug_io, long);

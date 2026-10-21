@@ -36,18 +36,17 @@ fn uniquePrefix(suffix: []const u8) ![]const u8 {
 }
 
 fn makeKegWithBin(prefix: []const u8, name: []const u8, version: []const u8) ![]u8 {
-    const keg = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg = try testing.allocator.print(
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },
     );
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg});
+    const bin_dir = try testing.allocator.print("{s}/bin", .{keg});
     defer testing.allocator.free(bin_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
-    const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    const bin_path = try testing.allocator.print("{s}/{s}", .{ bin_dir, name });
     defer testing.allocator.free(bin_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
     try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho hi\n");
@@ -101,13 +100,13 @@ test "isolated dep install: bin_isolated=1, no bin symlink, opt link still prese
 
     // No bin/sbin link in prefix.
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/depkeg", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/depkeg", .{prefix});
     try testing.expect(!pathExists(bin_link));
 
     // opt/depkeg is anchored — Mach-O dependents still resolve.
     var opt_buf: [512]u8 = undefined;
-    const opt_link = try std.fmt.bufPrint(&opt_buf, "{s}/opt/depkeg", .{prefix});
-    var t_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const opt_link = try std.mem.print(&opt_buf, "{s}/opt/depkeg", .{prefix});
+    var t_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try test_io.readLinkAbsolute(std.Options.debug_io, opt_link, &t_buf);
 
     var probe = try db.prepare("SELECT install_reason, bin_isolated FROM kegs WHERE id = ?1;");
@@ -157,7 +156,7 @@ test "direct keg under --isolate-deps still links bins and stays bin_isolated=0"
     try linker.link(keg, "depkeg", keg_id, false);
 
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/depkeg", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/depkeg", .{prefix});
     try testing.expect(pathExists(bin_link));
 
     var probe = try db.prepare("SELECT install_reason, bin_isolated FROM kegs WHERE id = ?1;");
@@ -248,7 +247,7 @@ test "upgradeDbAtomic preserves bin_isolated across an upgrade" {
     );
 
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/depkeg", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/depkeg", .{prefix});
     try testing.expect(!pathExists(bin_link));
 }
 
@@ -288,7 +287,7 @@ test "promotion: isolated dep becomes direct with bin link on user install" {
 
     // Bins absent under isolation.
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/depkeg", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/depkeg", .{prefix});
     try testing.expect(!pathExists(bin_link));
 
     // Simulate the promotion the install command performs.
@@ -352,7 +351,7 @@ test "isolate_deps is a no-op on direct kegs (named pkg stays linked)" {
     try linker.link(keg, "depkeg", keg_id, computed_bin_isolated);
 
     var bin_buf: [512]u8 = undefined;
-    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/depkeg", .{prefix});
+    const bin_link = try std.mem.print(&bin_buf, "{s}/bin/depkeg", .{prefix});
     try testing.expect(pathExists(bin_link));
 
     var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE id = ?1;");

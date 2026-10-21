@@ -79,10 +79,10 @@ fn isUnsafeSource(source: []const u8) bool {
 /// The trailing path component, rejected if it is empty, `.`, `..`, or
 /// (defensively) still holds a separator.
 fn basenameValid(path: []const u8) ?[]const u8 {
-    const base = std.fs.path.basename(path);
+    const base = std.Io.Dir.path.basename(path);
     if (base.len == 0) return null;
     if (std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return null;
-    if (std.mem.indexOfScalar(u8, base, '/') != null) return null;
+    if (std.mem.findScalar(u8, base, '/') != null) return null;
     return base;
 }
 
@@ -97,11 +97,11 @@ fn basenameValid(path: []const u8) ?[]const u8 {
 /// Returns a slice of `out` or a compile-time literal.
 pub fn resolveFontsDir(prefix: []const u8, env_home: ?[]const u8, out: []u8) []const u8 {
     if (!isDefaultPrefix(prefix)) {
-        return std.fmt.bufPrint(out, "{s}/Fonts", .{prefix}) catch "/Library/Fonts";
+        return std.mem.print(out, "{s}/Fonts", .{prefix}) catch "/Library/Fonts";
     }
     if (env_home) |home| {
         const slice = std.mem.sliceTo(home, 0);
-        return std.fmt.bufPrint(out, "{s}/Library/Fonts", .{slice}) catch "/Library/Fonts";
+        return std.mem.print(out, "{s}/Library/Fonts", .{slice}) catch "/Library/Fonts";
     }
     return "/Library/Fonts";
 }
@@ -140,9 +140,9 @@ pub fn placeFonts(
 
         // Source declares its own archive-relative path; sanitization
         // already proved it stays within the extraction root.
-        const src = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ extract_root, entry.source });
+        const src = try alloc.print("{s}/{s}", .{ extract_root, entry.source });
         defer alloc.free(src);
-        const dest = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ fonts_dir, name });
+        const dest = try alloc.print("{s}/{s}", .{ fonts_dir, name });
         defer alloc.free(dest);
 
         var source = try confined_source.openFile(io, alloc, extract_root, src, .read_only);
@@ -164,7 +164,7 @@ pub const MANIFEST_NAME = ".malt-fonts";
 /// Persist the newline-joined destination paths to `path`, creating the
 /// parent directory as needed.
 pub fn writeManifest(io: std.Io, path: []const u8, bytes: []const u8) !void {
-    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
+    if (std.Io.Dir.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
     // The manifest lands in a directory an archive populated, so an entry
     // planted under its name (a symlink out of the tree) is replaced, never
     // written through.
@@ -208,8 +208,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -221,8 +220,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -236,7 +234,7 @@ const Scratch = struct {
 };
 
 fn putFile(io: std.Io, path: []const u8, body: []const u8) !void {
-    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
+    if (std.Io.Dir.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
     defer f.close(io);
     try f.writeStreamingAll(io, body);
@@ -265,8 +263,7 @@ test "placeFonts copies nested and bare sources and manifests their dest paths" 
     const manifest = try placeFonts(io, testing.allocator, root, fonts, &entries);
     defer testing.allocator.free(manifest);
 
-    const expected = try std.fmt.allocPrint(
-        testing.allocator,
+    const expected = try testing.allocator.print(
         "{s}/FiraCode-Bold.ttf\n{s}/HackNerdFont-Regular.ttf",
         .{ fonts, fonts },
     );

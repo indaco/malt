@@ -37,7 +37,7 @@ test "mt upgrade <nonexistent> surfaces a non-zero exit" {
 
     // Seed an empty DB so the `db/` dir exists (lock acquire doesn't
     // short-circuit to silent-return) but no packages are installed.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
@@ -51,12 +51,12 @@ test "mt upgrade <nonexistent> surfaces a non-zero exit" {
 }
 
 fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     errdefer db.close();
     try schema.initSchema(&db);
@@ -65,7 +65,7 @@ fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertPinnedKeg(db: *sqlite.Database, name: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', 1);",
         .{ name, name, name },
@@ -138,7 +138,7 @@ test "mt upgrade --pinned without --dry-run or --force errors with usage" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
@@ -153,7 +153,7 @@ test "mt upgrade --pinned without --dry-run or --force errors with usage" {
 
 fn insertPinnedCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '{s}', 'https://example.invalid', 1);",
         .{ token, token, version },
@@ -510,17 +510,17 @@ test "installAll honours skip_lock so an outer holder can re-enter without a sel
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     // Plant 404 markers for both formula and cask kinds so resolution
     // exits before the network is reached and no jobs queue up.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     inline for (.{ "formula_zzghost.404", "cask_zzghost.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         f.close(std.Options.debug_io);
@@ -528,7 +528,7 @@ test "installAll honours skip_lock so an outer holder can re-enter without a sel
 
     // Mimic the outer hold that upgrade.execute already owns.
     var lock_path_buf: [512]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{path});
+    const lock_path = try std.mem.print(&lock_path_buf, "{s}/db/malt.lock", .{path});
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
@@ -571,11 +571,11 @@ test "upgrade with a missing transitive dep does not error with lock contention"
 
     // Cache-seed the new curl JSON with a dep on a name that 404s, so the
     // dep installAll exits via "fetchFormula failed" rather than network.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
 
-    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_curl.json", .{cache_api});
+    const cache_json = try testing.allocator.print("{s}/formula_curl.json", .{cache_api});
     defer testing.allocator.free(cache_json);
     const cf = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
     const body =
@@ -585,7 +585,7 @@ test "upgrade with a missing transitive dep does not error with lock contention"
     cf.close(std.Options.debug_io);
 
     inline for (.{ "formula_zzngtcp2.404", "cask_zzngtcp2.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const m = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         m.close(std.Options.debug_io);
@@ -605,8 +605,8 @@ test "upgrade with a missing transitive dep does not error with lock contention"
     // error must not be the lock-contention message that masks the real cause.
     upgrade.execute(&ctx, testing.allocator, &.{"curl"}) catch {};
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not install new dep(s) for curl") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Another mt process is running") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not install new dep(s) for curl") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Another mt process is running") == null);
 }
 
 /// Seed an installed curl 8.19 whose cached 8.20 adds a dep and publishes
@@ -620,16 +620,16 @@ fn seedCurlUpgrade(path: [:0]const u8, comptime files_json: []const u8) !void {
             \\VALUES ('curl', 'curl', '8.19', 'sha-old', '/cellar/curl/8.19');
         );
     }
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_curl.json", .{cache_api});
+    const cache_json = try testing.allocator.print("{s}/formula_curl.json", .{cache_api});
     defer testing.allocator.free(cache_json);
     const cf = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
     defer cf.close(std.Options.debug_io);
     try cf.writeStreamingAll(std.Options.debug_io, "{\"name\":\"curl\",\"full_name\":\"curl\",\"tap\":\"homebrew/core\",\"versions\":{\"stable\":\"8.20\"},\"dependencies\":[\"zzngtcp2\"],\"bottle\":{\"stable\":{\"files\":" ++ files_json ++ "}}}");
     inline for (.{ "formula_zzngtcp2.404", "cask_zzngtcp2.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const m = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         m.close(std.Options.debug_io);
@@ -637,7 +637,7 @@ fn seedCurlUpgrade(path: [:0]const u8, comptime files_json: []const u8) !void {
 }
 
 /// A golden_gate-only bottle map is newer than every host the suite runs on.
-const newer_only_bottles = "{\"" ++ (if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "") ++
+const newer_only_bottles = "{\"" ++ (if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "") ++
     "golden_gate\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat('a')) ++ "\"}}";
 
 /// These tests need a host the fixture's bottles are too new for.
@@ -667,8 +667,8 @@ test "upgrade refuses a formula with no bottle for this macOS before installing 
     defer output.endStderrCapture();
 
     try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, &.{"curl"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for curl") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Installing new dep") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No bottle available for curl") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Installing new dep") == null);
 }
 
 test "upgrade --dry-run does not promise an upgrade this macOS has no bottle for" {
@@ -688,8 +688,8 @@ test "upgrade --dry-run does not promise an upgrade this macOS has no bottle for
     defer output.endStderrCapture();
 
     upgrade.execute(&ctx, testing.allocator, &.{ "--dry-run", "curl" }) catch {};
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for curl") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No bottle available for curl") != null);
 }
 
 // A bulk run skips it like an unsupported cask, so one stranded formula does
@@ -711,8 +711,8 @@ test "bulk upgrade skips a formula with no bottle for this macOS" {
     defer output.endStderrCapture();
 
     try upgrade.execute(&ctx, testing.allocator, &.{});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for curl") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Installing new dep") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No bottle available for curl") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Installing new dep") == null);
 }
 
 // Pre-fix, every keg row went through `formulae.brew.sh/api/formula/<name>.json`,
@@ -742,10 +742,10 @@ test "upgrade routes tap-installed kegs away from the core formula API" {
     // Seed a 404 marker for the core API so the OLD codepath would have
     // surfaced "Could not fetch formula info" without touching the network.
     // The NEW codepath must never read this marker.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_baguette.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_baguette.404", .{cache_api});
     defer testing.allocator.free(marker);
     const mf = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{ .truncate = true });
     mf.close(std.Options.debug_io);
@@ -765,9 +765,9 @@ test "upgrade routes tap-installed kegs away from the core formula API" {
     );
 
     // Routing guard: the OLD core-API error must never appear for a tap keg.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not fetch formula info") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not fetch formula info") == null);
     // Positive signal: the tap-side parser rejected the malformed label.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Cannot parse tap") != null);
 }
 
 // A pinned tap-installed keg short-circuits in pinSkip before any network
@@ -784,11 +784,11 @@ fn seedInstalledKeg(
     create_opt_link: bool,
 ) !void {
     var cellar_buf: [512]u8 = undefined;
-    const cellar_root = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const cellar_root = try std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_root);
 
     var insert_buf: [512]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
+    const insert = try std.mem.printSentinel(
         &insert_buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '{s}', 'sha-{s}', '{s}');",
         .{ name, name, version, name, cellar_root },
@@ -799,11 +799,11 @@ fn seedInstalledKeg(
     if (!create_opt_link) return;
 
     var opt_dir_buf: [512]u8 = undefined;
-    const opt_dir = try std.fmt.bufPrint(&opt_dir_buf, "{s}/opt", .{prefix});
+    const opt_dir = try std.mem.print(&opt_dir_buf, "{s}/opt", .{prefix});
     try test_io.cwd().createDirPath(std.Options.debug_io, opt_dir);
 
     var opt_path_buf: [512]u8 = undefined;
-    const opt_path = try std.fmt.bufPrint(&opt_path_buf, "{s}/{s}", .{ opt_dir, name });
+    const opt_path = try std.mem.print(&opt_path_buf, "{s}/{s}", .{ opt_dir, name });
     var parent = try test_io.openDirAbsolute(std.Options.debug_io, opt_dir, .{});
     defer parent.close(std.Options.debug_io);
     parent.deleteFile(std.Options.debug_io, name) catch {};
@@ -974,7 +974,7 @@ fn seedSharedPins(prefix: [:0]const u8, keg_pinned: bool, cask_pinned: bool) !vo
     var db = try openSeededDb(prefix);
     defer db.close();
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(&buf,
+    const sql = try std.mem.printSentinel(&buf,
         \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
         \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
     , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }, 0);
@@ -1018,7 +1018,7 @@ test "upgrade holds a pinned cask even when the same-named formula is not pinned
     defer captured.deinit(testing.allocator);
     upgradeSharedCask(&captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "box is pinned, skipped") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "box is pinned, skipped") != null);
 }
 
 test "upgrade does not hold an unpinned cask because the same-named formula is pinned" {
@@ -1032,7 +1032,7 @@ test "upgrade does not hold an unpinned cask because the same-named formula is p
     defer captured.deinit(testing.allocator);
     upgradeSharedCask(&captured);
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "is pinned, skipped") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "is pinned, skipped") == null);
     // Reached the fetch, which is where an unheld cask goes next.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not fetch cask info for box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not fetch cask info for box") != null);
 }

@@ -18,22 +18,22 @@ pub fn acquireFailureMessage(buf: []u8, e: lock.LockError, prefix: []const u8) [
     return switch (e) {
         // Callers must handle the fresh-prefix case themselves.
         error.DirMissing => unreachable,
-        error.AccessDenied => std.fmt.bufPrint(
+        error.AccessDenied => std.mem.print(
             buf,
             "Cannot write the malt lock under {s}/db — the directory exists but isn't writable. Fix ownership with: sudo chown -R \"$USER\" {s}",
             .{ prefix, prefix },
         ) catch "Cannot acquire the malt lock.",
-        error.Timeout => std.fmt.bufPrint(
+        error.Timeout => std.mem.print(
             buf,
             "Timed out waiting for the malt lock under {s}/db — another malt process is still running. Wait for it to finish, or run `mt doctor` to clear a stale lock.",
             .{prefix},
         ) catch "Cannot acquire the malt lock.",
-        error.OpenFailed => std.fmt.bufPrint(
+        error.OpenFailed => std.mem.print(
             buf,
             "Could not open the malt lock under {s}/db.",
             .{prefix},
         ) catch "Cannot acquire the malt lock.",
-        error.WriteFailed => std.fmt.bufPrint(
+        error.WriteFailed => std.mem.print(
             buf,
             "Took the malt lock under {s}/db but failed to record the process id.",
             .{prefix},
@@ -54,17 +54,17 @@ test "acquireFailureMessage distinguishes each non-DirMissing failure" {
 
     // AccessDenied points at the writability fix; the others name their cause.
     const denied = acquireFailureMessage(&buf, error.AccessDenied, prefix);
-    try std.testing.expect(std.mem.indexOf(u8, denied, "isn't writable") != null);
-    try std.testing.expect(std.mem.indexOf(u8, denied, prefix) != null);
+    try std.testing.expect(std.mem.find(u8, denied, "isn't writable") != null);
+    try std.testing.expect(std.mem.find(u8, denied, prefix) != null);
 
     const timeout = acquireFailureMessage(&buf, error.Timeout, prefix);
-    try std.testing.expect(std.mem.indexOf(u8, timeout, "another malt process") != null);
+    try std.testing.expect(std.mem.find(u8, timeout, "another malt process") != null);
 
     const open = acquireFailureMessage(&buf, error.OpenFailed, prefix);
-    try std.testing.expect(std.mem.indexOf(u8, open, "Could not open") != null);
+    try std.testing.expect(std.mem.find(u8, open, "Could not open") != null);
 
     const write = acquireFailureMessage(&buf, error.WriteFailed, prefix);
-    try std.testing.expect(std.mem.indexOf(u8, write, "process id") != null);
+    try std.testing.expect(std.mem.find(u8, write, "process id") != null);
 }
 
 test "acquireFailureMessage degrades to a generic line when buf is too small" {

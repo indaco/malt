@@ -20,7 +20,7 @@ const c = struct {
 var temp_seq = std.atomic.Value(u32).init(0);
 
 fn tmpRoot(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "/tmp/malt_clonefile_test_{s}_{d}_{d}", .{
+    return allocator.print("/tmp/malt_clonefile_test_{s}_{d}_{d}", .{
         tag, c.getpid(), temp_seq.fetchAdd(1, .monotonic),
     });
 }
@@ -37,22 +37,22 @@ fn setupSourceTree(root: []const u8) !void {
     test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try test_io.makeDirAbsolute(std.Options.debug_io, root);
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{root});
     try test_io.makeDirAbsolute(std.Options.debug_io, src);
 
     // A regular file.
     var f_buf: [512]u8 = undefined;
-    const fpath = try std.fmt.bufPrint(&f_buf, "{s}/hello.txt", .{src});
+    const fpath = try std.mem.print(&f_buf, "{s}/hello.txt", .{src});
     const f = try test_io.cwd().createFile(std.Options.debug_io, fpath, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, "hi\n");
 
     // A nested file.
     var sub_buf: [512]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/inner", .{src});
+    const sub = try std.mem.print(&sub_buf, "{s}/inner", .{src});
     try test_io.makeDirAbsolute(std.Options.debug_io, sub);
     var sub_f_buf: [512]u8 = undefined;
-    const sf_path = try std.fmt.bufPrint(&sub_f_buf, "{s}/world.txt", .{sub});
+    const sf_path = try std.mem.print(&sub_f_buf, "{s}/world.txt", .{sub});
     const sf = try test_io.cwd().createFile(std.Options.debug_io, sf_path, .{});
     defer sf.close(std.Options.debug_io);
     try sf.writeStreamingAll(std.Options.debug_io, "nested\n");
@@ -79,15 +79,15 @@ test "cloneTree duplicates a small directory tree" {
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{root});
     var dst_buf: [512]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst", .{root});
+    const dst = try std.mem.print(&dst_buf, "{s}/dst", .{root});
 
     try clonefile.cloneTree(std.Options.debug_io, testing.allocator, src, dst);
 
     // Verify the cloned top-level file exists with the same contents.
     var verify_buf: [512]u8 = undefined;
-    const cloned = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
+    const cloned = try std.mem.print(&verify_buf, "{s}/hello.txt", .{dst});
     const f = try test_io.cwd().openFile(std.Options.debug_io, cloned, .{});
     defer f.close(std.Options.debug_io);
     var contents: [16]u8 = undefined;
@@ -96,7 +96,7 @@ test "cloneTree duplicates a small directory tree" {
 
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
-    const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
+    const nested = try std.mem.print(&nested_buf, "{s}/inner/world.txt", .{dst});
     const nf = try test_io.cwd().openFile(std.Options.debug_io, nested, .{});
     defer nf.close(std.Options.debug_io);
     var nb: [16]u8 = undefined;
@@ -111,9 +111,9 @@ test "cloneTree fails with AlreadyExists when dst already exists" {
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{root});
     var dst_buf: [512]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst", .{root});
+    const dst = try std.mem.print(&dst_buf, "{s}/dst", .{root});
 
     // Pre-create dst — clonefile(2) EEXIST → CloneError.AlreadyExists on APFS.
     // On non-APFS filesystems the fallback may overwrite gracefully, so we
@@ -152,20 +152,20 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{root});
     var dst_buf: [512]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_fallback", .{root});
+    const dst = try std.mem.print(&dst_buf, "{s}/dst_fallback", .{root});
 
     // Add a symlink into the source tree so the sym_link branch runs.
     var link_path_buf: [512]u8 = undefined;
-    const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/link.txt", .{src});
+    const link_path = try std.mem.print(&link_path_buf, "{s}/link.txt", .{src});
     test_io.cwd().symLink(std.Options.debug_io, "hello.txt", link_path, .{}) catch {};
 
     try clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, src, dst);
 
     // Verify the top-level file is present.
     var check_buf: [512]u8 = undefined;
-    const check = try std.fmt.bufPrint(&check_buf, "{s}/hello.txt", .{dst});
+    const check = try std.mem.print(&check_buf, "{s}/hello.txt", .{dst});
     const f = try test_io.cwd().openFile(std.Options.debug_io, check, .{});
     defer f.close(std.Options.debug_io);
     var contents: [16]u8 = undefined;
@@ -174,7 +174,7 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
 
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
-    const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
+    const nested = try std.mem.print(&nested_buf, "{s}/inner/world.txt", .{dst});
     const nf = try test_io.cwd().openFile(std.Options.debug_io, nested, .{});
     defer nf.close(std.Options.debug_io);
 }
@@ -186,16 +186,16 @@ test "copyTreeFallback is idempotent when the destination already exists" {
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{root});
     var dst_buf: [512]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_idem", .{root});
+    const dst = try std.mem.print(&dst_buf, "{s}/dst_idem", .{root});
 
     try test_io.makeDirAbsolute(std.Options.debug_io, dst);
     try clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, src, dst);
 
     // Verify the nested file was still copied.
     var check_buf: [512]u8 = undefined;
-    const check = try std.fmt.bufPrint(&check_buf, "{s}/inner/world.txt", .{dst});
+    const check = try std.mem.print(&check_buf, "{s}/inner/world.txt", .{dst});
     const f = try test_io.cwd().openFile(std.Options.debug_io, check, .{});
     defer f.close(std.Options.debug_io);
 }
@@ -213,9 +213,9 @@ test "copyTreeFallback surfaces a per-entry failure as an error" {
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{root});
     var dst_buf: [512]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_partial", .{root});
+    const dst = try std.mem.print(&dst_buf, "{s}/dst_partial", .{root});
 
     // Pre-stage dst so the walker's `inner/` directory entry collides
     // with an existing regular file — createDirPath then fails on the
@@ -223,7 +223,7 @@ test "copyTreeFallback surfaces a per-entry failure as an error" {
     // it. The new code captures and returns it.
     try test_io.makeDirAbsolute(std.Options.debug_io, dst);
     var collision_buf: [512]u8 = undefined;
-    const collision = try std.fmt.bufPrint(&collision_buf, "{s}/inner", .{dst});
+    const collision = try std.mem.print(&collision_buf, "{s}/inner", .{dst});
     const cf = try test_io.cwd().createFile(std.Options.debug_io, collision, .{});
     cf.close(std.Options.debug_io);
 
@@ -235,7 +235,7 @@ test "copyTreeFallback surfaces a per-entry failure as an error" {
     // The top-level non-colliding file should still have been copied —
     // capture-and-continue preserves the partial-tree contract.
     var top_buf: [512]u8 = undefined;
-    const top = try std.fmt.bufPrint(&top_buf, "{s}/hello.txt", .{dst});
+    const top = try std.mem.print(&top_buf, "{s}/hello.txt", .{dst});
     const f = try test_io.cwd().openFile(std.Options.debug_io, top, .{});
     f.close(std.Options.debug_io);
 }
@@ -282,10 +282,10 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
     try setupSourceTree(src_root);
 
     var src_buf: [512]u8 = undefined;
-    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{src_root});
+    const src = try std.mem.print(&src_buf, "{s}/src", .{src_root});
 
     var dst_buf: [512]u8 = undefined;
-    const dst = try std.fmt.bufPrint(
+    const dst = try std.mem.print(
         &dst_buf,
         "{s}/malt_clonefile_nonapfs_dst",
         .{non_apfs_dir},
@@ -297,7 +297,7 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
     try clonefile.cloneTree(std.Options.debug_io, testing.allocator, src, dst);
 
     var verify_buf: [512]u8 = undefined;
-    const copied = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
+    const copied = try std.mem.print(&verify_buf, "{s}/hello.txt", .{dst});
     const f = try test_io.cwd().openFile(std.Options.debug_io, copied, .{});
     defer f.close(std.Options.debug_io);
     var contents: [16]u8 = undefined;

@@ -112,7 +112,7 @@ fn writePidAndSync(io: std.Io, file: std.Io.File) LockError!void {
     var buf: [32]u8 = undefined;
     // `getpid` has no typed std peer in Zig 0.16; the libc wrapper never fails.
     const pid = std.posix.system.getpid();
-    const pid_str = std.fmt.bufPrint(&buf, "{d}", .{pid}) catch return error.WriteFailed;
+    const pid_str = std.mem.print(&buf, "{d}", .{pid}) catch return error.WriteFailed;
     file.writePositionalAll(io, pid_str, 0) catch return error.WriteFailed;
 
     // Durability of the live pid for `mt doctor` after a SIGKILL —
@@ -135,8 +135,7 @@ test "acquire reports DirMissing when the lock's parent directory is absent" {
     _ = std.base64.url_safe.Encoder.encode(&suffix, &rnd);
 
     // The `<base>/db` parent is deliberately never created.
-    const path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const path = try std.testing.allocator.print(
         "/tmp/malt-lock-missing-{s}/db/malt.lock",
         .{suffix},
     );
@@ -158,9 +157,9 @@ test "acquire records a pid while held and release vacates it" {
     var suffix: [std.base64.url_safe.Encoder.calcSize(9)]u8 = undefined;
     _ = std.base64.url_safe.Encoder.encode(&suffix, &rnd);
 
-    const dir = try std.fmt.allocPrint(std.testing.allocator, "/tmp/malt-lock-ok-{s}", .{suffix});
+    const dir = try std.testing.allocator.print("/tmp/malt-lock-ok-{s}", .{suffix});
     defer std.testing.allocator.free(dir);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt.lock", .{dir});
+    const path = try std.testing.allocator.print("{s}/malt.lock", .{dir});
     defer std.testing.allocator.free(path);
 
     try std.Io.Dir.createDirAbsolute(io, dir, .default_dir);
@@ -183,7 +182,7 @@ test "acquire has a single close path (regression guard for double-close)" {
     // scan the source to pin the invariant.
     const src = @embedFile("lock.zig");
     const marker = "pub fn acquire(io: std.Io, path: []const u8, timeout_ms: u32) LockError!LockFile {";
-    const start = std.mem.indexOf(u8, src, marker) orelse return error.AcquireFnNotFound;
+    const start = std.mem.find(u8, src, marker) orelse return error.AcquireFnNotFound;
 
     var depth: usize = 0;
     var body_end: usize = 0;
@@ -206,11 +205,11 @@ test "acquire has a single close path (regression guard for double-close)" {
 
     var close_count: usize = 0;
     var idx: usize = 0;
-    while (std.mem.indexOfPos(u8, body, idx, ".close(")) |pos| : (idx = pos + 1) {
+    while (std.mem.findPos(u8, body, idx, ".close(")) |pos| : (idx = pos + 1) {
         close_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), close_count);
-    try std.testing.expect(std.mem.indexOf(u8, body, "errdefer file.close(io)") != null);
+    try std.testing.expect(std.mem.find(u8, body, "errdefer file.close(io)") != null);
 }
 
 test "acquire fsyncs the pid (regression guard for stale-pid bug)" {
@@ -220,10 +219,10 @@ test "acquire fsyncs the pid (regression guard for stale-pid bug)" {
     // so pin the invariant in the source.
     const src = @embedFile("lock.zig");
     const writer_marker = "fn writePidAndSync";
-    const fn_start = std.mem.indexOf(u8, src, writer_marker) orelse return error.WriterFnNotFound;
+    const fn_start = std.mem.find(u8, src, writer_marker) orelse return error.WriterFnNotFound;
     const body = src[fn_start..];
 
-    const write_pos = std.mem.indexOf(u8, body, "writePositionalAll") orelse return error.WriteCallMissing;
-    const sync_pos = std.mem.indexOf(u8, body, "file.sync(io)") orelse return error.SyncCallMissing;
+    const write_pos = std.mem.find(u8, body, "writePositionalAll") orelse return error.WriteCallMissing;
+    const sync_pos = std.mem.find(u8, body, "file.sync(io)") orelse return error.SyncCallMissing;
     try std.testing.expect(sync_pos > write_pos);
 }

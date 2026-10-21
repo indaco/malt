@@ -18,7 +18,7 @@ fn nowSec(io: std.Io) i64 {
 fn countBlocks(pem: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, pem, i, "-----BEGIN CERTIFICATE-----")) |at| {
+    while (std.mem.findPos(u8, pem, i, "-----BEGIN CERTIFICATE-----")) |at| {
         n += 1;
         i = at + 1;
     }
@@ -62,7 +62,7 @@ test "the shipped Mozilla source is merged on top of the keychains" {
     defer testing.allocator.free(merged);
 
     try testing.expectEqual(countBlocks(keychains_only) + 1, countBlocks(merged));
-    try testing.expect(std.mem.indexOf(u8, merged, std.mem.trimEnd(u8, extra, "\n")) != null);
+    try testing.expect(std.mem.find(u8, merged, std.mem.trimEnd(u8, extra, "\n")) != null);
 }
 
 test "a file that is not the known script is never substituted for" {
@@ -72,12 +72,12 @@ test "a file that is not the known script is never substituted for" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/decoy", .{dir});
+    const path = try arena.allocator().print("{s}/decoy", .{dir});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "#!/bin/sh\nexit 0\n" });
 
     try testing.expect(!ca_bundle.isKnownScript(io, path));
@@ -101,8 +101,8 @@ fn opensslSaysCa(
     pem: []const u8,
     n: usize,
 ) !?bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "{s}/{d}.pem", .{ dir, n });
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&buf, "{s}/{d}.pem", .{ dir, n });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = pem });
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
@@ -111,7 +111,7 @@ fn opensslSaysCa(
     });
     defer report.deinit(gpa);
     if (report.code != 0) return null;
-    return std.mem.indexOf(u8, report.stdout, "SSL server CA : Yes") != null;
+    return std.mem.find(u8, report.stdout, "SSL server CA : Yes") != null;
 }
 
 // The builder's CA test is a hand-written DER walk standing in for openssl's
@@ -125,7 +125,7 @@ test "the CA classifier agrees with openssl on every certificate on this machine
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = dir_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &dir_buf)];
 
     var checked: usize = 0;
@@ -171,7 +171,7 @@ test "the CA classifier agrees with openssl on adversarial extension shapes" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = dir_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &dir_buf)];
 
     var fixtures = try std.Io.Dir.cwd().openDir(io, "tests/fixtures/ca_classify", .{ .iterate = true });
@@ -221,8 +221,8 @@ fn verifyCertSaysTrusted(
     n: usize,
     purpose: ca_bundle.Purpose,
 ) !bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "{s}/t{d}.pem", .{ dir, n });
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&buf, "{s}/t{d}.pem", .{ dir, n });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = pem });
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
@@ -252,7 +252,7 @@ test "in-process trust evaluation agrees with security verify-cert" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = dir_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &dir_buf)];
 
     var trusted: usize = 0;

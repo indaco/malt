@@ -19,29 +19,28 @@ const c = test_io.c;
 fn makePrefixWithKeg(suffix: []const u8, name: []const u8, version: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "which", suffix);
     defer testing.allocator.free(base);
-    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{base}, 0);
+    const prefix = try testing.allocator.printSentinel("{s}", .{base}, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    const keg_bin = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg_bin = try testing.allocator.print(
         "{s}/Cellar/{s}/{s}/bin",
         .{ prefix, name, version },
     );
     defer testing.allocator.free(keg_bin);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin);
 
-    const real_bin = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg_bin, name });
+    const real_bin = try testing.allocator.print("{s}/{s}", .{ keg_bin, name });
     defer testing.allocator.free(real_bin);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, real_bin, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
     }
 
-    const prefix_bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
+    const prefix_bin = try testing.allocator.print("{s}/bin", .{prefix});
     defer testing.allocator.free(prefix_bin);
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_bin);
 
-    const link_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix_bin, name });
+    const link_path = try testing.allocator.print("{s}/{s}", .{ prefix_bin, name });
     defer testing.allocator.free(link_path);
     try test_io.symLinkAbsolute(std.Options.debug_io, real_bin, link_path, .{});
 
@@ -68,7 +67,7 @@ test "execute accepts an absolute path under the prefix" {
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const abs = try std.fmt.allocPrint(testing.allocator, "{s}/bin/wget", .{prefix});
+    const abs = try testing.allocator.print("{s}/bin/wget", .{prefix});
     defer testing.allocator.free(abs);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -101,8 +100,7 @@ test "execute on an absolute path that is not a symlink returns Aborted" {
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const plain = try std.fmt.allocPrint(
-        testing.allocator,
+    const plain = try testing.allocator.print(
         "{s}/Cellar/tree/2.2.1/bin/tree",
         .{prefix},
     );
@@ -121,5 +119,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     malt.output.beginStderrCapture(testing.allocator, &captured);
     defer malt.output.endStderrCapture();
     try testing.expectError(error.Aborted, which.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "-a", "wget" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -a") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: -a") != null);
 }

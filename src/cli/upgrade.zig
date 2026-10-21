@@ -152,7 +152,7 @@ const Tally = struct {
     fn summaryLine(self: Tally, buf: []u8, dry_run: bool) []const u8 {
         const action_count = if (dry_run) self.would_upgrade else self.upgraded;
         const action_word = if (dry_run) "would upgrade" else "upgraded";
-        const head = std.fmt.bufPrint(buf, "{d} checked · {d} {s} · {d} up to date · {d} pinned", .{
+        const head = std.mem.print(buf, "{d} checked · {d} {s} · {d} up to date · {d} pinned", .{
             self.checked(), action_count, action_word, self.up_to_date, self.pinned,
         }) catch return buf[0..0];
         var len = head.len;
@@ -164,7 +164,7 @@ const Tally = struct {
 
     /// Bytes appended by one optional footer clause; zero when it does not fit.
     fn clauseLen(buf: []u8, comptime fmt: []const u8, n: usize) usize {
-        return (std.fmt.bufPrint(buf, fmt, .{n}) catch return 0).len;
+        return (std.mem.print(buf, fmt, .{n}) catch return 0).len;
     }
 };
 
@@ -185,7 +185,7 @@ fn downgradeWarning(buf: []u8, name: []const u8, installed: []const u8, upstream
     if (formula_mod.relate(installed, upstream) != .older) return null;
     // Bounded inputs (a keg name and two version labels); on the impossible
     // overflow, drop the advisory rather than fail an upgrade over a heads-up.
-    return std.fmt.bufPrint(buf, "{s} is moving backward: {s} -> {s} (undo with `mt rollback {s}`)", .{ name, installed, upstream, name }) catch null;
+    return std.mem.print(buf, "{s} is moving backward: {s} -> {s} (undo with `mt rollback {s}`)", .{ name, installed, upstream, name }) catch null;
 }
 
 /// Print the backward-move heads-up at a compare site when the move is
@@ -324,8 +324,8 @@ test "reportAuditFailure points a broken table at mt doctor and names any other 
         output.beginStderrCapture(std.testing.allocator, &buf);
         reportAuditFailure(e);
         output.endStderrCapture();
-        try std.testing.expect(std.mem.indexOf(u8, buf.items, @errorName(e)) != null);
-        const doctor = std.mem.indexOf(u8, buf.items, "mt doctor") != null;
+        try std.testing.expect(std.mem.find(u8, buf.items, @errorName(e)) != null);
+        const doctor = std.mem.find(u8, buf.items, "mt doctor") != null;
         try std.testing.expectEqual(e != error.OutOfMemory, doctor);
     }
 }
@@ -947,7 +947,7 @@ fn upgradeFormula(
     // Also remove parent if empty
     {
         var parent_buf: [512]u8 = undefined;
-        const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+        const parent_path = std.mem.print(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (parent_path.len > 0) {
             // rmdir fails if other versions still live here — that is the intended guard.
             std.Io.Dir.cwd().deleteDir(ctx.io, parent_path) catch {};
@@ -1006,7 +1006,7 @@ test "tapFormulaUpstreamVersion honours a tripped host so a bulk dry-run pays a 
     const thread = try std.Thread.spawn(.{}, tap_mod.DropServer.serve, .{&srv});
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     var sink = EntrySink.init(std.testing.allocator);
     defer sink.deinit();
     sink.tripped.record(io, raw_base, .{ .err = error.RequestFailed });
@@ -1033,7 +1033,7 @@ test "tapWarmDecision: null taints, equal skips, differing collects" {
 /// the `.rb`'s is one `mt outdated` lists but the commit gate calls current;
 /// nothing but a forced reinstall clears that, so say so.
 fn realignHint(buf: []u8, name: []const u8, installed: []const u8, upstream: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s} is installed as {s} but the tap declares {s} - reinstall with --force to realign", .{ name, installed, upstream });
+    return std.mem.print(buf, "{s} is installed as {s} but the tap declares {s} - reinstall with --force to realign", .{ name, installed, upstream });
 }
 
 test "realignHint names both versions and the --force way out" {
@@ -1129,7 +1129,7 @@ test "skipNoBottle skips in a bulk run and fails a named one" {
 
     try std.testing.expectError(error.Aborted, skipNoBottle("wget", false));
     try std.testing.expectEqual(Outcome.unsupported, try skipNoBottle("wget", true));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "No bottle available for wget") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "No bottle available for wget") != null);
 }
 
 test "tapRecipe carries the qualified version and the checksum opt-out" {
@@ -1167,8 +1167,8 @@ test "skipUnpinned skips in a bulk run, fails a named one, and names the flag ei
 
     try std.testing.expectError(error.Aborted, skipUnpinned("nightly", false));
     try std.testing.expectEqual(Outcome.unsupported, try skipUnpinned("nightly", true));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "nightly") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "--allow-unpinned") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "nightly") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "--allow-unpinned") != null);
 }
 
 /// Upgrade a tap-installed formula. The reported `tap_label` is
@@ -1201,7 +1201,7 @@ fn upgradeTapFormula(
         return .pinned;
     }
 
-    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse {
+    const slash = std.mem.findScalar(u8, tap_label, '/') orelse {
         output.err("Cannot parse tap '{s}' for {s}", .{ tap_label, name });
         return error.Aborted;
     };
@@ -1320,7 +1320,7 @@ fn upgradeTapFormula(
         if (head_res.etag) |et| tap_mod.updateHead(db, tap_label, fresh_sha, et) catch {};
     }
 
-    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, name }) catch return error.Aborted;
+    const full_name = allocator.print("{s}/{s}", .{ tap_label, name }) catch return error.Aborted;
     defer allocator.free(full_name);
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
@@ -1396,7 +1396,7 @@ fn upgradeRoutedTapCask(
     bulk: bool,
     sink: ?*EntrySink,
 ) TapRouteError!Outcome {
-    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return error.Aborted;
+    const slash = std.mem.findScalar(u8, tap_label, '/') orelse return error.Aborted;
     if (slash == 0 or slash == tap_label.len - 1) return error.Aborted;
 
     const urls = tap_mod.resolveTapBaseUrls(allocator, db, tap_label) catch return error.Aborted;
@@ -1481,7 +1481,7 @@ fn upgradeRoutedTapCask(
     // Snapshot the pin so a force-upgrade preserves the user's hold.
     const was_pinned = caskPinSnapshot(db, token);
 
-    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
+    const full_name = allocator.print("{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
     defer allocator.free(full_name);
 
     // `installTapCask` (not `installTapFormula`) so the resolver
@@ -2177,8 +2177,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -2187,7 +2186,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths
         // the code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -2198,8 +2197,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -2337,9 +2335,9 @@ test "downgradeWarning speaks up on a backward move and stays silent otherwise" 
     // versions and point at the undo so the line stands on its own.
     const w = downgradeWarning(&buf, "tree", "2.2.1", "2.2.0") orelse
         return error.ExpectedWarning;
-    try std.testing.expect(std.mem.indexOf(u8, w, "2.2.1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, w, "2.2.0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, w, "rollback") != null);
+    try std.testing.expect(std.mem.find(u8, w, "2.2.1") != null);
+    try std.testing.expect(std.mem.find(u8, w, "2.2.0") != null);
+    try std.testing.expect(std.mem.find(u8, w, "rollback") != null);
 
     // The ordinary forward path runs on every upgrade of every package;
     // one stray line here is a daily regression for everyone.
@@ -2352,8 +2350,8 @@ test "downgradeWarning speaks up on a backward move and stays silent otherwise" 
     // matches what upgrade compares, so it must warn and name that label.
     const rev = downgradeWarning(&buf, "tree", "1.2.3_2", "1.2.3_1") orelse
         return error.ExpectedWarning;
-    try std.testing.expect(std.mem.indexOf(u8, rev, "1.2.3_2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rev, "1.2.3_1") != null);
+    try std.testing.expect(std.mem.find(u8, rev, "1.2.3_2") != null);
+    try std.testing.expect(std.mem.find(u8, rev, "1.2.3_1") != null);
 }
 
 test "summaryLine swaps in 'would upgrade' under dry-run" {
@@ -2560,7 +2558,7 @@ test "upgradeDbAtomic keeps the links of a keg-only formula the user linked by h
 
     var buf: [512]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/foo/2.0/") != null);
+    try std.testing.expect(std.mem.find(u8, buf[0..n], "/Cellar/foo/2.0/") != null);
 }
 
 test "restoreOldLinks does not take a keg-only slot back from a successor" {
@@ -2584,7 +2582,7 @@ test "restoreOldLinks does not take a keg-only slot back from a successor" {
 
     var buf: [512]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/succ/") != null);
+    try std.testing.expect(std.mem.find(u8, buf[0..n], "/Cellar/succ/") != null);
     try std.testing.expect(!linker_mod.isKegLinked(&db, 1));
 }
 
@@ -2608,7 +2606,7 @@ test "abandonCommit puts a hand-linked keg-only formula's links back" {
 
     var buf: [512]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/foo/1.0/") != null);
+    try std.testing.expect(std.mem.find(u8, buf[0..n], "/Cellar/foo/1.0/") != null);
 }
 
 // A stepped-open lookup statement pins connection A's WAL read snapshot.
@@ -2951,13 +2949,13 @@ test "phase 1 never folds an unproven row" {
 /// disk. `http.offline` stays on: nothing here may reach the network.
 fn writeTestVersionsIndex(cache_dir: []const u8, kind: audit_mod.Kind, body: []const u8) !void {
     const io = std.Options.debug_io;
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.mem.print(&dir_buf, "{s}/api", .{cache_dir});
     std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
     var key_buf: [64]u8 = undefined;
     const key = api_mod.BrewApi.versionsKey(&key_buf, kind);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_{s}.txt", .{ cache_dir, key });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const p = try std.mem.print(&path_buf, "{s}/api/versions_{s}.txt", .{ cache_dir, key });
     const f = try std.Io.Dir.cwd().createFile(io, p, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, body);
@@ -2968,16 +2966,16 @@ fn writeTestVersionsIndex(cache_dir: []const u8, kind: audit_mod.Kind, body: []c
 /// only name + `versions.stable`.
 fn writeTestFormulaCache(cache_dir: []const u8, name: []const u8, stable: []const u8) !void {
     const io = std.Options.debug_io;
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.mem.print(&dir_buf, "{s}/api", .{cache_dir});
     std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const p = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
     const f = try std.Io.Dir.cwd().createFile(io, p, .{});
     defer f.close(io);
     var body_buf: [512]u8 = undefined;
     // An `all` bottle keeps the would-upgrade path open on any host.
-    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}},\"bottle\":{{\"stable\":{{\"files\":{{\"all\":{{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"{s}\"}}}}}}}}}}", .{ name, stable, &@as([64]u8, @splat('a')) });
+    const body = try std.mem.print(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}},\"bottle\":{{\"stable\":{{\"files\":{{\"all\":{{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"{s}\"}}}}}}}}}}", .{ name, stable, &@as([64]u8, @splat('a')) });
     try f.writeStreamingAll(io, body);
 }
 
@@ -2985,15 +2983,15 @@ fn writeTestFormulaCache(cache_dir: []const u8, name: []const u8, stable: []cons
 /// and url, so phase 2 can resolve a would-upgrade cask offline of the network.
 fn writeTestCaskCache(cache_dir: []const u8, token: []const u8, version: []const u8) !void {
     const io = std.Options.debug_io;
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.mem.print(&dir_buf, "{s}/api", .{cache_dir});
     std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/cask_{s}.json", .{ cache_dir, token });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const p = try std.mem.print(&path_buf, "{s}/api/cask_{s}.json", .{ cache_dir, token });
     const f = try std.Io.Dir.cwd().createFile(io, p, .{});
     defer f.close(io);
     var body_buf: [256]u8 = undefined;
-    const body = try std.fmt.bufPrint(&body_buf, "{{\"token\":\"{s}\",\"version\":\"{s}\",\"url\":\"https://example.com/x.dmg\"}}", .{ token, version });
+    const body = try std.mem.print(&body_buf, "{{\"token\":\"{s}\",\"version\":\"{s}\",\"url\":\"https://example.com/x.dmg\"}}", .{ token, version });
     try f.writeStreamingAll(io, body);
 }
 
@@ -3516,8 +3514,8 @@ test "a named local keg is skipped with the install --local way out, never route
     const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", false, false, false, false, &.{}, false, null);
     try std.testing.expectEqual(Outcome.local, outcome);
     // Quoted so the suggestion pastes even when the .rb lives under a path with spaces.
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local '/x/older.rb'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") == null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "install --local '/x/older.rb'") != null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "Cannot parse tap") == null);
 }
 
 test "a pinned local keg reports local on every path, since unpinning would not help" {
@@ -3554,7 +3552,7 @@ test "a pinned local keg reports local on every path, since unpinning would not 
         const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", true, p.force, p.audit, false, &.{}, false, null);
         try std.testing.expectEqual(Outcome.local, outcome);
     }
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "is pinned") == null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "is pinned") == null);
 }
 
 test "a bulk run folds a local keg silently and leaves the hint to the named form" {
@@ -3581,7 +3579,7 @@ test "a bulk run folds a local keg silently and leaves the hint to the named for
 
     const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, true, null);
     try std.testing.expectEqual(Outcome.local, outcome);
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local") == null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "install --local") == null);
 }
 
 test "a local keg beside a core keg neither fails the bulk run nor taints the warm" {
@@ -3638,8 +3636,8 @@ test "a routed tap cask declaring sha256 :no_check is named, not reported gone f
         \\end
     ;
     try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "sha256 :no_check") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "user/tap") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "sha256 :no_check") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "user/tap") != null);
 }
 
 test "a routed tap cask .rb that does not parse still reads as not in the tap" {
@@ -3694,7 +3692,7 @@ test "a routed tap cask with an unpinned sha256 is refused before its progress-o
         \\end
     ;
     try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "not a pinned sha256") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "not a pinned sha256") != null);
 }
 
 /// Seeds `box` as both kinds with independent pins, then replays what a cask
@@ -3704,7 +3702,7 @@ fn replayCaskUpgradePin(keg_pinned: bool, cask_pinned: bool) !struct { keg: bool
     defer db.close();
     try schema.initSchema(&db);
     var buf: [512]u8 = undefined;
-    try db.exec(try std.fmt.bufPrintSentinel(&buf,
+    try db.exec(try std.mem.printSentinel(&buf,
         \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
         \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
     , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }, 0));

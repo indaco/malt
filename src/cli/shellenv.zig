@@ -21,7 +21,7 @@ pub fn parseShell(name: []const u8) ?Shell {
 pub fn detectFromShellPath(value: ?[]const u8) ?Shell {
     const path = value orelse return null;
     if (path.len == 0) return null;
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const slash = std.mem.findScalarLast(u8, path, '/');
     const base = if (slash) |i| path[i + 1 ..] else path;
     return parseShell(base);
 }
@@ -73,7 +73,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const shell = resolveShell(ctx, args) orelse std.process.exit(2);
 
     const prefix = atomic.maltPrefixOrAbort();
-    var cert_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cert_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const out = try render(allocator, shell, prefix, ca_bundle.findCertFile(ctx.io, &cert_buf, prefix));
     defer allocator.free(out);
     output.writeStdoutAll(out);
@@ -83,7 +83,7 @@ fn resolveShell(ctx: *const AppCtx, args: []const []const u8) ?Shell {
     if (args.len > 0) {
         if (parseShell(args[0])) |s| return s;
         var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(
+        const msg = std.mem.print(
             &buf,
             "malt: unknown shell '{s}'. Supported: bash, zsh, fish\n",
             .{args[0]},

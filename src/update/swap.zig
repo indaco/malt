@@ -46,14 +46,14 @@ pub fn atomicReplace(io: std.Io, target_path: []const u8, new_path: []const u8) 
 }
 
 fn atomicReplaceImpl(io: std.Io, target_path: []const u8, new_path: []const u8, rename_fn: RenameFn) SwapError!void {
-    const target_dir = std.fs.path.dirname(target_path) orelse return error.SwapFailed;
+    const target_dir = std.Io.Dir.path.dirname(target_path) orelse return error.SwapFailed;
 
-    var old_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const old_path = std.fmt.bufPrint(&old_path_buf, "{s}.old", .{target_path}) catch
+    var old_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old_path = std.mem.print(&old_path_buf, "{s}.old", .{target_path}) catch
         return error.StagingFailed;
 
-    var staged_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const staged_path = std.fmt.bufPrint(&staged_path_buf, "{s}/.malt-update-{d}", .{ target_dir, std.c.getpid() }) catch
+    var staged_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staged_path = std.mem.print(&staged_path_buf, "{s}/.malt-update-{d}", .{ target_dir, std.c.getpid() }) catch
         return error.StagingFailed;
 
     const cwd_dir: std.Io.Dir = .cwd();
@@ -162,15 +162,15 @@ const Scratch = struct {
     staged: []u8,
 
     fn init(a: std.mem.Allocator, io: std.Io, tag: []const u8) !Scratch {
-        const dir = try std.fmt.allocPrint(a, "/tmp/malt-swap-{s}-{d}", .{ tag, std.c.getpid() });
+        const dir = try a.print("/tmp/malt-swap-{s}-{d}", .{ tag, std.c.getpid() });
         std.Io.Dir.cwd().deleteTree(io, dir) catch {};
         try std.Io.Dir.createDirAbsolute(io, dir, .default_dir);
         const s: Scratch = .{
             .dir = dir,
-            .target = try std.fmt.allocPrint(a, "{s}/malt", .{dir}),
-            .new = try std.fmt.allocPrint(a, "{s}/malt.new", .{dir}),
-            .old = try std.fmt.allocPrint(a, "{s}/malt.old", .{dir}),
-            .staged = try std.fmt.allocPrint(a, "{s}/.malt-update-{d}", .{ dir, std.c.getpid() }),
+            .target = try a.print("{s}/malt", .{dir}),
+            .new = try a.print("{s}/malt.new", .{dir}),
+            .old = try a.print("{s}/malt.old", .{dir}),
+            .staged = try a.print("{s}/.malt-update-{d}", .{ dir, std.c.getpid() }),
         };
         const t = try std.Io.Dir.createFileAbsolute(io, s.target, .{});
         try t.writeStreamingAll(io, "OLD");

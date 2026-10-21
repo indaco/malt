@@ -97,7 +97,7 @@ pub fn pidAlive(pid: std.posix.pid_t) bool {
 
 fn probeStaleLockState(io: std.Io, prefix: []const u8) StaleLockState {
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return .absent;
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return .absent;
     const pid = lock_mod.LockFile.holderPid(io, lock_path) orelse return .absent;
     return if (pidAlive(pid)) .live else .stale;
 }
@@ -149,7 +149,7 @@ fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
 pub fn fixStaleLock(io: std.Io, prefix: []const u8) bool {
     if (probeStaleLockState(io, prefix) != .stale) return false;
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
     // Unlinking would break flock exclusion: the inode is the lock identity.
     const file = std.Io.Dir.openFileAbsolute(io, lock_path, .{ .mode = .write_only }) catch return false;
     defer file.close(io);
@@ -196,7 +196,7 @@ fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
     if (do_remove) reapStaleLeftovers(io, prefix);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return result;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return result;
     var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return result;
     defer db.close();
 
@@ -205,7 +205,7 @@ fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
     defer probe.deinit();
 
     var store_path_buf: [512]u8 = undefined;
-    const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch return result;
+    const store_path = std.mem.print(&store_path_buf, "{s}/store", .{prefix}) catch return result;
     var store_dir = std.Io.Dir.openDirAbsolute(io, store_path, .{ .iterate = true }) catch return result;
     defer store_dir.close(io);
 
@@ -232,7 +232,7 @@ fn reapStaleLeftovers(io: std.Io, prefix: []const u8) void {
     while (it.next(io) catch null) |entry| {
         if (!std.mem.startsWith(u8, entry.name, ".malt-reap-")) continue;
         var path_buf: [768]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ prefix, entry.name }) catch continue;
+        const p = std.mem.print(&path_buf, "{s}/{s}", .{ prefix, entry.name }) catch continue;
         std.Io.Dir.cwd().deleteTree(io, p) catch {};
     }
 }
@@ -258,15 +258,15 @@ fn removeEntry(io: std.Io, prefix: []const u8, db: *sqlite.Database, name: []con
     // `name` is a dirent, not a caller-supplied key, so it stays hand-formatted:
     // this sweep is what reaps an entry whose row `store.remove` now rejects.
     var entry_buf: [768]u8 = undefined;
-    const entry_path = std.fmt.bufPrint(&entry_buf, "{s}/store/{s}", .{ prefix, name }) catch return false;
+    const entry_path = std.mem.print(&entry_buf, "{s}/store/{s}", .{ prefix, name }) catch return false;
 
     var reap_buf: [768]u8 = undefined;
     var attempt: u8 = 0;
     const reap_path = while (attempt < reap_name_attempts) : (attempt += 1) {
         const candidate = (if (attempt == 0)
-            std.fmt.bufPrint(&reap_buf, "{s}/.malt-reap-{s}", .{ prefix, name })
+            std.mem.print(&reap_buf, "{s}/.malt-reap-{s}", .{ prefix, name })
         else
-            std.fmt.bufPrint(&reap_buf, "{s}/.malt-reap-{s}-{d}", .{ prefix, name, attempt })) catch return false;
+            std.mem.print(&reap_buf, "{s}/.malt-reap-{s}-{d}", .{ prefix, name, attempt })) catch return false;
         std.Io.Dir.renameAbsolute(entry_path, candidate, io) catch |e| switch (e) {
             // A non-empty stranded staging dir holds this name — try the next.
             error.DirNotEmpty => continue,
@@ -499,7 +499,7 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
     if (!planNeedsPrefixLock(plan)) return outcome;
 
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{ctx.prefix}) catch return outcome;
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{ctx.prefix}) catch return outcome;
     // The acquire IS the gate — do NOT re-probe `operationInFlight` first,
     // which would reopen the TOCTOU this closes.
     var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, fix_lock_timeout_ms) catch |e| {
@@ -539,8 +539,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -549,7 +548,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test reports compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -844,8 +843,8 @@ test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row shas in seq
     defer s.deinit();
     const prefix = s.base;
 
-    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{prefix}, 0);
+    var db_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_path = try std.mem.printSentinel(&db_buf, "{s}/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try db.exec(
@@ -878,11 +877,11 @@ test "walkBrokenSymlinks: a dangling link is detected and removed" {
     defer s.deinit();
     const prefix = s.base;
 
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bin = try std.mem.print(&pb, "{s}/bin", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    var lb: [std.fs.max_path_bytes]u8 = undefined;
-    const link = try std.fmt.bufPrint(&lb, "{s}/gone", .{bin});
+    var lb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const link = try std.mem.print(&lb, "{s}/gone", .{bin});
     try std.Io.Dir.symLinkAbsolute(io, "/no/such/target", link, .{});
 
     try std.testing.expectEqual(@as(u32, 1), probeBrokenSymlinks(io, prefix));
@@ -902,11 +901,11 @@ test "walkBrokenSymlinks: an intact link with an inaccessible target is left alo
     const prefix = s.base;
 
     // A real target under a mode-0 dir: stat traversal fails with EACCES.
-    var wb: [std.fs.max_path_bytes]u8 = undefined;
-    const walled = try std.fmt.bufPrint(&wb, "{s}/walled", .{prefix});
+    var wb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const walled = try std.mem.print(&wb, "{s}/walled", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, walled);
-    var tb: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try std.fmt.bufPrint(&tb, "{s}/keg", .{walled});
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try std.mem.print(&tb, "{s}/keg", .{walled});
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
         f.close(io);
@@ -918,16 +917,16 @@ test "walkBrokenSymlinks: an intact link with an inaccessible target is left alo
     // this defer must run before `s.deinit()`.
     defer walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
 
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bin = try std.mem.print(&pb, "{s}/bin", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    var lb: [std.fs.max_path_bytes]u8 = undefined;
-    const link = try std.fmt.bufPrint(&lb, "{s}/wall", .{bin});
+    var lb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const link = try std.mem.print(&lb, "{s}/wall", .{bin});
     try std.Io.Dir.symLinkAbsolute(io, target, link, .{});
 
     try std.testing.expectEqual(@as(u32, 0), probeBrokenSymlinks(io, prefix));
     try std.testing.expectEqual(@as(u32, 0), fixBrokenSymlinks(io, prefix));
     // The link entry survives the walk (readLink inspects the link, not the target).
-    var rl: [std.fs.max_path_bytes]u8 = undefined;
+    var rl: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(io, link, &rl);
 }

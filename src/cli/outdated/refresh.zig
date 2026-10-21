@@ -705,8 +705,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -715,7 +714,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test reports compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -934,7 +933,7 @@ fn tapRawLatestVersion(
     subtrees: []const forge.RawKind,
     noun: []const u8,
 ) ?[]u8 {
-    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return null;
+    const slash = std.mem.findScalar(u8, tap_label, '/') orelse return null;
     if (slash == 0 or slash == tap_label.len - 1) return null;
 
     // Dedup'd HEAD resolve: N workers for the same tap pay 1 API call,
@@ -979,7 +978,7 @@ fn tapVersionFromSubtrees(
     switch (fetch) {
         .not_found => |status| {
             var status_buf: [64]u8 = undefined;
-            const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{status}) catch "GitHub returned a non-200 status for the .rb";
+            const reason = std.mem.print(&status_buf, "GitHub returned status {d} for the .rb", .{status}) catch "GitHub returned a non-200 status for the .rb";
             warnTapCaskFetchFailed(tap_label, name, reason);
             return null;
         },
@@ -991,7 +990,7 @@ fn tapVersionFromSubtrees(
                     return null;
                 }
                 var dsl_buf: [96]u8 = undefined;
-                const reason = std.fmt.bufPrint(&dsl_buf, "unsupported Ruby DSL shape — use `brew upgrade` for this {s}", .{noun}) catch "unsupported Ruby DSL shape";
+                const reason = std.mem.print(&dsl_buf, "unsupported Ruby DSL shape — use `brew upgrade` for this {s}", .{noun}) catch "unsupported Ruby DSL shape";
                 warnTapCaskFetchFailed(tap_label, name, reason);
                 return null;
             };
@@ -1363,9 +1362,9 @@ test "warnTapHeadResolveFailed surfaces rate-limit reason with the tap label" {
 
     warnTapHeadResolveFailed("yuzeguitarist/deck", tap_mod.TapError.RateLimited, .github, "github.com");
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "rate limit") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "yuzeguitarist/deck") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Could not resolve") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "rate limit") != null);
 }
 
 test "warnTapHeadResolveFailed surfaces network failure for the regression skip-guards" {
@@ -1380,8 +1379,8 @@ test "warnTapHeadResolveFailed surfaces network failure for the regression skip-
     // and the existing skip-guard regex (`Network failure`) so the
     // regressions/*.sh scripts can tell a rate-limit fail from a real
     // assertion miss.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Network failure") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Could not resolve") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Network failure") != null);
 }
 
 test "warnTapHeadResolveFailed renders the gitlab host + token on the CLI output path" {
@@ -1394,13 +1393,13 @@ test "warnTapHeadResolveFailed renders the gitlab host + token on the CLI output
 
     // The whole point: a non-github tap's resolve failure reaches stderr
     // naming its own host + token var, never GitHub's.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "grp/tap") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "gitlab.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "MALT_GITLAB_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "grp/tap") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "gitlab.com") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "MALT_GITLAB_TOKEN") != null);
     // No github host or token leaked — a single "github" substring would
     // catch either (and avoids hard-coding the token literal the
     // tap-resolution-contract guard forbids outside the forge seam).
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "github") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "github") == null);
 }
 
 test "warnTapHeadResolveFailed keeps the Network-failure skip-guard phrase for gitea" {
@@ -1411,11 +1410,11 @@ test "warnTapHeadResolveFailed keeps the Network-failure skip-guard phrase for g
 
     warnTapHeadResolveFailed("team/tap", tap_mod.TapError.NetworkError, .gitea, "git.example.org");
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "git.example.org") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "git.example.org") != null);
     // The regressions/*.sh skip-guards grep "Network failure" — it must hold
     // for every forge, not just github.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Network failure") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Network failure") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Could not resolve") != null);
 }
 
 test "warnTapCaskFetchFailed names both the tap and the token" {
@@ -1426,9 +1425,9 @@ test "warnTapCaskFetchFailed names both the tap and the token" {
 
     warnTapCaskFetchFailed("yuzeguitarist/deck", "deckclip", "GitHub returned status 404 for the .rb");
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "deckclip") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "404") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "yuzeguitarist/deck") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "deckclip") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "404") != null);
 }
 
 test "buildVersionMap parses tab-delimited entries with stable and revision" {
@@ -1617,9 +1616,9 @@ const RbLayoutServer = struct {
             var req = srv.receiveHead() catch return;
             _ = self.requests.fetchAdd(1, .monotonic);
             const target = req.head.target;
-            const body: ?[]const u8 = if (std.mem.indexOf(u8, target, "/Formula/") != null)
+            const body: ?[]const u8 = if (std.mem.find(u8, target, "/Formula/") != null)
                 self.formula_rb
-            else if (std.mem.indexOf(u8, target, "/Casks/") != null)
+            else if (std.mem.find(u8, target, "/Casks/") != null)
                 self.cask_rb
             else
                 self.root_rb;
@@ -1667,7 +1666,7 @@ test "tapVersionFromSubtrees falls back to the root layout and parses the versio
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo", null);
     listener.deinit(io);
@@ -1705,7 +1704,7 @@ test "tapVersionFromSubtrees qualifies the resolved version with the .rb revisio
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo", null);
     listener.deinit(io);
@@ -1743,7 +1742,7 @@ test "tapVersionFromSubtrees discards the revision on the cask leg" {
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.cask}, "cask", "user/repo", null);
     listener.deinit(io);
@@ -1777,7 +1776,7 @@ test "tapVersionFromSubtrees resolves a keg whose .rb lives under Casks/" {
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo", null);
     listener.deinit(io);
@@ -1818,7 +1817,7 @@ test "tapVersionFromSubtrees resolves a multi-arch cask whose arch/sha256 kwargs
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo", null);
     listener.deinit(io);
@@ -1854,7 +1853,7 @@ test "tapVersionFromSubtrees names sha256 :no_check instead of an unsupported DS
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -1866,8 +1865,8 @@ test "tapVersionFromSubtrees names sha256 :no_check instead of an unsupported DS
 
     defer if (v) |vv| std.testing.allocator.free(vv);
     try std.testing.expect(v == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "sha256 :no_check") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "unsupported Ruby DSL shape") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "sha256 :no_check") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "unsupported Ruby DSL shape") == null);
 }
 
 test "tapVersionFromSubtrees keeps a keg installed from Casks/ on Casks/ when a tap ships both" {
@@ -1896,7 +1895,7 @@ test "tapVersionFromSubtrees keeps a keg installed from Casks/ on Casks/ when a 
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.kegRbSubtrees(true), "formula", "user/repo", null);
     listener.deinit(io);
@@ -1932,7 +1931,7 @@ test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both"
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo", null);
     listener.deinit(io);
@@ -1961,7 +1960,7 @@ test "tapVersionFromSubtrees hands the breaker to the shared fetch so a dead hos
     http.retry_backoff_ms = &.{ 1, 1, 1 };
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     var tripped = tap_mod.TrippedHosts{};
 
     const a = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", tap_mod.keg_rb_subtrees, "formula", "user/repo", &tripped);
@@ -2038,7 +2037,7 @@ test "parseFormulaLatest pulls versions.stable from a real-shape document" {
 }
 
 test "parseFormulaLatestFor reports no upgrade when every bottle needs a newer macOS" {
-    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "";
     const json = "{\"versions\":{\"stable\":\"1.25\"},\"bottle\":{\"stable\":{\"files\":{\"" ++ arch ++ "tahoe\":{}}}}}";
     try std.testing.expect(parseFormulaLatestFor(std.testing.allocator, json, 14) == null);
     const v = parseFormulaLatestFor(std.testing.allocator, json, 26) orelse return error.UnexpectedNull;

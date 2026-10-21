@@ -30,7 +30,7 @@ const Scratch = struct {
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "tmp", "cache", "db" };
         for (subs) |sd| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, sd });
+            const dir = try allocator.print("{s}/{s}", .{ path, sd });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
@@ -64,7 +64,7 @@ test "runChecks walks the production check table on a clean prefix" {
     // Pre-init the DB so checkSqliteIntegrity hits the happy path.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -91,7 +91,7 @@ test "runChecks surfaces a warning when a directory is missing" {
     var s = try Scratch.init(testing.allocator, "missing_dir");
     defer s.deinit(testing.allocator);
 
-    const opt_path = try std.fmt.allocPrint(testing.allocator, "{s}/opt", .{s.path});
+    const opt_path = try testing.allocator.print("{s}/opt", .{s.path});
     defer testing.allocator.free(opt_path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, opt_path) catch {};
 
@@ -115,7 +115,7 @@ test "runChecks surfaces an error when a keg row points at a missing Cellar dir"
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -154,7 +154,7 @@ test "operationInFlight: true only for a live lock holder" {
     defer s.deinit(testing.allocator);
 
     var lock_buf: [512]u8 = undefined;
-    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{s.path});
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{s.path});
 
     // No lock file → nothing in flight.
     try testing.expect(!doctor.operationInFlight(std.Options.debug_io, s.path));
@@ -172,7 +172,7 @@ test "operationInFlight: true only for a live lock holder" {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
         var b: [16]u8 = undefined;
-        try f.writeStreamingAll(std.Options.debug_io, try std.fmt.bufPrint(&b, "{d}", .{std.c.getpid()}));
+        try f.writeStreamingAll(std.Options.debug_io, try std.mem.print(&b, "{d}", .{std.c.getpid()}));
     }
     try testing.expect(doctor.operationInFlight(std.Options.debug_io, s.path));
 }
@@ -186,7 +186,7 @@ test "in-flight downgrade: all three fs-vs-DB checks become info only while an o
     const orphan_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -198,7 +198,7 @@ test "in-flight downgrade: all three fs-vs-DB checks become info only while an o
         _ = try stmt.step();
 
         var store_dir_buf: [512]u8 = undefined;
-        const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store/{s}", .{ s.path, orphan_sha });
+        const store_dir = try std.mem.print(&store_dir_buf, "{s}/store/{s}", .{ s.path, orphan_sha });
         try test_io.cwd().createDirPath(std.Options.debug_io, store_dir);
         var store = store_mod.Store.init(std.Options.debug_io, testing.allocator, &db, s.path);
         try store.claim(orphan_sha);
@@ -206,7 +206,7 @@ test "in-flight downgrade: all three fs-vs-DB checks become info only while an o
     // broken symlink: a dangling link under bin/ (warn).
     {
         var bin_buf: [512]u8 = undefined;
-        const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{s.path});
+        const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{s.path});
         var bin = try test_io.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
         defer bin.close(std.Options.debug_io);
         try bin.symLink(std.Options.debug_io, "/tmp/malt_inflight_vanished_target", "ghost", .{});
@@ -264,7 +264,7 @@ test "execute --post-install-status returns without invoking the walker" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -282,14 +282,14 @@ test "execute --post-install-status honours MALT_CACHE for the API cache" {
     var s = try Scratch.init(testing.allocator, "pi_malt_cache");
     defer s.deinit(testing.allocator);
 
-    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{s.path}, 0);
+    const alt = try testing.allocator.printSentinel("{s}/altcache", .{s.path}, 0);
     defer testing.allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -301,10 +301,10 @@ test "execute --post-install-status honours MALT_CACHE for the API cache" {
 
     // Steps-migrated hook: classified from the document alone, so a cache
     // hit is visible in the tally without any Ruby-source lookup.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    const cache_api = try testing.allocator.print("{s}/api", .{alt});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const doc = try std.fmt.allocPrint(testing.allocator, "{s}/formula_regfoo.json", .{cache_api});
+    const doc = try testing.allocator.print("{s}/formula_regfoo.json", .{cache_api});
     defer testing.allocator.free(doc);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, doc, .{ .truncate = true });
@@ -323,7 +323,7 @@ test "execute --post-install-status honours MALT_CACHE for the API cache" {
     var ctx = malt.app_ctx.debug_ctx;
     ctx.offline = true;
     try doctor.execute(&ctx, testing.allocator, &.{"--post-install-status"});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "1 total, 0 without post_install, 1 with post_install") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "1 total, 0 without post_install, 1 with post_install") != null);
 }
 
 // --- pure helpers ------------------------------------------------------
@@ -342,14 +342,14 @@ test "countMissingLocalSources tallies missing source paths against tap='local' 
     defer s.deinit(testing.allocator);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
     // Two `local` kegs: one with a present source path, one with a
     // ghost path. Only the ghost should bump `stale`.
-    const present = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/here.rb", .{s.path});
+    const present = try testing.allocator.print("{s}/Cellar/here.rb", .{s.path});
     defer testing.allocator.free(present);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, present, .{ .truncate = true });
     f.close(std.Options.debug_io);
@@ -453,21 +453,21 @@ test "checkMachOPlaceholders under --verbose lists each affected (package versio
     defer s.deinit(allocator);
 
     // alpha 1.0: two bad files — should appear ONCE in the list.
-    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    const dir1 = try allocator.print("{s}/Cellar/alpha/1.0/lib", .{s.path});
     defer allocator.free(dir1);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
-    const bin1a = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    const bin1a = try allocator.print("{s}/libalpha.dylib", .{dir1});
     defer allocator.free(bin1a);
     try writeMachOWithPath(allocator, bin1a, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
-    const bin1b = try std.fmt.allocPrint(allocator, "{s}/libalpha-extra.dylib", .{dir1});
+    const bin1b = try allocator.print("{s}/libalpha-extra.dylib", .{dir1});
     defer allocator.free(bin1b);
     try writeMachOWithPath(allocator, bin1b, "@@HOMEBREW_PREFIX@@/lib/libalpha-extra.dylib");
 
     // beta 2.0: one bad file.
-    const dir2 = try std.fmt.allocPrint(allocator, "{s}/Cellar/beta/2.0/bin", .{s.path});
+    const dir2 = try allocator.print("{s}/Cellar/beta/2.0/bin", .{s.path});
     defer allocator.free(dir2);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir2);
-    const bin2 = try std.fmt.allocPrint(allocator, "{s}/beta", .{dir2});
+    const bin2 = try allocator.print("{s}/beta", .{dir2});
     defer allocator.free(bin2);
     try writeMachOWithPath(allocator, bin2, "@@HOMEBREW_CELLAR@@/beta/2.0/bin/beta");
 
@@ -486,17 +486,17 @@ test "checkMachOPlaceholders under --verbose lists each affected (package versio
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - beta 2.0\n") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "    - alpha 1.0\n") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "    - beta 2.0\n") != null);
     // Each package appears exactly once — no per-file rows leaking
     // back in via the grouping.
-    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n").?;
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "    - alpha 1.0\n") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
+    const alpha_idx = std.mem.find(u8, stderr_buf.items, "    - alpha 1.0\n").?;
+    try testing.expect(std.mem.find(u8, stderr_buf.items[alpha_idx + 1 ..], "    - alpha 1.0\n") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
     // Verbose redundantly shows every package below the headline,
     // so the (first: …) hint must drop out — the row above is
     // shorter without it.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "(first:") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "(first:") == null);
 }
 
 test "checkBrokenSymlinks without --verbose keeps the count summary only" {
@@ -506,7 +506,7 @@ test "checkBrokenSymlinks without --verbose keeps the count summary only" {
     var s = try Scratch.init(allocator, "symlinks_default");
     defer s.deinit(allocator);
 
-    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-default", .{s.path});
+    const link_path = try allocator.print("{s}/bin/ghost-default", .{s.path});
     defer allocator.free(link_path);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_disp_default_symlink_target_dne", link_path, .{});
 
@@ -524,10 +524,10 @@ test "checkBrokenSymlinks without --verbose keeps the count summary only" {
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 broken symlink(s)") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - bin/ghost-default") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Run: mt cleanup") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "purge --housekeeping") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "1 broken symlink(s)") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "    - bin/ghost-default") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Run: mt cleanup") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "purge --housekeeping") == null);
 }
 
 test "checkMachOPlaceholders without --verbose keeps the count + first-hint summary only" {
@@ -537,17 +537,17 @@ test "checkMachOPlaceholders without --verbose keeps the count + first-hint summ
     var s = try Scratch.init(allocator, "macho_default");
     defer s.deinit(allocator);
 
-    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    const dir1 = try allocator.print("{s}/Cellar/alpha/1.0/lib", .{s.path});
     defer allocator.free(dir1);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
-    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    const bin1 = try allocator.print("{s}/libalpha.dylib", .{dir1});
     defer allocator.free(bin1);
     try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
 
-    const dir2 = try std.fmt.allocPrint(allocator, "{s}/Cellar/beta/2.0/bin", .{s.path});
+    const dir2 = try allocator.print("{s}/Cellar/beta/2.0/bin", .{s.path});
     defer allocator.free(dir2);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir2);
-    const bin2 = try std.fmt.allocPrint(allocator, "{s}/beta", .{dir2});
+    const bin2 = try allocator.print("{s}/beta", .{dir2});
     defer allocator.free(bin2);
     try writeMachOWithPath(allocator, bin2, "@@HOMEBREW_CELLAR@@/beta/2.0/bin/beta");
 
@@ -571,16 +571,16 @@ test "checkMachOPlaceholders without --verbose keeps the count + first-hint summ
     // keg either way, so the package count is the actionable number.
     // First-package hint stays (helps users who don't want to re-run
     // with --verbose). No detail rows in default mode.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "2 package(s)") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "2 package(s)") != null);
     // FS walk order isn't guaranteed to be alphabetical on every
     // host, so accept either of the two seeded kegs as the first
     // example — the contract is "name a real package", not "name
     // this specific package".
-    const has_alpha_first = std.mem.indexOf(u8, stderr_buf.items, "(first: alpha 1.0)") != null;
-    const has_beta_first = std.mem.indexOf(u8, stderr_buf.items, "(first: beta 2.0)") != null;
+    const has_alpha_first = std.mem.find(u8, stderr_buf.items, "(first: alpha 1.0)") != null;
+    const has_beta_first = std.mem.find(u8, stderr_buf.items, "(first: beta 2.0)") != null;
     try testing.expect(has_alpha_first or has_beta_first);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - beta 2.0\n") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "    - alpha 1.0\n") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "    - beta 2.0\n") == null);
 }
 
 test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
@@ -592,11 +592,11 @@ test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
     var s = try Scratch.init(allocator, "symlinks_verbose");
     defer s.deinit(allocator);
 
-    const link_a_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-a", .{s.path});
+    const link_a_path = try allocator.print("{s}/bin/ghost-a", .{s.path});
     defer allocator.free(link_a_path);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_disp_ghost_target_does_not_exist_a", link_a_path, .{});
 
-    const link_b_path = try std.fmt.allocPrint(allocator, "{s}/lib/ghost-b", .{s.path});
+    const link_b_path = try allocator.print("{s}/lib/ghost-b", .{s.path});
     defer allocator.free(link_b_path);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_disp_ghost_target_does_not_exist_b", link_b_path, .{});
 
@@ -615,8 +615,8 @@ test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "bin/ghost-a") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "lib/ghost-b") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "bin/ghost-a") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "lib/ghost-b") != null);
 }
 
 test "after the check loop, a dim --verbose hint fires when offenders exist and --verbose is off" {
@@ -629,10 +629,10 @@ test "after the check loop, a dim --verbose hint fires when offenders exist and 
     var s = try Scratch.init(allocator, "verbose_hint");
     defer s.deinit(allocator);
 
-    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    const dir1 = try allocator.print("{s}/Cellar/alpha/1.0/lib", .{s.path});
     defer allocator.free(dir1);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
-    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    const bin1 = try allocator.print("{s}/libalpha.dylib", .{dir1});
     defer allocator.free(bin1);
     try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
 
@@ -652,7 +652,7 @@ test "after the check loop, a dim --verbose hint fires when offenders exist and 
     }, &doctor.checks);
     doctor.emitVerboseHintIfNeeded();
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--verbose") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "--verbose") != null);
 }
 
 test "emitVerboseHintIfNeeded stays silent when --verbose is already active" {
@@ -662,10 +662,10 @@ test "emitVerboseHintIfNeeded stays silent when --verbose is already active" {
     var s = try Scratch.init(allocator, "verbose_hint_on");
     defer s.deinit(allocator);
 
-    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    const dir1 = try allocator.print("{s}/Cellar/alpha/1.0/lib", .{s.path});
     defer allocator.free(dir1);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
-    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    const bin1 = try allocator.print("{s}/libalpha.dylib", .{dir1});
     defer allocator.free(bin1);
     try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
 
@@ -689,7 +689,7 @@ test "emitVerboseHintIfNeeded stays silent when --verbose is already active" {
     // The "Run …" prefix on the existing fix hint (e.g.
     // `Run: mt cleanup`) is unrelated; assert the nudge-specific
     // phrase is absent.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "for the full list") == null);
 }
 
 test "emitVerboseHintIfNeeded stays silent on a clean prefix" {
@@ -715,7 +715,7 @@ test "emitVerboseHintIfNeeded stays silent on a clean prefix" {
     }, &doctor.checks);
     doctor.emitVerboseHintIfNeeded();
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "for the full list") == null);
 }
 
 test "checkPrefixPermissions hint lines flow through stderr capture so they share the verbose-list look" {
@@ -732,7 +732,7 @@ test "checkPrefixPermissions hint lines flow through stderr capture so they shar
     // Plant a path with a group-writable bit so the perms walker
     // reports it. Bit 0o020 == group-write. UID match keeps the
     // walker focused on the perms axis.
-    const weak = try std.fmt.allocPrint(allocator, "{s}/Cellar/weak", .{s.path});
+    const weak = try allocator.print("{s}/Cellar/weak", .{s.path});
     defer allocator.free(weak);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, weak, .{ .truncate = true });
     f.close(std.Options.debug_io);
@@ -756,10 +756,10 @@ test "checkPrefixPermissions hint lines flow through stderr capture so they shar
     // perms walker on this host didn't trip (CI without group bits);
     // accept both, but if the row appears it must have flowed
     // through the capture, not the bypass.
-    if (std.mem.indexOf(u8, stderr_buf.items, "Prefix permissions") != null and
-        std.mem.indexOf(u8, stderr_buf.items, "weak permissions") != null)
+    if (std.mem.find(u8, stderr_buf.items, "Prefix permissions") != null and
+        std.mem.find(u8, stderr_buf.items, "weak permissions") != null)
     {
-        try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Cellar/weak") != null);
+        try testing.expect(std.mem.find(u8, stderr_buf.items, "Cellar/weak") != null);
     }
 }
 
@@ -773,7 +773,7 @@ test "checkMissingKegs under --verbose lists each missing (name version) pair" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -800,8 +800,8 @@ test "checkMissingKegs under --verbose lists each missing (name version) pair" {
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "phantom-a 9.9") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "phantom-b 1.0") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "phantom-a 9.9") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "phantom-b 1.0") != null);
 }
 
 // --- --fix hint emission ----------------------------------------------
@@ -814,7 +814,7 @@ test "fix hint fires when a broken symlink is present and --fix is off" {
     var s = try Scratch.init(allocator, "fix_hint_symlink");
     defer s.deinit(allocator);
 
-    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-fix-hint", .{s.path});
+    const link_path = try allocator.print("{s}/bin/ghost-fix-hint", .{s.path});
     defer allocator.free(link_path);
     try std.Io.Dir.symLinkAbsolute(
         std.Options.debug_io,
@@ -839,8 +839,8 @@ test "fix hint fires when a broken symlink is present and --fix is off" {
     }, &doctor.checks);
     doctor.emitFixHintIfNeeded(false);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--fix") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "--fix") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "safe-class fixes") != null);
 }
 
 test "fix hint fires when an orphaned store entry is present" {
@@ -853,7 +853,7 @@ test "fix hint fires when an orphaned store entry is present" {
     const sha = "0000000000000000000000000000000000000000000000000000000000000000";
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -861,7 +861,7 @@ test "fix hint fires when an orphaned store entry is present" {
         try store.claim(sha);
     }
 
-    const orphan = try std.fmt.allocPrint(allocator, "{s}/store/{s}", .{ s.path, sha });
+    const orphan = try allocator.print("{s}/store/{s}", .{ s.path, sha });
     defer allocator.free(orphan);
     try test_io.cwd().createDirPath(std.Options.debug_io, orphan);
 
@@ -881,7 +881,7 @@ test "fix hint fires when an orphaned store entry is present" {
     }, &doctor.checks);
     doctor.emitFixHintIfNeeded(false);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--fix") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "--fix") != null);
 }
 
 test "fix hint stays silent when --fix was already passed" {
@@ -891,7 +891,7 @@ test "fix hint stays silent when --fix was already passed" {
     var s = try Scratch.init(allocator, "fix_hint_already_on");
     defer s.deinit(allocator);
 
-    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-fix-already", .{s.path});
+    const link_path = try allocator.print("{s}/bin/ghost-fix-already", .{s.path});
     defer allocator.free(link_path);
     try std.Io.Dir.symLinkAbsolute(
         std.Options.debug_io,
@@ -916,7 +916,7 @@ test "fix hint stays silent when --fix was already passed" {
     }, &doctor.checks);
     doctor.emitFixHintIfNeeded(true);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "safe-class fixes") == null);
 }
 
 test "fix hint stays silent on a clean prefix" {
@@ -942,7 +942,7 @@ test "fix hint stays silent on a clean prefix" {
     }, &doctor.checks);
     doctor.emitFixHintIfNeeded(false);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "safe-class fixes") == null);
 }
 
 test "fix hint stays silent when only manual-class issues are present" {
@@ -955,7 +955,7 @@ test "fix hint stays silent when only manual-class issues are present" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -981,7 +981,7 @@ test "fix hint stays silent when only manual-class issues are present" {
     }, &doctor.checks);
     doctor.emitFixHintIfNeeded(false);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "safe-class fixes") == null);
 }
 
 test "resetFixHint clears state between runs so a clean walker stays silent" {
@@ -991,7 +991,7 @@ test "resetFixHint clears state between runs so a clean walker stays silent" {
     var s = try Scratch.init(allocator, "fix_hint_reset");
     defer s.deinit(allocator);
 
-    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-fix-reset", .{s.path});
+    const link_path = try allocator.print("{s}/bin/ghost-fix-reset", .{s.path});
     defer allocator.free(link_path);
     try std.Io.Dir.symLinkAbsolute(
         std.Options.debug_io,
@@ -1029,7 +1029,7 @@ test "resetFixHint clears state between runs so a clean walker stays silent" {
     }, &doctor.checks);
     doctor.emitFixHintIfNeeded(false);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "safe-class fixes") == null);
 }
 
 // --- SQLite integrity: fresh prefix vs unreadable database -------------
@@ -1059,26 +1059,26 @@ fn expectIntegrityErr(prefix: []const u8) !void {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckStatus.err_status, try runIntegrity(prefix, &captured));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot open database") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Cannot open database") != null);
 }
 
 test "SQLite integrity passes a fresh prefix with no db/ directory" {
     var s = try Scratch.init(testing.allocator, "integrity_fresh");
     defer s.deinit(testing.allocator);
     var dir_buf: [512]u8 = undefined;
-    try test_io.deleteDirAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    try test_io.deleteDirAbsolute(std.Options.debug_io, try std.mem.print(&dir_buf, "{s}/db", .{s.path}));
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckStatus.ok, try runIntegrity(s.path, &captured));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot open database") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Cannot open database") == null);
 }
 
 test "SQLite integrity fails a malt.db that is not a database" {
     var s = try Scratch.init(testing.allocator, "integrity_garbage");
     defer s.deinit(testing.allocator);
     var path_buf: [512]u8 = undefined;
-    const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.mem.print(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
 
@@ -1090,7 +1090,7 @@ test "SQLite integrity fails a db/ directory it cannot look into" {
     var s = try Scratch.init(testing.allocator, "integrity_walled");
     defer s.deinit(testing.allocator);
     var dir_buf: [512]u8 = undefined;
-    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.mem.print(&dir_buf, "{s}/db", .{s.path}));
     defer test_io.unwallDir(std.Options.debug_io, walled);
 
     try expectIntegrityErr(s.path);
@@ -1100,7 +1100,7 @@ test "SQLite integrity fails a db file where the directory should be" {
     var s = try Scratch.init(testing.allocator, "integrity_notdir");
     defer s.deinit(testing.allocator);
     var dir_buf: [512]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path});
+    const db_dir = try std.mem.print(&dir_buf, "{s}/db", .{s.path});
     try test_io.deleteDirAbsolute(std.Options.debug_io, db_dir);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_dir, .{});
     f.close(std.Options.debug_io);
@@ -1116,7 +1116,7 @@ test "SQLite integrity fails a prefix that is a symlink to nowhere" {
     try test_io.cwd().createDirPath(std.Options.debug_io, base);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     var link_buf: [512]u8 = undefined;
-    const link = try std.fmt.bufPrint(&link_buf, "{s}/prefix", .{base});
+    const link = try std.mem.print(&link_buf, "{s}/prefix", .{base});
     try test_io.symLinkAbsolute(std.Options.debug_io, "/nonexistent/malt", link, .{});
 
     try expectIntegrityErr(link);

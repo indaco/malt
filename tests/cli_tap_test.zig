@@ -21,7 +21,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     errdefer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -98,8 +98,7 @@ test "execute with --json output is a parseable JSON array" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -145,8 +144,7 @@ test "execute with --json on a populated DB emits one object per tap" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -180,11 +178,11 @@ test "execute with --json on a populated DB emits one object per tap" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try tap_cli.execute(&ctx, testing.allocator, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"user/repo\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"url\":\"https://github.com/user/homebrew-repo\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"commit_sha\":\"0123456789abcdef0123456789abcdef01234567\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"x/y\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"commit_sha\":null") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"user/repo\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"url\":\"https://github.com/user/homebrew-repo\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"commit_sha\":\"0123456789abcdef0123456789abcdef01234567\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"x/y\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"commit_sha\":null") != null);
     try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "["));
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]\n"));
 }
@@ -359,7 +357,7 @@ test "execute --host with --repo registers a non-github tap unpinned, no network
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "gitlab.com", "--repo", "grp/tap" });
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     const row = try readTapRow(db_path, "grp/tap");
     defer testing.allocator.free(row.host);
@@ -385,7 +383,7 @@ test "execute --host with --forge persists the explicit provider for a custom do
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try tap_cli.execute(&ctx, testing.allocator, &.{ "acme/tap", "--host", "code.acme.com", "--forge", "gitlab", "--repo", "acme/tap" });
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     const row = try readTapRow(db_path, "acme/tap");
     defer testing.allocator.free(row.host);
@@ -412,7 +410,7 @@ test "execute --host with --forge gitea persists the provider for a self-hosted 
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try tap_cli.execute(&ctx, testing.allocator, &.{ "team/tap", "--host", "git.example.org", "--forge", "gitea", "--repo", "team/tap" });
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     const stored_forge = try readTapForge(db_path, "team/tap");
     defer if (stored_forge) |f| testing.allocator.free(f);
@@ -478,7 +476,7 @@ test "execute --url derives and persists (host, owner, repo) unpinned" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try tap_cli.execute(&ctx, testing.allocator, &.{ "mygrp/mytap", "--url", "https://codeberg.org/o/r" });
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     const row = try readTapRow(db_path, "mygrp/mytap");
     defer testing.allocator.free(row.host);
@@ -508,11 +506,11 @@ test "execute --host without an explicit repo fails with a hint, not a homebrew-
         error.Aborted,
         tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "gitlab.com" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "needs an explicit repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "needs an explicit repo") != null);
     // The same error also fires on github.com for a name that cannot be
     // canonicalised, so the hint must qualify the default rather than
     // claim it is a github.com-only rule.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "well-formed github.com tap name") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "well-formed github.com tap name") != null);
 }
 
 test "execute rejects a --host that carries a scheme or path" {
@@ -533,7 +531,7 @@ test "execute rejects a --host that carries a scheme or path" {
         error.Aborted,
         tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "https://gitlab.com", "--repo", "grp/tap" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid --host") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Invalid --host") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +671,7 @@ test "execute rejects a bare --refresh instead of listing taps" {
     for ([_][]const u8{ "--refresh", "--refresh=" }) |flag| {
         try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{flag}));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--all") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--all") != null);
 }
 
 test "execute rejects --all without --refresh instead of running the batch refresh" {
@@ -698,8 +696,8 @@ test "execute rejects --all without --refresh instead of running the batch refre
     try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--all", "user/repo" }));
     // Same refusal under untap, rather than blaming a --refresh never passed.
     try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, &.{"--all"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--all pairs with --refresh") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "only valid with") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "--all pairs with --refresh") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "only valid with") == null);
 }
 
 test "executeUntap rejects --refresh as tap-only, with or without a slug" {
@@ -729,8 +727,8 @@ test "executeUntap rejects --refresh as tap-only, with or without a slug" {
     for (cases) |argv| {
         captured.clearRetainingCapacity();
         try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, argv));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "--refresh is only valid with `mt tap`") != null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "<user>/<repo>") == null);
+        try testing.expect(std.mem.find(u8, captured.items, "--refresh is only valid with `mt tap`") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "<user>/<repo>") == null);
     }
 }
 
@@ -758,7 +756,7 @@ test "execute rejects --refresh with both a tap and --all instead of dropping th
     for (cases) |argv| {
         captured.clearRetainingCapacity();
         try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "not both") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "not both") != null);
     }
 }
 
@@ -785,7 +783,7 @@ test "execute rejects --pin combined with --refresh instead of dropping the refr
     for (cases) |argv| {
         captured.clearRetainingCapacity();
         try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "--pin cannot be combined with --refresh") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "--pin cannot be combined with --refresh") != null);
     }
 }
 
@@ -813,16 +811,16 @@ test "execute rejects a second tap argument instead of dropping it" {
     for (tap_cases) |argv| {
         captured.clearRetainingCapacity();
         try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "Unexpected argument 'c/d'") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "Unexpected argument 'c/d'") != null);
     }
     // brew's `tap <slug> <url>` form: point at --url, not at "one tap".
     captured.clearRetainingCapacity();
     try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "a/b", "https://example.com/a/b" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--url") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "one tap per command") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "--url") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "one tap per command") == null);
     captured.clearRetainingCapacity();
     try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, &.{ "a/b", "c/d" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unexpected argument 'c/d'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unexpected argument 'c/d'") != null);
 }
 
 test "execute --refresh --all refuses offline instead of exiting clean with every row failed" {
@@ -874,7 +872,7 @@ test "execute rejects --repo without a positional slug" {
         error.Aborted,
         tap_cli.execute(&ctx, testing.allocator, &.{ "--repo", "aeroxy/ast-outline" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Usage:") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Usage:") != null);
 }
 
 test "execute rejects --repo combined with --refresh" {
@@ -898,7 +896,7 @@ test "execute rejects --repo combined with --refresh" {
             "user/repo", "--repo", "user/repo", "--refresh",
         }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--repo cannot be combined") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--repo cannot be combined") != null);
 }
 
 test "execute rejects --force without --repo (no-op flag, surface the mistake)" {
@@ -920,7 +918,7 @@ test "execute rejects --force without --repo (no-op flag, surface the mistake)" 
         error.Aborted,
         tap_cli.execute(&ctx, testing.allocator, &.{ "user/repo", "--force" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--force is only valid") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--force is only valid") != null);
 }
 
 test "execute reports a clean error on a malformed --repo value" {
@@ -942,7 +940,7 @@ test "execute reports a clean error on a malformed --repo value" {
         error.Aborted,
         tap_cli.execute(&ctx, testing.allocator, &.{ "user/repo", "--repo", "no-slash" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid --repo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Invalid --repo") != null);
 }
 
 test "execute rejects --repo over an existing row that pins a different pair" {
@@ -954,8 +952,7 @@ test "execute rejects --repo over an existing row that pins a different pair" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -989,7 +986,7 @@ test "execute rejects --repo over an existing row that pins a different pair" {
             "aeroxy/ast-outline", "--repo", "aeroxy/ast-outline",
         }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--force") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--force") != null);
 }
 
 test "execute --repo --force rebinds the row and clears the stale pin before any HTTP work" {
@@ -1003,8 +1000,7 @@ test "execute --repo --force rebinds the row and clears the stale pin before any
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -1044,7 +1040,7 @@ test "execute --repo --force rebinds the row and clears the stale pin before any
 
     // The "needs refresh" warning fires only when rebind landed before
     // the resolve failure — pinning the message guards the ordering.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Rebind applied with no pin") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Rebind applied with no pin") != null);
 
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1075,8 +1071,7 @@ test "execute --refresh --all with only failed rows does not gate the apply" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -1118,7 +1113,7 @@ test "tapAdd refuses a flag-shaped name instead of running it as a flag" {
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const pinned_sha = "0123456789abcdef0123456789abcdef01234567";
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     {
         var db = try malt.sqlite.Database.open(db_path);
@@ -1138,7 +1133,7 @@ test "tapAdd refuses a flag-shaped name instead of running it as a flag" {
     for ([_][]const u8{ "--refresh=user/repo", "--refresh", "--all" }) |name| {
         captured.clearRetainingCapacity();
         try testing.expectError(error.Aborted, tap_cli.tapAdd(&ctx, testing.allocator, name));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid tap") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "Invalid tap") != null);
     }
 
     var db = try malt.sqlite.Database.open(db_path);

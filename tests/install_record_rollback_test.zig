@@ -15,11 +15,11 @@ const local = malt.install_local;
 const io = std.Options.debug_io;
 
 fn makeKeg(prefix: []const u8, version: []const u8) ![]u8 {
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tool/{s}", .{ prefix, version });
-    const bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg});
+    const keg = try testing.allocator.print("{s}/Cellar/tool/{s}", .{ prefix, version });
+    const bin = try testing.allocator.print("{s}/bin", .{keg});
     defer testing.allocator.free(bin);
     try test_io.cwd().createDirPath(io, bin);
-    const exe = try std.fmt.allocPrint(testing.allocator, "{s}/tool", .{bin});
+    const exe = try testing.allocator.print("{s}/tool", .{bin});
     defer testing.allocator.free(exe);
     const f = try test_io.createFileAbsolute(io, exe, .{});
     f.close(io);
@@ -50,14 +50,14 @@ fn exists(path: []const u8) bool {
 /// Where `<prefix>/opt/tool` points, or "" when the link is gone.
 fn optTarget(prefix: []const u8, buf: []u8) []const u8 {
     var p: [512]u8 = undefined;
-    const link = std.fmt.bufPrint(&p, "{s}/opt/tool", .{prefix}) catch return "";
+    const link = std.mem.print(&p, "{s}/opt/tool", .{prefix}) catch return "";
     return test_io.readLinkAbsolute(io, link, buf) catch "";
 }
 
 /// Where `<prefix>/bin/tool` points, or "" when the link is gone.
 fn binTarget(prefix: []const u8, buf: []u8) []const u8 {
     var p: [512]u8 = undefined;
-    const link = std.fmt.bufPrint(&p, "{s}/bin/tool", .{prefix}) catch return "";
+    const link = std.mem.print(&p, "{s}/bin/tool", .{prefix}) catch return "";
     return test_io.readLinkAbsolute(io, link, buf) catch "";
 }
 
@@ -76,14 +76,14 @@ test "a failed same-version --force record keeps the keg the prior row points at
 
     // The pre-link sweep a same-version `--force` runs before recording.
     install.unlinkSameVersionKegLinks(&linker, &db, "tool", keg);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings("", binTarget(prefix, &buf));
 
     install.dropUnrecordedKeg(io, &db, prefix, "tool", "1.0", keg);
     install.relinkKegs(&db, &linker, "tool");
 
     try testing.expect(exists(keg));
-    try testing.expect(std.mem.indexOf(u8, binTarget(prefix, &buf), "Cellar/tool/1.0") != null);
+    try testing.expect(std.mem.find(u8, binTarget(prefix, &buf), "Cellar/tool/1.0") != null);
 }
 
 test "a failed fresh record removes the keg dir no row points at" {
@@ -124,8 +124,8 @@ test "a failed other-version --force record drops the new keg and relinks the pr
 
     try testing.expect(!exists(new_keg));
     try testing.expect(exists(old_keg));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, binTarget(prefix, &buf), "Cellar/tool/1.0") != null);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try testing.expect(std.mem.find(u8, binTarget(prefix, &buf), "Cellar/tool/1.0") != null);
 }
 
 /// Replays `materializeRubyFormula`'s transaction for a tap `--force` over
@@ -184,9 +184,9 @@ test "failed commit keeps the other-version keg a tap --force reinstall was repl
     try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
     try testing.expect(exists(old_keg));
     try testing.expect(!exists(new_keg));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, binTarget(prefix, &buf), "Cellar/tool/1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, optTarget(prefix, &buf), "Cellar/tool/1.0") != null);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try testing.expect(std.mem.find(u8, binTarget(prefix, &buf), "Cellar/tool/1.0") != null);
+    try testing.expect(std.mem.find(u8, optTarget(prefix, &buf), "Cellar/tool/1.0") != null);
 }
 
 test "committed tap --force reinstall drops the other-version keg and its row" {
@@ -213,8 +213,8 @@ test "committed tap --force reinstall drops the other-version keg and its row" {
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
     try testing.expect(!exists(old_keg));
     try testing.expect(exists(new_keg));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, optTarget(prefix, &buf), "Cellar/tool/1.1") != null);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try testing.expect(std.mem.find(u8, optTarget(prefix, &buf), "Cellar/tool/1.1") != null);
 }
 
 test "a committed install without --force keeps other versions and drops the parked keg" {
@@ -225,7 +225,7 @@ test "a committed install without --force keeps other versions and drops the par
     defer testing.allocator.free(old_keg);
     const new_keg = try makeKeg(prefix, "1.1");
     defer testing.allocator.free(new_keg);
-    const aside = try std.fmt.allocPrint(testing.allocator, "{s}/tmp/aside", .{prefix});
+    const aside = try testing.allocator.print("{s}/tmp/aside", .{prefix});
     defer testing.allocator.free(aside);
     try test_io.cwd().createDirPath(io, aside);
 
@@ -247,7 +247,7 @@ test "a failed commit keeps the parked keg so it can be put back" {
     defer test_io.deleteTreeAbsolute(io, prefix) catch {};
     const new_keg = try makeKeg(prefix, "1.1");
     defer testing.allocator.free(new_keg);
-    const aside = try std.fmt.allocPrint(testing.allocator, "{s}/tmp/aside", .{prefix});
+    const aside = try testing.allocator.print("{s}/tmp/aside", .{prefix});
     defer testing.allocator.free(aside);
     try test_io.cwd().createDirPath(io, aside);
 

@@ -26,15 +26,15 @@ fn makePrefix(suffix: []const u8, with_ca: bool, with_cert: bool) ![]const u8 {
     const prefix = try uniquePrefix(suffix);
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
     if (with_ca) {
-        const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/ca-certificates", .{prefix});
+        const opt = try testing.allocator.print("{s}/opt/ca-certificates", .{prefix});
         defer testing.allocator.free(opt);
         try test_io.cwd().createDirPath(std.Options.debug_io, opt);
     }
     if (with_cert) {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@3", .{prefix});
+        const dir = try testing.allocator.print("{s}/etc/openssl@3", .{prefix});
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-        const cert = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+        const cert = try testing.allocator.print("{s}/cert.pem", .{dir});
         defer testing.allocator.free(cert);
         (try test_io.createFileAbsolute(std.Options.debug_io, cert, .{})).close(std.Options.debug_io);
     }
@@ -108,9 +108,9 @@ test "ca-certificates installed + cert.pem present: a clean ok row" {
     const result = sslRun(ctxFor(prefix), &buf);
 
     try testing.expectEqual(doctor.CheckResult.ok, result);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "SSL CA bundle") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "SSL CA bundle") != null);
     // The clean row carries no remediation detail.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "isn't linked") == null);
 }
 
 test "ca-certificates installed + cert.pem missing: warns about the unlinked bundle" {
@@ -125,7 +125,7 @@ test "ca-certificates installed + cert.pem missing: warns about the unlinked bun
     const result = sslRun(ctxFor(prefix), &buf);
 
     try testing.expectEqual(doctor.CheckResult.warn_status, result);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "isn't linked") != null);
 }
 
 test "a max-length prefix still verifies the bundle instead of reporting ok" {
@@ -133,27 +133,27 @@ test "a max-length prefix still verifies the bundle instead of reporting ok" {
     // does not would skip the check and read as a clean row.
     var p = try test_io.LongPrefix.init(testing.allocator, "doctor_ssl", malt.prefix_path.max_prefix_len);
     defer p.deinit(testing.allocator);
-    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/ca-certificates", .{p.path});
+    const opt = try testing.allocator.print("{s}/opt/ca-certificates", .{p.path});
     defer testing.allocator.free(opt);
     try test_io.cwd().createDirPath(std.Options.debug_io, opt);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(p.path), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "isn't linked") != null);
 }
 
 // Homebrew moves dependents from openssl@3 to openssl@4, so the check
 // accepts the bundle of either major and names the keg that is installed.
 
 fn mkdirIn(prefix: []const u8, sub: []const u8) !void {
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    const dir = try testing.allocator.print("{s}{s}", .{ prefix, sub });
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 }
 
 fn touchIn(prefix: []const u8, sub: []const u8) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    const path = try testing.allocator.print("{s}{s}", .{ prefix, sub });
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 }
@@ -169,7 +169,7 @@ test "an openssl@4-only prefix with its bundle linked is a clean ok row" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.ok, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "isn't linked") == null);
 }
 
 test "openssl@4 installed with no bundle: the warning names openssl@4" {
@@ -183,7 +183,7 @@ test "openssl@4 installed with no bundle: the warning names openssl@4" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
 }
 
 test "openssl@4 installed with only a leftover openssl@3 bundle: still warns about openssl@4" {
@@ -197,7 +197,7 @@ test "openssl@4 installed with only a leftover openssl@3 bundle: still warns abo
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
 }
 
 test "openssl@3 installed with no bundle: the warning names openssl@3" {
@@ -209,7 +209,7 @@ test "openssl@3 installed with no bundle: the warning names openssl@3" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
 }
 
 test "both majors installed, only openssl@3 linked: warns about openssl@4" {
@@ -225,7 +225,7 @@ test "both majors installed, only openssl@3 linked: warns about openssl@4" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
 }
 
 test "both majors installed and linked: a clean ok row" {
@@ -240,7 +240,7 @@ test "both majors installed and linked: a clean ok row" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.ok, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "isn't linked") == null);
 }
 
 test "both majors installed, only openssl@4 linked: warns about openssl@3" {
@@ -257,7 +257,7 @@ test "both majors installed, only openssl@4 linked: warns about openssl@3" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
 }
 
 test "no major installed with only a plain-file leftover: warns about openssl@4" {
@@ -269,7 +269,7 @@ test "no major installed with only a plain-file leftover: warns about openssl@4"
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
 }
 
 test "no major installed with a live leftover link: a clean ok row" {
@@ -280,12 +280,12 @@ test "no major installed with a live leftover link: a clean ok row" {
     try mkdirIn(prefix, "/etc/ca-certificates");
     try touchIn(prefix, "/etc/ca-certificates/cert.pem");
     try mkdirIn(prefix, "/etc/openssl@3");
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@3/cert.pem", .{prefix});
+    const link = try testing.allocator.print("{s}/etc/openssl@3/cert.pem", .{prefix});
     defer testing.allocator.free(link);
     try test_io.cwd().symLink(std.Options.debug_io, "../ca-certificates/cert.pem", link, .{});
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.ok, sslRun(ctxFor(prefix), &buf));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "isn't linked") == null);
 }

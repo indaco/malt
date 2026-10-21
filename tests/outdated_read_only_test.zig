@@ -13,7 +13,7 @@ const test_io = @import("test_io");
 const pin_writers = [_][]const u8{ "updateHead(", "tap_mod.add(" };
 
 fn stripLineComment(line: []const u8) []const u8 {
-    const idx = std.mem.indexOf(u8, line, "//") orelse return line;
+    const idx = std.mem.find(u8, line, "//") orelse return line;
     return line[0..idx];
 }
 
@@ -39,7 +39,7 @@ test "no tap pin writer under src/cli/outdated/" {
             lineno += 1;
             const stripped = stripLineComment(line);
             for (pin_writers) |w| {
-                if (std.mem.indexOf(u8, stripped, w) == null) continue;
+                if (std.mem.find(u8, stripped, w) == null) continue;
                 std.debug.print("read-only outdated writes the tap pin: src/cli/outdated/{s}:{d}: {s}\n", .{ entry.path, lineno, line });
                 found = true;
             }

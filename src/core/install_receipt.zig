@@ -139,7 +139,7 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
                 else => return ParseError.InvalidReceipt,
             };
             // No formula name holds a space, so one can only be a corrupt entry.
-            if (name.len == 0 or std.mem.indexOfScalar(u8, name, ' ') != null or
+            if (name.len == 0 or std.mem.findScalar(u8, name, ' ') != null or
                 path_component.hasControlByte(name)) return ParseError.InvalidReceipt;
             const owned = a.dupe(u8, name) catch return ParseError.OutOfMemory;
             list.append(a, owned) catch return ParseError.OutOfMemory;
@@ -432,7 +432,7 @@ test "parseInstallReceipt keeps the versions real formulae ship" {
     const ok = [_][]const u8{ "3.2.1", "1.2.3_1", "3.0.16", "2024-01-02" };
     for (ok) |v| {
         var buf: [128]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buf, "{{\"source\":{{\"versions\":{{\"stable\":\"{s}\"}}}}}}", .{v});
+        const json = try std.mem.print(&buf, "{{\"source\":{{\"versions\":{{\"stable\":\"{s}\"}}}}}}", .{v});
         var r = try parseInstallReceipt(std.testing.allocator, json);
         defer r.deinit();
         try std.testing.expectEqualStrings(v, r.version);

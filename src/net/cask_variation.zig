@@ -14,7 +14,7 @@ pub fn runningMacosMajor() ?u32 {
     var len: usize = buf.len;
     if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return null;
     const text = std.mem.sliceTo(buf[0..len], 0);
-    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
+    const major = text[0 .. std.mem.findScalar(u8, text, '.') orelse text.len];
     return std.fmt.parseInt(u32, major, 10) catch null;
 }
 
@@ -37,8 +37,8 @@ pub fn macosCodename(major: u32) ?[]const u8 {
 /// Apple silicon, the bare codename on Intel.
 pub fn variationKey(buf: []u8, major: u32) ?[]const u8 {
     const codename = macosCodename(major) orelse return null;
-    const prefix: []const u8 = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, codename }) catch null;
+    const prefix: []const u8 = if (builtin.target.cpu.arch == .aarch64) "arm64_" else "";
+    return std.mem.print(buf, "{s}{s}", .{ prefix, codename }) catch null;
 }
 
 /// macOS majors that publish bottle tags, newest first.
@@ -157,7 +157,7 @@ pub fn osSupported(requirement: ?Requirement, macos_major: ?u32) bool {
 fn majorOf(v: std.json.Value) ?u32 {
     if (v != .string) return null;
     const text = v.string;
-    const head = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
+    const head = text[0 .. std.mem.findScalar(u8, text, '.') orelse text.len];
     return std.fmt.parseInt(u32, head, 10) catch null;
 }
 
@@ -231,7 +231,7 @@ test "an empty macos clause, an unknown major, or no clause gates nothing" {
 
 test "bottlePourable refuses only a bottle map with nothing this macOS can load" {
     const a = std.testing.allocator;
-    const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (builtin.target.cpu.arch == .aarch64) "arm64_" else "";
     var newer = try std.json.parseFromSlice(std.json.Value, a, "{\"stable\":{\"files\":{\"" ++ arch ++ "tahoe\":{},\"" ++ arch ++ "sequoia\":{}}}}", .{});
     defer newer.deinit();
     try std.testing.expect(!bottlePourable(newer.value, 14));
@@ -250,14 +250,14 @@ test "bottlePourable refuses only a bottle map with nothing this macOS can load"
 }
 
 test "tagMajor maps this arch's tags back to their macOS major" {
-    const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+    const arch = if (builtin.target.cpu.arch == .aarch64) "arm64_" else "";
     try std.testing.expectEqual(@as(?u32, 27), tagMajor(arch ++ "golden_gate"));
     try std.testing.expectEqual(@as(?u32, 26), tagMajor(arch ++ "tahoe"));
     try std.testing.expectEqual(@as(?u32, 11), tagMajor(arch ++ "big_sur"));
 }
 
 test "tagMajor gives no major for tags this host could never have poured" {
-    const other = if (builtin.cpu.arch == .aarch64) "golden_gate" else "arm64_golden_gate";
+    const other = if (builtin.target.cpu.arch == .aarch64) "golden_gate" else "arm64_golden_gate";
     try std.testing.expectEqual(@as(?u32, null), tagMajor(other));
     // `all` runs everywhere, so it carries no OS floor.
     try std.testing.expectEqual(@as(?u32, null), tagMajor("all"));

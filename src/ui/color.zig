@@ -858,9 +858,9 @@ pub fn parseOsc11Response(bytes: []const u8) ?Rgb {
     var rest = bytes[osc.len..];
 
     // Strip the terminator (BEL 0x07 or ST ESC\\).
-    if (std.mem.indexOfScalar(u8, rest, 0x07)) |p| {
+    if (std.mem.findScalar(u8, rest, 0x07)) |p| {
         rest = rest[0..p];
-    } else if (std.mem.indexOf(u8, rest, "\x1b\\")) |p| {
+    } else if (std.mem.find(u8, rest, "\x1b\\")) |p| {
         rest = rest[0..p];
     } else return null;
 
@@ -1120,7 +1120,7 @@ pub const ColorDepth = enum(u8) {
 fn depthFromEnv(colorterm: ?[]const u8, term: ?[]const u8) ColorDepth {
     if (truecolorFromEnv(colorterm)) return .truecolor;
     const t = term orelse return .ansi16;
-    return if (std.mem.indexOf(u8, t, "256color") != null) .ansi256 else .ansi16;
+    return if (std.mem.find(u8, t, "256color") != null) .ansi256 else .ansi16;
 }
 
 test "depthFromEnv: COLORTERM wins, then a 256color TERM, else 16" {

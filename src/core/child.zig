@@ -283,20 +283,20 @@ test "runOrFailInDir anchors relative writes to the open directory" {
     defer threaded.deinit();
     const io = threaded.io();
     const a = std.testing.allocator;
-    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_child_cwd_{d}", .{std.c.getpid()}, 0);
+    const base = try a.printSentinel("/tmp/malt_child_cwd_{d}", .{std.c.getpid()}, 0);
     defer a.free(base);
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
-    const work = try std.fmt.allocPrint(a, "{s}/work", .{base});
+    const work = try a.print("{s}/work", .{base});
     defer a.free(work);
-    const held = try std.fmt.allocPrint(a, "{s}/held", .{base});
+    const held = try a.print("{s}/held", .{base});
     defer a.free(held);
-    const outside = try std.fmt.allocPrint(a, "{s}/outside", .{base});
+    const outside = try a.print("{s}/outside", .{base});
     defer a.free(outside);
-    const held_marker = try std.fmt.allocPrint(a, "{s}/marker", .{held});
+    const held_marker = try a.print("{s}/marker", .{held});
     defer a.free(held_marker);
-    const outside_marker = try std.fmt.allocPrint(a, "{s}/marker", .{outside});
+    const outside_marker = try a.print("{s}/marker", .{outside});
     defer a.free(outside_marker);
 
     try std.Io.Dir.cwd().createDirPath(io, work);

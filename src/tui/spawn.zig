@@ -457,7 +457,7 @@ test "readJson captures the child's stdout for the parser" {
     defer t.deinit();
     const out = try readJson(t.io(), testing.allocator, &.{ "/bin/echo", "hello-json" });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "hello-json") != null);
+    try testing.expect(std.mem.find(u8, out, "hello-json") != null);
 }
 
 test "readJson errors on an empty document so a parser never sees half a doc" {
@@ -488,7 +488,7 @@ test "readDoctorJson returns the captured document on a successful read" {
     defer t.deinit();
     const out = (try readDoctorJson(t.io(), testing.allocator, &.{ "/bin/echo", "{\"checks\":[]}" })).?;
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "checks") != null);
+    try testing.expect(std.mem.find(u8, out, "checks") != null);
 }
 
 test "readDoctorJson maps an exit-with-no-output to null (fresh prefix)" {

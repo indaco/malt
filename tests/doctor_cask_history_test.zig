@@ -28,11 +28,11 @@ const Scratch = struct {
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "db", "cache/Cask", "Caskroom" };
         for (subs) |sd| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, sd });
+            const dir = try allocator.print("{s}/{s}", .{ path, sd });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
-        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        const cache_dir = try allocator.print("{s}/cache", .{path});
         return .{ .path = path, .cache_dir = cache_dir };
     }
 
@@ -46,7 +46,7 @@ const Scratch = struct {
     /// disk artefacts so the walker reports a deterministic byte total.
     fn seedTwoRetainedAlphaVersions(self: *Scratch, allocator: std.mem.Allocator) !void {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -61,14 +61,14 @@ const Scratch = struct {
             \\       ('alpha', '2.0', 'https://x.invalid/a-2.0.dmg', 'dmg');
         );
 
-        const app_1_0 = try std.fmt.allocPrint(allocator, "{s}/Caskroom/alpha/1.0/Alpha.app", .{self.path});
+        const app_1_0 = try allocator.print("{s}/Caskroom/alpha/1.0/Alpha.app", .{self.path});
         defer allocator.free(app_1_0);
-        try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(app_1_0).?);
+        try test_io.cwd().createDirPath(std.Options.debug_io, std.Io.Dir.path.dirname(app_1_0).?);
         const f1 = try test_io.createFileAbsolute(std.Options.debug_io, app_1_0, .{ .truncate = true });
         defer f1.close(std.Options.debug_io);
         try f1.writeStreamingAll(std.Options.debug_io, &@as([64]u8, @splat('x')));
 
-        const cache_1_5 = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/alpha-1.5.dmg", .{self.path});
+        const cache_1_5 = try allocator.print("{s}/cache/Cask/alpha-1.5.dmg", .{self.path});
         defer allocator.free(cache_1_5);
         const f2 = try test_io.createFileAbsolute(std.Options.debug_io, cache_1_5, .{ .truncate = true });
         defer f2.close(std.Options.debug_io);
@@ -98,10 +98,10 @@ test "emitCaskHistoryReport: default mode prints a one-line summary on stderr" {
 
     doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path, s.cache_dir);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Retained cask versions: 2") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "mt purge --old-versions") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Retained cask versions: 2") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "mt purge --old-versions") != null);
     // Default mode must not list per-entry rows — those belong to --verbose.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "        alpha 1.0") == null);
 }
 
 test "emitCaskHistoryReport: empty case stays silent on stderr in human mode" {
@@ -139,9 +139,9 @@ test "emitCaskHistoryReport: --verbose lists every retained (token version) unde
 
     doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path, s.cache_dir);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Retained cask versions: 2") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.5") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Retained cask versions: 2") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "        alpha 1.0") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "        alpha 1.5") != null);
 }
 
 test "emitDoctorJson: the merged --json carries the cask_history payload on stdout" {
@@ -167,12 +167,12 @@ test "emitDoctorJson: the merged --json carries the cask_history payload on stdo
     // The cask_history data is now one member of the single merged document.
     doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, s.cache_dir, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schema_version\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"cask_history\":") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"retained_versions\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"bytes\":") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"schema_version\":1") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"cask_history\":") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"retained_versions\":2") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"bytes\":") != null);
     // JSON routes the report away from stderr — no human summary line.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Retained cask versions") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Retained cask versions") == null);
 }
 
 test "emitCaskHistoryReport: read-only — cask_versions rows survive the walk" {
@@ -204,7 +204,7 @@ test "emitCaskHistoryReport: read-only — cask_versions rows survive the walk" 
 fn countCaskVersionRows(allocator: std.mem.Allocator, prefix: []const u8) !i64 {
     _ = allocator;
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("SELECT COUNT(*) FROM cask_versions;");

@@ -29,7 +29,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) []const u8 {
-        return std.fmt.allocPrint(self.arena.allocator(), "{s}/{s}", .{ self.base, sub }) catch @panic("OOM");
+        return self.arena.allocator().print("{s}/{s}", .{ self.base, sub }) catch @panic("OOM");
     }
 
     fn deinit(self: *Fixture) void {
@@ -270,7 +270,7 @@ test "extractTarGz stops scanning at end-of-archive and ignores trailing garbage
     // A single non-zero trailer is enough: the next 512-byte chunk read
     // by preScanTarGz is no longer all-zero, so a `continue` past the
     // first zero block would parse it as a header and trip the checksum.
-    const append_garbage = try std.fmt.allocPrint(fx.arena.allocator(), "printf 'GARBAGE!' >> '{s}'", .{uncompressed});
+    const append_garbage = try fx.arena.allocator().print("printf 'GARBAGE!' >> '{s}'", .{uncompressed});
     try runCmd(&.{ "sh", "-c", append_garbage });
     try runCmd(&.{ "gzip", "-f", uncompressed });
 
@@ -492,7 +492,7 @@ test "extractZip rejects tar-slip and leaves dest untouched" {
     try test_io.makeDirAbsolute(std.Options.debug_io, dest);
 
     const archive_path = fx.p("hostile.zip");
-    const script = try std.fmt.allocPrint(fx.arena.allocator(), "import zipfile\n" ++
+    const script = try fx.arena.allocator().print("import zipfile\n" ++
         "with zipfile.ZipFile('{s}', 'w') as z:\n" ++
         "    z.writestr('good.txt', b'safe')\n" ++
         "    z.writestr('../escape.txt', b'hostile')\n", .{archive_path});

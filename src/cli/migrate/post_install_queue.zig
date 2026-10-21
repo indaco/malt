@@ -242,7 +242,7 @@ test "Queue.add serialises concurrent producers without losing tasks" {
             var buf: [64]u8 = undefined;
             var i: usize = 0;
             while (i < tasks_per_thread) : (i += 1) {
-                const name = std.fmt.bufPrint(&buf, "t{d}-{d}", .{ thread_id, i }) catch return;
+                const name = std.mem.print(&buf, "t{d}-{d}", .{ thread_id, i }) catch return;
                 queue.add(std.Options.debug_io, name, "0", "{}") catch return;
             }
         }

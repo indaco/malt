@@ -272,7 +272,7 @@ test "more than max_themes is rejected before any colour work" {
     var i: usize = 0;
     while (i < ct.max_themes + 1) : (i += 1) {
         const sep = if (i == 0) "" else ",";
-        const chunk = try std.fmt.bufPrint(&tmp, "{s}\"t{d}\":{{\"polarity\":\"dark\",{s}}}", .{ sep, i, ok_roles_256 });
+        const chunk = try std.mem.print(&tmp, "{s}\"t{d}\":{{\"polarity\":\"dark\",{s}}}", .{ sep, i, ok_roles_256 });
         try buf.appendSlice(a, chunk);
     }
     try buf.appendSlice(a, "}}");

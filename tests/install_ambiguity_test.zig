@@ -54,10 +54,10 @@ fn uniquePrefixZ(tag: []const u8) ![:0]const u8 {
 }
 
 fn seedCacheFile(prefix: []const u8, rel: []const u8, body: []const u8) !void {
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, rel });
+    const path = try testing.allocator.print("{s}/{s}", .{ cache_api, rel });
     defer testing.allocator.free(path);
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
@@ -97,7 +97,7 @@ test "ambiguity warning fires when both formula and cask are cached" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) != null);
+    try testing.expect(std.mem.find(u8, captured.items, ambiguity_marker) != null);
 }
 
 test "ambiguity warning is silent when no cask cache is present" {
@@ -128,7 +128,7 @@ test "ambiguity warning is silent when no cask cache is present" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
+    try testing.expect(std.mem.find(u8, captured.items, ambiguity_marker) == null);
 }
 
 // Seeds `wget` installed as both kinds plus a formula-only `jq`, all cached,
@@ -149,10 +149,10 @@ fn reinstallCaptured(captured: *std.ArrayList(u8), tag: []const u8, names: []con
         "cask_wget.json",
         "{\"token\":\"wget\",\"url\":\"https://example.com/x.dmg\",\"version\":\"1\"}",
     );
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
         var db = try malt.sqlite.Database.open(db_path);
@@ -189,7 +189,7 @@ test "reinstall of a name installed as both warns once, not again from install" 
     defer captured.deinit(testing.allocator);
     try reinstallCaptured(&captured, "reinstall", &.{"wget"});
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "Treating wget as a formula"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
+    try testing.expect(std.mem.find(u8, captured.items, ambiguity_marker) == null);
 }
 
 test "reinstall warns for every name installed as both, not just the first" {
@@ -197,6 +197,6 @@ test "reinstall warns for every name installed as both, not just the first" {
     defer captured.deinit(testing.allocator);
     try reinstallCaptured(&captured, "reinstall_multi", &.{ "jq", "wget" });
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "Treating wget as a formula"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Treating jq") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Treating jq") == null);
+    try testing.expect(std.mem.find(u8, captured.items, ambiguity_marker) == null);
 }

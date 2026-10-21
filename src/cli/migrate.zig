@@ -613,7 +613,7 @@ pub fn buildDryRunJson(
     try w.writeAll(",\"kegs\":");
     try output.jsonStringArray(w, keg_names);
     var tail: [64]u8 = undefined;
-    const tail_str = try std.fmt.bufPrint(&tail, ",\"count\":{d}", .{keg_names.len});
+    const tail_str = try std.mem.print(&tail, ",\"count\":{d}", .{keg_names.len});
     try w.writeAll(tail_str);
     try output.jsonTimeSuffix(w, start_ts);
     try w.writeAll("}\n");
@@ -656,7 +656,7 @@ pub fn buildSummaryJson(
     }
     try w.writeAll("]");
     var counts_buf: [320]u8 = undefined;
-    const counts = try std.fmt.bufPrint(
+    const counts = try std.mem.print(
         &counts_buf,
         ",\"counts\":{{\"migrated\":{d},\"skipped_installed\":{d},\"skipped_post_install\":{d},\"skipped_no_bottle\":{d},\"failed\":{d},\"cancelled\":{d}}}",
         .{
@@ -700,7 +700,7 @@ fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
 
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
+        const dir_path = std.mem.print(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
         std.Io.Dir.createDirAbsolute(ctx.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,

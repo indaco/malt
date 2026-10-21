@@ -134,7 +134,7 @@ test "cacheDirFrom: precedence MALT_CACHE > XDG_CACHE_HOME > HOME" {
 }
 
 test "cachePathFrom: appends version-notify.json to the resolved dir" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = notifier.cachePathFrom(.{ .malt_cache = "/cache" }, &buf) orelse
         return error.TestExpectedNonNull;
     try testing.expectEqualStrings("/cache/version-notify.json", got);
@@ -188,8 +188,8 @@ test "writeFailureMarker preserves prior cache and bumps last_attempt" {
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
 
     // Seed a successful cache, then simulate a probe failure.
     try notifier.writeCache(io, path, .{
@@ -221,7 +221,7 @@ test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
 
     const dir_base = try test_io.uniqueTempPath(allocator, "notify", "check");
     defer allocator.free(dir_base);
-    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    const dir = try allocator.printSentinel("{s}", .{dir_base}, 0);
     defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
@@ -230,8 +230,8 @@ test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
     _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
     defer _ = c_env.unsetenv("MALT_CACHE");
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
 
     // Pre-seed a stale cache: notifier observed v0.10.1 long ago and the
     // user has since installed it elsewhere, so current_seen drifted.
@@ -261,8 +261,8 @@ test "writeFailureMarker on a first-ever run records only the failed attempt" {
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
 
     notifier.writeFailureMarker(io, path, null, 500, "0.10.0");
 
@@ -292,8 +292,8 @@ test "writeCache + readCache full round-trip on disk" {
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
 
     try notifier.writeCache(io, path, .{
         .checked_at = 42,
@@ -320,9 +320,9 @@ test "writeCache creates the parent directory when absent" {
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // Three-deep path to confirm `createDirPath` recurses (not just the leaf).
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/a/b/c/version-notify.json", .{dir});
+    const path = try std.mem.print(&path_buf, "{s}/a/b/c/version-notify.json", .{dir});
 
     try notifier.writeCache(io, path, .{
         .checked_at = 0,
@@ -339,7 +339,7 @@ test "readCache: missing file is null, not an error" {
     const io = std.Options.debug_io;
     const base = try test_io.uniqueTempPath(testing.allocator, "notify", "absent");
     defer testing.allocator.free(base);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}.json", .{base});
+    const path = try testing.allocator.print("{s}.json", .{base});
     defer testing.allocator.free(path);
     fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
     const got = try notifier.readCache(io, testing.allocator, path);
@@ -354,8 +354,8 @@ test "readCache: corrupt file surfaces InvalidPayload (caller can choose to igno
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
     {
         const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
         defer f.close(std.Options.debug_io);
@@ -392,19 +392,19 @@ test "pendingNotice hands back the tag to announce when the user is behind" {
 
     const dir_base = try test_io.uniqueTempPath(allocator, "notify", "pending");
     defer allocator.free(dir_base);
-    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    const dir = try allocator.printSentinel("{s}", .{dir_base}, 0);
     defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(io, dir) catch {};
     try fs_compat.makeDirAbsolute(io, dir);
     defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
 
-    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    const cache_var = try allocator.printSentinel("MALT_CACHE={s}", .{dir}, 0);
     defer allocator.free(cache_var);
     // The notice is stderr-gated on a TTY, which a test run does not have.
     const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
     const now = std.Io.Clock.real.now(io).toSeconds();
     try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
 
@@ -430,18 +430,18 @@ test "pendingNotice stays silent when the output mode suppresses it" {
 
     const dir_base = try test_io.uniqueTempPath(allocator, "notify", "gated");
     defer allocator.free(dir_base);
-    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    const dir = try allocator.printSentinel("{s}", .{dir_base}, 0);
     defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(io, dir) catch {};
     try fs_compat.makeDirAbsolute(io, dir);
     defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
 
-    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    const cache_var = try allocator.printSentinel("MALT_CACHE={s}", .{dir}, 0);
     defer allocator.free(cache_var);
     const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
     const now = std.Io.Clock.real.now(io).toSeconds();
     try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
 
@@ -473,18 +473,18 @@ test "pendingNotice stays silent on a command that never carries the notice" {
 
     const dir_base = try test_io.uniqueTempPath(allocator, "notify", "skipcmd");
     defer allocator.free(dir_base);
-    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    const dir = try allocator.printSentinel("{s}", .{dir_base}, 0);
     defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(io, dir) catch {};
     try fs_compat.makeDirAbsolute(io, dir);
     defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
 
-    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    const cache_var = try allocator.printSentinel("MALT_CACHE={s}", .{dir}, 0);
     defer allocator.free(cache_var);
     const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/version-notify.json", .{dir});
     const now = std.Io.Clock.real.now(io).toSeconds();
     try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
 
@@ -505,7 +505,7 @@ test "pendingNotice stays silent on a command that never carries the notice" {
 
 test "test builds drop a notifier cache path outside /tmp" {
     const allocator = testing.allocator;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     // An inherited developer cache must never be resolved by a test build.
     const inherited = [_:null]?[*:0]const u8{"MALT_CACHE=/var/empty/mt-inherited"};
@@ -523,11 +523,11 @@ test "test builds drop a notifier cache path outside /tmp" {
 
     const dir = try test_io.uniqueTempPath(allocator, "notify", "guard");
     defer allocator.free(dir);
-    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    const cache_var = try allocator.printSentinel("MALT_CACHE={s}", .{dir}, 0);
     defer allocator.free(cache_var);
     const under_tmp = [_:null]?[*:0]const u8{cache_var.ptr};
     const got = notifier.cachePath(fixtureEnviron(&under_tmp), &buf) orelse return error.TestExpectedNonNull;
-    const want = try std.fmt.allocPrint(allocator, "{s}/version-notify.json", .{dir});
+    const want = try allocator.print("{s}/version-notify.json", .{dir});
     defer allocator.free(want);
     try testing.expectEqualStrings(want, got);
 }

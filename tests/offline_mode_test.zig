@@ -95,11 +95,11 @@ test "BrewApi.fetchFormula composes with HttpClient.offline so cache hits still 
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, tmp) catch {};
 
     var api_dir_buf: [128]u8 = undefined;
-    const api_dir = try std.fmt.bufPrint(&api_dir_buf, "{s}/api", .{tmp});
+    const api_dir = try std.mem.print(&api_dir_buf, "{s}/api", .{tmp});
     try test_io.makeDirAbsolute(std.Options.debug_io, api_dir);
 
     var path_buf: [256]u8 = undefined;
-    const cached_path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_wget.json", .{tmp});
+    const cached_path = try std.mem.print(&path_buf, "{s}/api/formula_wget.json", .{tmp});
     const f = try test_io.cwd().createFile(std.Options.debug_io, cached_path, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, "{\"name\":\"wget\"}");

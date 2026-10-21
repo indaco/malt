@@ -350,14 +350,14 @@ pub fn reportFlightPlan(allocator: std.mem.Allocator, environ: std.process.Envir
 /// core/dsl: the fallback log is pure recording, the CLI owns the UI.
 fn renderEntries(flog: *const dsl.FallbackLog, tag: []const u8, comptime reasons: []const dsl.FallbackReason) void {
     for (flog.entries()) |entry| {
-        if (std.mem.indexOfScalar(dsl.FallbackReason, reasons, entry.reason) == null) continue;
+        if (std.mem.findScalar(dsl.FallbackReason, reasons, entry.reason) == null) continue;
         var buf: [1024]u8 = undefined;
         const formatted = if (entry.loc) |loc|
-            std.fmt.bufPrint(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
+            std.mem.print(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
                 tag, loc.line, loc.col, @tagName(entry.reason), entry.detail,
             }) catch continue
         else
-            std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
+            std.mem.print(&buf, "  {s}: [{s}] {s}\n", .{
                 tag, @tagName(entry.reason), entry.detail,
             }) catch continue;
         // `detail` can carry a tap-controlled name or path.
@@ -688,7 +688,7 @@ pub fn driveSteps(
     var flog = dsl.FallbackLog.init(allocator);
     defer flog.deinit();
 
-    const keg_path = std.fmt.allocPrint(arena.allocator(), "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return false;
+    const keg_path = arena.allocator().print("{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return false;
     _ = steps_mod.execute(.{
         .io = ctx.io,
         .allocator = arena.allocator(),
@@ -748,18 +748,18 @@ pub fn driveTap(
 /// into place. opt-anchored so the link survives version bumps; no-op for
 /// any keg that ships no CA bundle, and idempotent once it is present.
 pub fn provisionShippedCaBundle(io: std.Io, prefix: []const u8, name: []const u8) void {
-    var shipped_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const shipped = std.fmt.bufPrint(&shipped_buf, "{s}/opt/{s}/share/{s}/cacert.pem", .{ prefix, name, name }) catch return;
+    var shipped_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const shipped = std.mem.print(&shipped_buf, "{s}/opt/{s}/share/{s}/cacert.pem", .{ prefix, name, name }) catch return;
     // Keg ships no CA bundle → nothing to provision.
     std.Io.Dir.cwd().access(io, shipped, .{}) catch return;
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/etc/{s}/cert.pem", .{ prefix, name }) catch return;
+    var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dest = std.mem.print(&dest_buf, "{s}/etc/{s}/cert.pem", .{ prefix, name }) catch return;
     // post_install (or a prior provision) already landed a bundle → leave it.
     if (std.Io.Dir.cwd().access(io, dest, .{})) |_| return else |_| {}
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = std.fmt.bufPrint(&dir_buf, "{s}/etc/{s}", .{ prefix, name }) catch return;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = std.mem.print(&dir_buf, "{s}/etc/{s}", .{ prefix, name }) catch return;
     // Same non-raising fs contract as the DSL fs builtins: a failed link
     // surfaces downstream (doctor/shellenv report the missing bundle).
     std.Io.Dir.cwd().createDirPath(io, dir) catch return;
@@ -784,8 +784,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -797,8 +796,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -831,7 +829,7 @@ test "extractRbPostInstallBody: returns the body when the .rb defines post_insta
     const body = extractRbPostInstallBody(std.Options.debug_io, std.testing.allocator, rb);
     try std.testing.expect(body != null);
     defer std.testing.allocator.free(body.?);
-    try std.testing.expect(std.mem.indexOf(u8, body.?, "bin.install") != null);
+    try std.testing.expect(std.mem.find(u8, body.?, "bin.install") != null);
 }
 
 test "extractRbPostInstallBody: null when the .rb has no post_install block" {
@@ -886,11 +884,11 @@ test "isSelfHostingRubyKeg: non-ruby kegs and lookalikes are rejected" {
 /// Lay down `<prefix>/opt/<name>/share/<name>/cacert.pem` with `content`,
 /// mimicking a freshly linked CA-bundle keg.
 fn writeShippedBundle(prefix: []const u8, name: []const u8, content: []const u8) !void {
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const share_dir = try std.fmt.bufPrint(&dir_buf, "{s}/opt/{s}/share/{s}", .{ prefix, name, name });
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const share_dir = try std.mem.print(&dir_buf, "{s}/opt/{s}/share/{s}", .{ prefix, name, name });
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, share_dir);
-    var f_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const shipped = try std.fmt.bufPrint(&f_buf, "{s}/cacert.pem", .{share_dir});
+    var f_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const shipped = try std.mem.print(&f_buf, "{s}/cacert.pem", .{share_dir});
     const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, shipped, .{ .truncate = true });
     try f.writeStreamingAll(std.Options.debug_io, content);
     f.close(std.Options.debug_io);
@@ -906,7 +904,7 @@ test "provisionShippedCaBundle: links cert.pem to the shipped cacert.pem when ab
 
     // cert.pem now resolves (opt-anchored) to the shipped bundle.
     const dest = s.p("/etc/ca-certificates/cert.pem");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
     try std.testing.expectEqualStrings(s.p("/opt/ca-certificates/share/ca-certificates/cacert.pem"), buf[0..n]);
 }
@@ -963,7 +961,7 @@ test "provisionShippedCaBundle: self-heals a stale dangling cert.pem symlink" {
     provisionShippedCaBundle(std.Options.debug_io, prefix, "ca-certificates");
 
     // Repointed at the shipped bundle rather than left dangling.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
     try std.testing.expectEqualStrings(s.p("/opt/ca-certificates/share/ca-certificates/cacert.pem"), buf[0..n]);
 }
@@ -981,8 +979,8 @@ test "renderNotes drops terminal control bytes from a formula-authored note" {
     defer output.endStderrCapture();
 
     renderNotes(&flog);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x07) == null);
     try std.testing.expect(std.mem.startsWith(u8, buf.items, "boom"));
     try std.testing.expect(std.mem.endsWith(u8, buf.items, " done\n"));
 }
@@ -999,9 +997,9 @@ test "renderEntries drops terminal control bytes from a step-authored detail" {
     defer output.endStderrCapture();
 
     renderFatal(&flog, "box");
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "could not be terminated") != null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "could not be terminated") != null);
 }
 
 test "renderNotes keeps a codepoint that straddles the scrub buffer intact" {
@@ -1049,6 +1047,6 @@ test "renderNotes keeps a note longer than the scrub buffer whole" {
     defer output.endStderrCapture();
 
     renderNotes(&flog);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
     try std.testing.expectEqual(long.len + "tail\n".len, buf.items.len);
 }

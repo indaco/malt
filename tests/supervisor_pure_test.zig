@@ -32,8 +32,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -214,7 +213,7 @@ test "re-registering rewrites the plist but keeps the row's user-intent columns"
     defer f.close(std.Options.debug_io);
     var buf: [4096]u8 = undefined;
     const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
-    try testing.expect(std.mem.indexOf(u8, buf[0..n], "<key>ExitTimeOut</key>\n    <integer>90</integer>") != null);
+    try testing.expect(std.mem.find(u8, buf[0..n], "<key>ExitTimeOut</key>\n    <integer>90</integer>") != null);
 }
 
 test "stopGrace is null for a label launchd has never heard of" {
@@ -252,10 +251,10 @@ test "register writes an interval plist with StartInterval and RunAtLoad false" 
     // must carry the interval, not a run-at-load fallback.
     const xml = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, list[0].plist_path, 64 * 1024);
     defer testing.allocator.free(xml);
-    try testing.expect(std.mem.indexOf(u8, xml, "<key>StartInterval</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, xml, "<integer>3600</integer>") != null);
-    try testing.expect(std.mem.indexOf(u8, xml, "<key>RunAtLoad</key>\n    <false/>") != null);
-    try testing.expect(std.mem.indexOf(u8, xml, "KeepAlive") == null);
+    try testing.expect(std.mem.find(u8, xml, "<key>StartInterval</key>") != null);
+    try testing.expect(std.mem.find(u8, xml, "<integer>3600</integer>") != null);
+    try testing.expect(std.mem.find(u8, xml, "<key>RunAtLoad</key>\n    <false/>") != null);
+    try testing.expect(std.mem.find(u8, xml, "KeepAlive") == null);
 }
 
 test "register stores a cron schedule label that list reports back" {
@@ -323,8 +322,8 @@ test "tailLog writes the last N lines into the provided writer" {
     try supervisor.tailLog(std.Options.debug_io, testing.allocator, path, 2, &aw.writer);
 
     // Should end with the last 2 lines ("d" and "e").
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "d") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "e") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "d") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "e") != null);
 }
 
 test "start/stop/restart return ServiceNotFound when no DB row exists" {

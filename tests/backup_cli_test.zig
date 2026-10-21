@@ -28,7 +28,7 @@ const Scratch = struct {
         errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -51,7 +51,7 @@ fn unquiet() void {
 
 fn seedRows(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -147,7 +147,7 @@ test "execute --output <path> writes only direct-install rows + casks" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -158,11 +158,11 @@ test "execute --output <path> writes only direct-install rows + casks" {
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
 
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "formula jq") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "cask firefox") != null);
+    try testing.expect(std.mem.find(u8, body, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, body, "formula jq") != null);
+    try testing.expect(std.mem.find(u8, body, "cask firefox") != null);
     // Dep-only row is excluded — install pulls it transitively.
-    try testing.expect(std.mem.indexOf(u8, body, "zlib") == null);
+    try testing.expect(std.mem.find(u8, body, "zlib") == null);
 }
 
 test "execute --output <nested absolute path> creates the missing parent chain" {
@@ -174,7 +174,7 @@ test "execute --output <nested absolute path> creates the missing parent chain" 
     try seedRows(s.path);
 
     // `$prefix/gp` does not exist yet; `gp/parent` must be created.
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/gp/parent/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/gp/parent/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -184,7 +184,7 @@ test "execute --output <nested absolute path> creates the missing parent chain" 
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, body, "formula wget") != null);
 }
 
 test "execute -o <path> short alias mirrors --output" {
@@ -192,7 +192,7 @@ test "execute -o <path> short alias mirrors --output" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap2.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap2.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -202,7 +202,7 @@ test "execute -o <path> short alias mirrors --output" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, body, "formula wget") != null);
 }
 
 test "execute --output=<path> joined-form is accepted" {
@@ -210,7 +210,7 @@ test "execute --output=<path> joined-form is accepted" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "--output={s}/snap3.txt", .{s.path});
+    const out_path = try testing.allocator.print("--output={s}/snap3.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -218,11 +218,11 @@ test "execute --output=<path> joined-form is accepted" {
 
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{out_path});
 
-    const expected = try std.fmt.allocPrint(testing.allocator, "{s}/snap3.txt", .{s.path});
+    const expected = try testing.allocator.print("{s}/snap3.txt", .{s.path});
     defer testing.allocator.free(expected);
     const body = try readAll(testing.allocator, expected);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "cask firefox") != null);
+    try testing.expect(std.mem.find(u8, body, "cask firefox") != null);
 }
 
 test "execute --versions records each version as a separate field" {
@@ -230,7 +230,7 @@ test "execute --versions records each version as a separate field" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -240,10 +240,10 @@ test "execute --versions records each version as a separate field" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget 1.21\n") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "formula jq 1.7\n") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "cask firefox 120.0\n") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "@") == null);
+    try testing.expect(std.mem.find(u8, body, "formula wget 1.21\n") != null);
+    try testing.expect(std.mem.find(u8, body, "formula jq 1.7\n") != null);
+    try testing.expect(std.mem.find(u8, body, "cask firefox 120.0\n") != null);
+    try testing.expect(std.mem.find(u8, body, "@") == null);
 }
 
 test "execute --output - emits to stdout instead of a file" {
@@ -261,8 +261,8 @@ test "execute --output - emits to stdout instead of a file" {
 
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", "-" });
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "formula wget") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "cask firefox") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "cask firefox") != null);
 }
 
 test "execute -q sets quiet mode without breaking the write" {
@@ -270,7 +270,7 @@ test "execute -q sets quiet mode without breaking the write" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     defer unquiet();
@@ -278,7 +278,7 @@ test "execute -q sets quiet mode without breaking the write" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, body, "formula wget") != null);
 }
 
 // `mt restore` re-feeds the backup file through `mt install`. For tap
@@ -339,11 +339,11 @@ test "execute --json on a populated DB emits direct formulas + casks with tap" {
     defer unquiet();
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"wget\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"jq\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"firefox\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"wget\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"jq\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"firefox\"") != null);
     // Dep-only row excluded — `mt restore` pulls deps transitively.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"zlib\"") == null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"zlib\"") == null);
     try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"formulas\":["));
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
 }
@@ -396,13 +396,13 @@ test "execute --json keeps the cask `tap` field separate (no token qualification
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
 
     // Bare token + separate `tap` field — consumers re-qualify themselves.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"flux-markdown\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"tap\":\"xykong/tap\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"flux-markdown\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"tap\":\"xykong/tap\"") != null);
     // The slash-qualified shape belongs to plain-text only — must not leak in.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "xykong/tap/flux-markdown") == null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "xykong/tap/flux-markdown") == null);
     // Core-API cask: empty `tap` field.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"firefox\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"firefox\",\"version\":\"120.0\",\"tap\":\"\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"firefox\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"firefox\",\"version\":\"120.0\",\"tap\":\"\"") != null);
 }
 
 test "execute --json --versions is a no-op (version is already a field, not a suffix)" {
@@ -429,8 +429,8 @@ test "execute --json --versions is a no-op (version is already a field, not a su
 
     try testing.expectEqualStrings(with_buf.items, without_buf.items);
     // No `name@version` suffix may bleed in from the plain-text writer.
-    try testing.expect(std.mem.indexOf(u8, with_buf.items, "wget@") == null);
-    try testing.expect(std.mem.indexOf(u8, with_buf.items, "firefox@") == null);
+    try testing.expect(std.mem.find(u8, with_buf.items, "wget@") == null);
+    try testing.expect(std.mem.find(u8, with_buf.items, "firefox@") == null);
 }
 
 test "execute --json --output - emits to stdout instead of a default file" {
@@ -461,7 +461,7 @@ test "execute --json keeps a control-byte local keg but prints no rebuild hint f
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -486,13 +486,13 @@ test "execute --json keeps a control-byte local keg but prints no rebuild hint f
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
 
     // The JSON record is unchanged: it is data, not a terminal line.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"lx\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "\xc2\x9b") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "mt install --local '/w/x") == null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"name\":\"lx\"") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "mt install --local '/w/x") == null);
     // Named with its path, escaped, as the text backup does.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
     // A clean local keg keeps its hint.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "la is a local formula") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "la is a local formula") != null);
 }
 
 // --- --services round-trip -------------------------------------------
@@ -504,7 +504,7 @@ test "execute --json keeps a control-byte local keg but prints no rebuild hint f
 
 fn seedServices(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -575,7 +575,7 @@ test "execute --json --services on an empty services table emits `services:[]`" 
     // schema init only; no services seeded.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -639,7 +639,7 @@ test "execute --services on plain-text backup emits a `service <name>` line per 
     defer s.deinit(testing.allocator);
     try seedServices(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -649,10 +649,10 @@ test "execute --services on plain-text backup emits a `service <name>` line per 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
     // auto_start=1 row surfaces with the full `name@channel` intact.
-    try testing.expect(std.mem.indexOf(u8, body, "service postgresql@16\n") != null);
+    try testing.expect(std.mem.find(u8, body, "service postgresql@16\n") != null);
     // auto_start=0 row stays off the file — the backup carries only the
     // re-bootstrap invariant, not the full services table.
-    try testing.expect(std.mem.indexOf(u8, body, "service redis") == null);
+    try testing.expect(std.mem.find(u8, body, "service redis") == null);
 }
 
 test "execute without --services omits service lines from plain-text backup" {
@@ -663,7 +663,7 @@ test "execute without --services omits service lines from plain-text backup" {
     defer s.deinit(testing.allocator);
     try seedServices(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -672,8 +672,8 @@ test "execute without --services omits service lines from plain-text backup" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "postgresql@16") == null);
+    try testing.expect(std.mem.find(u8, body, "service ") == null);
+    try testing.expect(std.mem.find(u8, body, "postgresql@16") == null);
 }
 
 test "execute --services on an empty services table is a clean no-op (plain text)" {
@@ -684,13 +684,13 @@ test "execute --services on an empty services table is a clean no-op (plain text
     // schema only — no services seeded.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
     }
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -699,7 +699,7 @@ test "execute --services on an empty services table is a clean no-op (plain text
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
+    try testing.expect(std.mem.find(u8, body, "service ") == null);
 }
 
 test "execute --services --versions never adds a version to a service line" {
@@ -709,7 +709,7 @@ test "execute --services --versions never adds a version to a service line" {
     try seedServices(s.path);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -722,8 +722,8 @@ test "execute --services --versions never adds a version to a service line" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget 1.21\n") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "service postgresql@16\n") != null);
+    try testing.expect(std.mem.find(u8, body, "formula wget 1.21\n") != null);
+    try testing.expect(std.mem.find(u8, body, "service postgresql@16\n") != null);
 }
 
 test "execute --json with --output <path> writes JSON to the file" {
@@ -731,7 +731,7 @@ test "execute --json with --output <path> writes JSON to the file" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.json", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.json", .{s.path});
     defer testing.allocator.free(out_path);
 
     const prior = withJson();
@@ -745,12 +745,12 @@ test "execute --json with --output <path> writes JSON to the file" {
     defer testing.allocator.free(body);
     try testing.expect(std.mem.startsWith(u8, body, "{\"formulas\":["));
     try testing.expect(std.mem.endsWith(u8, body, "]}\n"));
-    try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"wget\"") != null);
+    try testing.expect(std.mem.find(u8, body, "\"name\":\"wget\"") != null);
 }
 
 fn seedTapCask(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -771,7 +771,7 @@ test "execute writes tap casks as <user>/<repo>/<token> so restore re-routes cor
     defer s.deinit(testing.allocator);
     try seedTapCask(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     quiet();
@@ -783,15 +783,15 @@ test "execute writes tap casks as <user>/<repo>/<token> so restore re-routes cor
 
     // Tap cask: fully-qualified slug so restore routes through
     // `installTapFormula`.
-    try testing.expect(std.mem.indexOf(u8, body, "cask xykong/tap/flux-markdown") != null);
+    try testing.expect(std.mem.find(u8, body, "cask xykong/tap/flux-markdown") != null);
 
     // Bare-token form preserved for the core-API cask alongside.
-    try testing.expect(std.mem.indexOf(u8, body, "cask firefox\n") != null);
+    try testing.expect(std.mem.find(u8, body, "cask firefox\n") != null);
 
     // Negative: the tap cask must NOT also surface in the unqualified
     // form, otherwise restore would attempt both and the bare-token
     // attempt would 404 against the core API.
-    try testing.expect(std.mem.indexOf(u8, body, "cask flux-markdown\n") == null);
+    try testing.expect(std.mem.find(u8, body, "cask flux-markdown\n") == null);
 }
 
 test "execute --json lists a keg built from a tap's Casks/ under casks" {
@@ -802,7 +802,7 @@ test "execute --json lists a keg built from a tap's Casks/ under casks" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -848,7 +848,7 @@ test "execute --json lists a --local keg apart from core formulas, with its reci
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -883,7 +883,7 @@ test "execute --json lists a --local keg apart from core formulas, with its reci
         stdout_buf.items,
     );
     // Same rebuild hint as the text backup.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "mt install --local '/src/lx.rb'") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "mt install --local '/src/lx.rb'") != null);
 }
 
 test "execute fails when the kegs table cannot be read" {
@@ -922,7 +922,7 @@ test "execute --json fails when the kegs table cannot be read" {
 /// is a no-op over it, so the column-selecting prepare is what fails.
 fn seedBrokenKegs(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var st = try db.prepare("CREATE TABLE kegs(x);");
@@ -937,7 +937,7 @@ test "execute --services fails when the services table cannot be read" {
     try seedRows(s.path);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var st = try db.prepare("DROP TABLE services;");
@@ -971,7 +971,7 @@ test "execute --dry-run --output <path> writes no file and says what it would wr
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/nested/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/nested/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     const prior_dry = setDryRun();
@@ -983,11 +983,11 @@ test "execute --dry-run --output <path> writes no file and says what it would wr
 
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
 
-    const parent = std.fs.path.dirname(out_path).?;
+    const parent = std.Io.Dir.path.dirname(out_path).?;
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, parent, .{}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would write") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "(3 packages)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Backup written") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would write") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "(3 packages)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Backup written") == null);
 }
 
 test "execute -n and --dry-run preview without writing, like purge's backup" {
@@ -995,7 +995,7 @@ test "execute -n and --dry-run preview without writing, like purge's backup" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.txt", .{s.path});
     defer testing.allocator.free(out_path);
 
     const prior_dry = output.isDryRun();
@@ -1014,7 +1014,7 @@ test "execute --dry-run --json --output <path> writes no file" {
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.json", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap.json", .{s.path});
     defer testing.allocator.free(out_path);
 
     const prior = withJson();
@@ -1046,7 +1046,7 @@ test "execute --dry-run --output - still prints the backup" {
     defer unquiet();
 
     try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", "-" });
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "formula wget") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "formula wget") != null);
 }
 
 test "execute --dry-run reports the same package count for plain-text and --json" {
@@ -1055,7 +1055,7 @@ test "execute --dry-run reports the same package count for plain-text and --json
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -1068,7 +1068,7 @@ test "execute --dry-run reports the same package count for plain-text and --json
             \\  ('redis', 'redis', '/r.plist', 1);
         );
     }
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap", .{s.path});
+    const out_path = try testing.allocator.print("{s}/snap", .{s.path});
     defer testing.allocator.free(out_path);
 
     const prior_dry = setDryRun();
@@ -1084,7 +1084,7 @@ test "execute --dry-run reports the same package count for plain-text and --json
         output.beginStderrCapture(testing.allocator, &captured);
         defer output.endStderrCapture();
         try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--services", "--output", out_path });
-        if (std.mem.indexOf(u8, captured.items, "(3 packages)") == null) {
+        if (std.mem.find(u8, captured.items, "(3 packages)") == null) {
             std.debug.print("json={} stderr:\n{s}\n", .{ json, captured.items });
             return error.TestExpectedEqual;
         }

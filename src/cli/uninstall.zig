@@ -350,7 +350,7 @@ fn removeFormula(
     // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
     {
         var parent_buf: [512]u8 = undefined;
-        const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+        const parent_path = std.mem.print(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (parent_path.len > 0) {
             if (symlink.isSymlinkOrUnreadable(ctx.io, parent_path)) {
                 // A link is indivisible: unlinking it cuts off every version
@@ -366,7 +366,7 @@ fn removeFormula(
     // Remove opt/ symlink
     {
         var opt_buf: [512]u8 = undefined;
-        const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch "";
+        const opt_path = std.mem.print(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch "";
         if (opt_path.len > 0) std.Io.Dir.cwd().deleteFile(ctx.io, opt_path) catch {}; // opt/ link absent on never-linked kegs.
     }
 
@@ -540,7 +540,7 @@ test "finalizeDbRemoval leaves the kegs row when the delete is blocked" {
 
     try testing.expectError(sqlite.SqliteError.ConstraintViolation, finalizeDbRemoval(&db, keg_id, "foo"));
     // The rollback resets errMsg, so the cause must be printed before it.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "blocked") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "blocked") != null);
 
     try testing.expect(try testKegPresent(&db, keg_id));
     try testing.expect(try testRefRowPresent(&db, sha));
@@ -559,7 +559,7 @@ test "finalizeDbRemoval reports a failed BEGIN and leaves a transaction it does 
     defer output.endStderrCapture();
 
     try testing.expectError(sqlite.SqliteError.ExecFailed, finalizeDbRemoval(&db, keg_id, "foo"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "within a transaction") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "within a transaction") != null);
     try testing.expect(db.inTransaction());
     try testing.expect(try testKegPresent(&db, keg_id));
 }
@@ -641,8 +641,8 @@ test "uninstallCask reports a casks table it cannot query instead of not install
 
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try testing.expectError(error.Aborted, uninstallCask(&ctx, testing.allocator, "box", &db, "/nonexistent/malt-uninstall-unreadable/prefix", "/nonexistent/malt-uninstall-unreadable/cache", false, true));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database") != null);
 }
 
 test "uninstallCask refuses an app started after the batch checked it, before any stored step runs" {
@@ -688,6 +688,6 @@ test "uninstallCask refuses an app started after the batch checked it, before an
     // Aborted, not the installer's own AppRunning: that refusal only comes
     // after the stored uninstall steps have run.
     try testing.expectError(error.Aborted, uninstallCask(&ctx, testing.allocator, "recheck", &db, "/nonexistent/malt-uninstall-recheck/prefix", "/nonexistent/malt-uninstall-recheck/cache", false, false));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "recheck appears to be running") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "recheck appears to be running") != null);
     try testing.expect(try cask_mod.isInstalled(&db, "recheck"));
 }

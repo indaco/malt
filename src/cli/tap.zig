@@ -35,12 +35,12 @@ pub fn parseRepoUrl(allocator: std.mem.Allocator, raw: []const u8) RepoUrlError!
     const scheme = "https://";
     if (!std.mem.startsWith(u8, raw, scheme)) return error.InvalidRepoUrl;
     const rest = std.mem.trimEnd(u8, raw[scheme.len..], "/");
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidRepoUrl;
+    const slash = std.mem.findScalar(u8, rest, '/') orelse return error.InvalidRepoUrl;
     const host = rest[0..slash];
     const path = rest[slash + 1 ..];
     validateForgeHost(host) catch return error.InvalidRepoUrl;
     validateTapName(path) catch return error.InvalidRepoUrl;
-    const path_slash = std.mem.indexOfScalar(u8, path, '/').?;
+    const path_slash = std.mem.findScalar(u8, path, '/').?;
     const owner = path[0..path_slash];
     const repo = path[path_slash + 1 ..];
 
@@ -75,7 +75,7 @@ pub fn validateForgeHost(host: []const u8) ForgeHostError!void {
 /// slices via `TapPair.deinit`.
 pub fn parseRepoOverride(allocator: std.mem.Allocator, raw: []const u8, host: []const u8) RepoOverrideError!tap_mod.TapPair {
     validateTapName(raw) catch return RepoOverrideError.InvalidRepoOverride;
-    const slash = std.mem.indexOfScalar(u8, raw, '/') orelse unreachable;
+    const slash = std.mem.findScalar(u8, raw, '/') orelse unreachable;
     const owner = raw[0..slash];
     const repo = raw[slash + 1 ..];
     const owner_owned = try allocator.dupe(u8, owner);
@@ -297,13 +297,12 @@ fn formatTapLine(allocator: std.mem.Allocator, t: tap_mod.TapInfo) ![]u8 {
     const host_tag: []const u8 = if (std.mem.eql(u8, t.host, "github.com"))
         ""
     else
-        std.fmt.bufPrint(&host_buf, " [{s}]", .{t.host}) catch "";
+        std.mem.print(&host_buf, " [{s}]", .{t.host}) catch "";
     if (t.commit_sha) |sha| {
         const short_len = @min(sha.len, 7);
-        return std.fmt.allocPrint(allocator, "{s} @ {s}{s}\n", .{ t.name, sha[0..short_len], host_tag });
+        return allocator.print("{s} @ {s}{s}\n", .{ t.name, sha[0..short_len], host_tag });
     }
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         "{s} (unpinned — run `mt tap --refresh {s}`){s}\n",
         .{ t.name, t.name, host_tag },
     );
@@ -526,7 +525,7 @@ test "resolveOneHead reports why a tap could not be refreshed" {
 
     const out = try resolveOneHead(&ctx, std.testing.allocator, &db, "user/repo");
     defer out.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, out.failed, "offline mode") != null);
+    try std.testing.expect(std.mem.find(u8, out.failed, "offline mode") != null);
 }
 
 test "writeRefreshRowsJson: empty input emits `{\"taps\":[]}`" {
@@ -715,7 +714,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             positional = arg;
         } else {
             // brew's `tap <slug> <url>` form; malt takes the URL via --url.
-            if (std.mem.indexOf(u8, arg, "://") != null) {
+            if (std.mem.find(u8, arg, "://") != null) {
                 output.err("Unexpected argument '{s}': pass a repo URL with --url", .{arg});
             } else {
                 output.err("Unexpected argument '{s}' (one tap per command)", .{arg});
@@ -852,7 +851,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     var db = schema_report.openPreviewableCreating(ctx.io, db_path, dry_run) catch {
         // Only an absent db/ is a fresh prefix; a file that exists but will
         // not open is a broken database, not an empty tap list.
-        if (is_listing and prefix_path.dirMissing(ctx.io, std.fs.path.dirname(db_path).?)) {
+        if (is_listing and prefix_path.dirMissing(ctx.io, std.Io.Dir.path.dirname(db_path).?)) {
             if (output.isJson()) output.writeStdoutAll("[]\n") else output.info("No taps registered", .{});
             return;
         }

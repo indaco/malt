@@ -51,7 +51,7 @@ pub fn render(buf: []u8, fields: Fields, cols: u16) []const u8 {
     // `rw > 0` also keeps the column within five digits.
     if (rw > 0 and lw + rw < cols) {
         var cha: [8]u8 = undefined;
-        append(buf, &len, std.fmt.bufPrint(&cha, "\x1b[{d}G", .{cols - rw + 1}) catch unreachable);
+        append(buf, &len, std.mem.print(&cha, "\x1b[{d}G", .{cols - rw + 1}) catch unreachable);
         append(buf, &len, right);
     }
     append(buf, &len, color.Style.reset.code());
@@ -59,7 +59,7 @@ pub fn render(buf: []u8, fields: Fields, cols: u16) []const u8 {
 }
 
 fn leftSegment(buf: []u8, fields: Fields) []const u8 {
-    return std.fmt.bufPrint(buf, "{s} {s}{s}{s}", .{ name, fields.version, sep, fields.prefix }) catch buf[0..0];
+    return std.mem.print(buf, "{s} {s}{s}{s}", .{ name, fields.version, sep, fields.prefix }) catch buf[0..0];
 }
 
 fn rightSegment(buf: []u8, fields: Fields) []const u8 {
@@ -67,7 +67,7 @@ fn rightSegment(buf: []u8, fields: Fields) []const u8 {
     var ob: [20]u8 = undefined;
     // The spinner glyph stands in for the count while the launch audit runs.
     const od = fields.outdated_spinner orelse countStr(&ob, fields.outdated);
-    return std.fmt.bufPrint(buf, "{s} kegs{s}{s} outdated", .{
+    return std.mem.print(buf, "{s} kegs{s}{s} outdated", .{
         countStr(&kb, fields.kegs), sep, od,
     }) catch buf[0..0];
 }
@@ -75,7 +75,7 @@ fn rightSegment(buf: []u8, fields: Fields) []const u8 {
 /// A loaded count is its number; an unloaded one is `unknown`, never a stale value.
 fn countStr(buf: []u8, v: ?usize) []const u8 {
     const n = v orelse return unknown;
-    return std.fmt.bufPrint(buf, "{d}", .{n}) catch unknown;
+    return std.mem.print(buf, "{d}", .{n}) catch unknown;
 }
 
 fn append(buf: []u8, len: *usize, s: []const u8) void {
@@ -109,15 +109,15 @@ fn visibleWidth(s: []const u8) usize {
 test "render shows the name, version and prefix on the left" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt" }, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, "mt 0.1.0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "/opt/malt") != null);
+    try std.testing.expect(std.mem.find(u8, out, "mt 0.1.0") != null);
+    try std.testing.expect(std.mem.find(u8, out, "/opt/malt") != null);
 }
 
 test "render right-justifies both counts and fills the line" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated = 17 }, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, "192 kegs") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "17 outdated") != null);
+    try std.testing.expect(std.mem.find(u8, out, "192 kegs") != null);
+    try std.testing.expect(std.mem.find(u8, out, "17 outdated") != null);
     // Right-justified: the last visible text is the right segment (the trailing
     // reset SGR rides along after it).
     var visible = out;
@@ -125,37 +125,37 @@ test "render right-justifies both counts and fills the line" {
     if (std.mem.endsWith(u8, visible, reset)) visible = visible[0 .. visible.len - reset.len];
     try std.testing.expect(std.mem.endsWith(u8, visible, "17 outdated"));
     // The gap is a cursor move to the column where the right segment starts.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[57G192 kegs") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[57G192 kegs") != null);
 }
 
 test "render shows an em-dash for a count whose store has not loaded" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt", .outdated = 17 }, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " kegs") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "17 outdated") != null);
+    try std.testing.expect(std.mem.find(u8, out, unknown ++ " kegs") != null);
+    try std.testing.expect(std.mem.find(u8, out, "17 outdated") != null);
 }
 
 test "render shows em-dashes for both counts before anything loads" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt" }, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " kegs") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " outdated") != null);
+    try std.testing.expect(std.mem.find(u8, out, unknown ++ " kegs") != null);
+    try std.testing.expect(std.mem.find(u8, out, unknown ++ " outdated") != null);
 }
 
 test "render shows the spinner glyph on the outdated slot while the launch audit runs" {
     var buf: [256]u8 = undefined;
     // Loading: the glyph replaces the count, so the slot reads as computing.
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated_spinner = "⠋" }, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, "192 kegs") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "⠋ outdated") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " outdated") == null); // not a frozen em-dash
+    try std.testing.expect(std.mem.find(u8, out, "192 kegs") != null);
+    try std.testing.expect(std.mem.find(u8, out, "⠋ outdated") != null);
+    try std.testing.expect(std.mem.find(u8, out, unknown ++ " outdated") == null); // not a frozen em-dash
 }
 
 test "render drops the right segment before clipping the left on a narrow terminal" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated = 17 }, 20);
-    try std.testing.expect(std.mem.indexOf(u8, out, "mt 0.1.0") != null); // name+version survive
-    try std.testing.expect(std.mem.indexOf(u8, out, "kegs") == null); // counts dropped whole
+    try std.testing.expect(std.mem.find(u8, out, "mt 0.1.0") != null); // name+version survive
+    try std.testing.expect(std.mem.find(u8, out, "kegs") == null); // counts dropped whole
     try std.testing.expect(visibleWidth(out) <= 20);
 }
 
@@ -176,7 +176,7 @@ test "render keeps the right segment and reset on a terminal wider than the scra
         for ([_]u16{ 260, std.math.maxInt(u16) }) |cols| {
             var buf: [buf_cap]u8 = undefined;
             const out = render(&buf, fields, cols);
-            try std.testing.expect(std.mem.indexOf(u8, out, " outdated") != null);
+            try std.testing.expect(std.mem.find(u8, out, " outdated") != null);
             try std.testing.expect(std.mem.endsWith(u8, out, reset));
             try std.testing.expect(std.unicode.utf8ValidateSlice(out));
         }
@@ -187,6 +187,6 @@ test "render keeps one column of gap at the exact fit boundary" {
     var buf: [buf_cap]u8 = undefined;
     const fields: Fields = .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated = 17 };
     // left is 22 columns, right is 24: 46 has no gap, 47 has exactly one.
-    try std.testing.expect(std.mem.indexOf(u8, render(&buf, fields, 46), "outdated") == null);
-    try std.testing.expect(std.mem.indexOf(u8, render(&buf, fields, 47), "\x1b[24G192 kegs") != null);
+    try std.testing.expect(std.mem.find(u8, render(&buf, fields, 46), "outdated") == null);
+    try std.testing.expect(std.mem.find(u8, render(&buf, fields, 47), "\x1b[24G192 kegs") != null);
 }

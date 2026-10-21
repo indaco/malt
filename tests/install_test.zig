@@ -60,7 +60,7 @@ const TempDb = struct {
         const dir = try test_io.uniqueTempPath(arena.allocator(), "install_test", tag);
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -524,13 +524,13 @@ test "collectFormulaJobs still queues an installed formula under --download-only
 /// calls `api.fetchFormula` for dependencies.
 fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     var api_buf: [512]u8 = undefined;
-    const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir});
+    const api_dir = try std.mem.print(&api_buf, "{s}/api", .{cache_dir});
     test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
+    const path = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, json);
@@ -873,7 +873,7 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
 
     try testing.expectEqual(@as(usize, 1), jobs.items.len);
     try testing.expectEqualStrings("1.0", jobs.items[0].version_str);
-    try testing.expect(std.mem.indexOf(u8, jobs.items[0].version_str, "_") == null);
+    try testing.expect(std.mem.find(u8, jobs.items[0].version_str, "_") == null);
 }
 
 /// Three-dep fixture with unique per-dep sha so the dep-dedup path inside
@@ -1169,16 +1169,15 @@ fn insertKegRow(
 }
 
 fn seedKegWithBin(prefix: []const u8, name: []const u8, version: []const u8, bin_name: []const u8) ![]u8 {
-    const keg = try std.fmt.allocPrint(
-        testing.allocator,
+    const keg = try testing.allocator.print(
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },
     );
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg});
+    const bin_dir = try testing.allocator.print("{s}/bin", .{keg});
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
 
-    const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, bin_name });
+    const bin_path = try testing.allocator.print("{s}/{s}", .{ bin_dir, bin_name });
     defer testing.allocator.free(bin_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
     defer f.close(std.Options.debug_io);
@@ -1213,7 +1212,7 @@ test "stale-keg sweep (unlink + drop) clears the prior row, its symlinks, and it
     // Sanity: stale row exists, stale symlink resolves.
     try testing.expectEqual(@as(i64, 2), try kegRowCount(&tdb.db, "foo"));
     var link_buf: [512]u8 = undefined;
-    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
+    const link_path = try std.mem.print(&link_buf, "{s}/bin/foo-tool", .{prefix});
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{});
 
     // Resolved version is foo 2.0. Sweep is two-phase at the call
@@ -1247,7 +1246,7 @@ test "stale-keg sweep drops a damaged relative row without deleting outside the 
     _ = try insertKegRow(&tdb.db, "relpkg", "1.1", 0, keep_keg);
 
     var name_buf: [64]u8 = undefined;
-    const sentinel = try std.fmt.bufPrint(&name_buf, "malt-sentinel-relrow-{d}", .{std.c.getpid()});
+    const sentinel = try std.mem.print(&name_buf, "malt-sentinel-relrow-{d}", .{std.c.getpid()});
     const io = std.Options.debug_io;
     try std.Io.Dir.cwd().createDirPath(io, sentinel);
     defer std.Io.Dir.cwd().deleteTree(io, sentinel) catch {};
@@ -1270,7 +1269,7 @@ test "stale-keg sweep drops a row pointing outside the keg's Cellar dir without 
     _ = try insertKegRow(&tdb.db, "outpkg", "1.1", 0, keep_keg);
 
     var path_buf: [64]u8 = undefined;
-    const outside = try std.fmt.bufPrint(&path_buf, "/tmp/malt-sentinel-outside-{d}", .{std.c.getpid()});
+    const outside = try std.mem.print(&path_buf, "/tmp/malt-sentinel-outside-{d}", .{std.c.getpid()});
     const io = std.Options.debug_io;
     try std.Io.Dir.cwd().createDirPath(io, outside);
     defer std.Io.Dir.cwd().deleteTree(io, outside) catch {};
@@ -1305,7 +1304,7 @@ test "stale-keg sweep tolerates a stale row whose dir is already gone" {
     defer tdb.deinit();
     const prefix = tdb.dir;
 
-    const stale_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/baz/1.0", .{prefix});
+    const stale_keg = try testing.allocator.print("{s}/Cellar/baz/1.0", .{prefix});
     defer testing.allocator.free(stale_keg);
     // Note: stale dir intentionally NOT created — simulate a crashed
     // prior install or a manual `rm -rf` that left only the DB row.
@@ -1344,7 +1343,7 @@ test "unlinkSameVersionKegLinks removes symlinks + links rows for the matching k
     try linker.link(keg, "foo", keg_id, false);
 
     var link_buf: [512]u8 = undefined;
-    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
+    const link_path = try std.mem.print(&link_buf, "{s}/bin/foo-tool", .{prefix});
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{});
 
     install.unlinkSameVersionKegLinks(&linker, &tdb.db, "foo", keg);
@@ -1373,12 +1372,12 @@ test "unlinkSameVersionKegLinks is a no-op when no row matches the keep path" {
     try linker.link(keg, "foo", keg_id, false);
 
     // Different cellar_path than the seeded row → must not unlink.
-    const other = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/2.0", .{prefix});
+    const other = try testing.allocator.print("{s}/Cellar/foo/2.0", .{prefix});
     defer testing.allocator.free(other);
     install.unlinkSameVersionKegLinks(&linker, &tdb.db, "foo", other);
 
     var link_buf: [512]u8 = undefined;
-    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
+    const link_path = try std.mem.print(&link_buf, "{s}/bin/foo-tool", .{prefix});
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{});
 }
 
@@ -1403,11 +1402,11 @@ test "unlinkSameVersionKegLinks leaves other packages untouched" {
 
     // foo's symlink gone, bar's intact.
     var foo_link_buf: [512]u8 = undefined;
-    const foo_link = try std.fmt.bufPrint(&foo_link_buf, "{s}/bin/foo-tool", .{prefix});
+    const foo_link = try std.mem.print(&foo_link_buf, "{s}/bin/foo-tool", .{prefix});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.Options.debug_io, foo_link, .{}));
 
     var bar_link_buf: [512]u8 = undefined;
-    const bar_link = try std.fmt.bufPrint(&bar_link_buf, "{s}/bin/bar-tool", .{prefix});
+    const bar_link = try std.mem.print(&bar_link_buf, "{s}/bin/bar-tool", .{prefix});
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, bar_link, .{});
 }
 

@@ -56,7 +56,7 @@ pub fn validateArgv(
     if (containsDotDot(argv0)) return SandboxError.PathSandboxViolation;
 
     // Bare command name (no separator) resolves through the scrubbed PATH.
-    if (std.mem.indexOfScalar(u8, argv0, '/') == null) return;
+    if (std.mem.findScalar(u8, argv0, '/') == null) return;
 
     // Anything with a separator must be an absolute path under an allowed root.
     if (argv0[0] != '/') return SandboxError.PathSandboxViolation;
@@ -95,7 +95,7 @@ pub fn fenceArgv(
     malt_prefix: []const u8,
     opts: macos.ProfileOpts,
 ) FenceError![]const []const u8 {
-    if (builtin.os.tag != .macos or argv.len == 0) return argv;
+    if (builtin.target.os.tag != .macos or argv.len == 0) return argv;
 
     const profile = macos.renderRubyProfile(allocator, cellar_path, malt_prefix, opts) catch |e| switch (e) {
         // The renderer only allocates and validates: an alloc miss is OOM,
@@ -131,7 +131,7 @@ fn resolvedDirWithinBoundary(
     cellar_path: []const u8,
     malt_prefix: []const u8,
 ) SandboxError!void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var probe: ?[]const u8 = start;
     const dir_real = while (probe) |p| {
         // Stop once the walk leaves the literal keg/prefix: nothing inside the
@@ -140,7 +140,7 @@ fn resolvedDirWithinBoundary(
         // judge. `validatePath` already confirmed the target itself is in bounds.
         if (!pathHasPrefix(p, cellar_path) and !pathHasPrefix(p, malt_prefix)) return;
         const n = std.Io.Dir.cwd().realPathFile(io, p, &buf) catch {
-            probe = std.fs.path.dirname(p);
+            probe = std.Io.Dir.path.dirname(p);
             continue;
         };
         break buf[0..n];
@@ -148,8 +148,8 @@ fn resolvedDirWithinBoundary(
 
     if (containsDotDot(dir_real)) return SandboxError.PathSandboxViolation;
 
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var xbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var cbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var xbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cellar_real = realPathOr(io, cellar_path, &cbuf, cellar_path);
     const prefix_real = realPathOr(io, malt_prefix, &xbuf, malt_prefix);
 
@@ -172,7 +172,7 @@ pub fn validateWriteDir(
     malt_prefix: []const u8,
 ) SandboxError!void {
     try validatePath(target_path, cellar_path, malt_prefix);
-    try resolvedDirWithinBoundary(io, std.fs.path.dirname(target_path), cellar_path, malt_prefix);
+    try resolvedDirWithinBoundary(io, std.Io.Dir.path.dirname(target_path), cellar_path, malt_prefix);
 }
 
 /// Resolve a path that may legitimately be a symlink and confine where it
@@ -198,8 +198,8 @@ pub fn resolveConfined(
     // mirrors `resolvedDirWithinBoundary` so both agree if that ever changes.
     if (containsDotDot(real)) return SandboxError.PathSandboxViolation;
 
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var xbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var cbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var xbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (pathHasPrefix(real, realPathOr(io, cellar_path, &cbuf, cellar_path))) return real;
     if (pathHasPrefix(real, realPathOr(io, malt_prefix, &xbuf, malt_prefix))) return real;
     return SandboxError.PathSandboxViolation;
@@ -232,8 +232,8 @@ pub fn validateLinkTarget(
     cellar_path: []const u8,
     malt_prefix: []const u8,
 ) (SandboxError || std.mem.Allocator.Error)!void {
-    const parent = std.fs.path.dirname(link_path) orelse "/";
-    const resolved = try std.fs.path.resolve(allocator, &.{ parent, target });
+    const parent = std.Io.Dir.path.dirname(link_path) orelse "/";
+    const resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ parent, target });
     defer allocator.free(resolved);
     try validateDirTarget(io, resolved, cellar_path, malt_prefix);
 }
@@ -303,8 +303,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -313,7 +312,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -323,8 +322,7 @@ const Scratch = struct {
 
     /// Absolute path to `sub` (leading slash included); valid until deinit.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -371,13 +369,13 @@ test "validateArgv rejects traversal and relative paths with separators" {
 }
 
 test "fenceArgv wraps argv under sandbox-exec with the keg/prefix profile" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const wrapped = try fenceArgv(arena.allocator(), &.{ "make", "install" }, "/opt/malt/Cellar/foo/1.0", "/opt/malt", .{});
     try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", wrapped[0]);
     try std.testing.expectEqualStrings("-p", wrapped[1]);
-    try std.testing.expect(std.mem.indexOf(u8, wrapped[2], "(deny default)") != null);
+    try std.testing.expect(std.mem.find(u8, wrapped[2], "(deny default)") != null);
     // Original argv preserved in order after the wrapper prefix.
     try std.testing.expectEqualStrings("make", wrapped[3]);
     try std.testing.expectEqualStrings("install", wrapped[4]);
@@ -391,7 +389,7 @@ test "fenceArgv leaves empty argv untouched" {
 }
 
 test "fenceArgv fails closed when the profile path is unsafe" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     // An SCL-metachar in the cellar can't render a safe profile — reject the
@@ -403,7 +401,7 @@ test "fenceArgv fails closed when the profile path is unsafe" {
 }
 
 test "fenceArgv maps a profile allocation failure to OutOfMemory" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     // Clean paths pass validation, so the only failure left is the profile
     // allocation — it must surface as OutOfMemory, not a sandbox violation.
     try std.testing.expectError(
@@ -421,7 +419,7 @@ test "openTargetNoFollow writes a normal in-keg file" {
     defer s.deinit();
     const keg = s.base;
 
-    const target = try std.fs.path.join(alloc, &.{ keg, "out.txt" });
+    const target = try std.Io.Dir.path.join(alloc, &.{ keg, "out.txt" });
     defer alloc.free(target);
 
     const f = try openTargetNoFollow(io, target, keg, keg, .{ .create = true, .truncate = true });
@@ -442,11 +440,11 @@ test "openTargetNoFollow refuses a final-component symlink out of the keg" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    const victim = try std.Io.Dir.path.join(alloc, &.{ base, "victim" });
     defer alloc.free(victim);
-    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    const link = try std.Io.Dir.path.join(alloc, &.{ keg, "pwn" });
     defer alloc.free(link);
 
     try std.Io.Dir.cwd().createDirPath(io, keg);
@@ -475,13 +473,13 @@ test "validateDirTarget accepts a real in-keg dir and rejects a symlinked one" {
     defer s.deinit();
     const base = s.base;
 
-    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    const keg = try std.Io.Dir.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
-    const realdir = try std.fs.path.join(alloc, &.{ keg, "real" });
+    const realdir = try std.Io.Dir.path.join(alloc, &.{ keg, "real" });
     defer alloc.free(realdir);
-    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    const outside = try std.Io.Dir.path.join(alloc, &.{ base, "outside" });
     defer alloc.free(outside);
-    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    const dirlink = try std.Io.Dir.path.join(alloc, &.{ keg, "d" });
     defer alloc.free(dirlink);
 
     try std.Io.Dir.cwd().createDirPath(io, realdir);
@@ -562,7 +560,7 @@ fn writeEmpty(path: []const u8) !void {
 test "a real file inside the keg resolves and is allowed" {
     var fx = try ConfineFixture.init();
     defer fx.deinit();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = try fx.confine(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), &buf);
     try std.testing.expectEqualStrings(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), got);
 }
@@ -574,7 +572,7 @@ test "a symlink into the keg is followed, and the target's path comes back" {
     const link = fx.scratch.p("/prefix/share/cacert.pem");
     try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), link, .{});
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = try fx.confine(link, &buf);
     // The resolved target, not the link handed in - the caller reads this.
     try std.testing.expectEqualStrings(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), got);
@@ -587,7 +585,7 @@ test "a symlink inside the keg pointing outside it is refused" {
     const link = fx.scratch.p("/prefix/Cellar/pkg/1.0/smuggled.pem");
     try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/outside/secret.pem"), link, .{});
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expectError(SandboxError.PathSandboxViolation, fx.confine(link, &buf));
 }
 
@@ -599,7 +597,7 @@ test "a chain of symlinks is followed to its end, and judged there" {
     try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/outside/secret.pem"), mid, .{});
     try std.Io.Dir.symLinkAbsolute(fs_test_io, mid, outer, .{});
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // Only the last hop leaves the boundary; a one-level check would miss it.
     try std.testing.expectError(SandboxError.PathSandboxViolation, fx.confine(outer, &buf));
 }
@@ -607,7 +605,7 @@ test "a chain of symlinks is followed to its end, and judged there" {
 test "a path outside the boundary is refused even with no symlink involved" {
     var fx = try ConfineFixture.init();
     defer fx.deinit();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expectError(
         SandboxError.PathSandboxViolation,
         fx.confine(fx.scratch.p("/outside/secret.pem"), &buf),
@@ -617,7 +615,7 @@ test "a path outside the boundary is refused even with no symlink involved" {
 test "dot-dot that climbs out is refused; dot-dot that stays inside is not" {
     var fx = try ConfineFixture.init();
     defer fx.deinit();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     try std.testing.expectError(
         SandboxError.PathSandboxViolation,
@@ -635,7 +633,7 @@ test "a sibling directory sharing the prefix's name is not inside it" {
     try std.Io.Dir.cwd().createDirPath(fs_test_io, fx.scratch.p("/prefix-evil"));
     try writeEmpty(fx.scratch.p("/prefix-evil/secret.pem"));
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expectError(
         SandboxError.PathSandboxViolation,
         fx.confine(fx.scratch.p("/prefix-evil/secret.pem"), &buf),
@@ -651,7 +649,7 @@ test "a boundary reached through a symlink still contains the file" {
     const prefix_link = fx.scratch.p("/prefix-via-link");
     try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.prefix, prefix_link, .{});
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // An unrelated keg, so only the prefix branch can accept this.
     const got = try resolveConfined(
         fs_test_io,
@@ -666,7 +664,7 @@ test "a boundary reached through a symlink still contains the file" {
 test "a path that does not exist is refused rather than assumed safe" {
     var fx = try ConfineFixture.init();
     defer fx.deinit();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expectError(
         SandboxError.PathSandboxViolation,
         fx.confine(fx.scratch.p("/prefix/Cellar/pkg/1.0/missing.pem"), &buf),

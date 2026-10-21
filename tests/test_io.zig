@@ -5,7 +5,7 @@
 const std = @import("std");
 const malt = @import("malt");
 
-pub const path = std.fs.path;
+pub const path = std.Io.Dir.path;
 pub const max_path_bytes = std.Io.Dir.max_path_bytes;
 pub const max_name_bytes = std.Io.Dir.max_name_bytes;
 
@@ -15,7 +15,7 @@ var temp_seq = std.atomic.Value(u32).init(0);
 /// by any overlapping run — a manual `zig build test` racing the pre-push hook —
 /// and one run's `deleteTree` then wipes the other's fixtures mid-test.
 pub fn uniqueTempPath(allocator: std.mem.Allocator, group: []const u8, tag: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "/tmp/malt_{s}_{s}_{d}_{d}", .{
+    return allocator.print("/tmp/malt_{s}_{s}_{d}_{d}", .{
         group, tag, std.c.getpid(), temp_seq.fetchAdd(1, .monotonic),
     });
 }
@@ -250,7 +250,7 @@ pub const LongPrefix = struct {
     pub fn init(allocator: std.mem.Allocator, group: []const u8, len: usize) !LongPrefix {
         const tmp = try uniqueTempPath(allocator, group, "long");
         defer allocator.free(tmp);
-        const root = try std.fmt.allocPrint(allocator, "/private{s}", .{tmp});
+        const root = try allocator.print("/private{s}", .{tmp});
         errdefer allocator.free(root);
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
@@ -268,7 +268,7 @@ pub const LongPrefix = struct {
         const prefix = try allocator.dupeSentinel(u8, buf.items, 0);
         errdefer allocator.free(prefix);
         deleteTreeAbsolute(std.Options.debug_io, root) catch {};
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix});
+        const db_dir = try allocator.print("{s}/db", .{prefix});
         defer allocator.free(db_dir);
         try cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);

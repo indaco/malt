@@ -78,28 +78,28 @@ test "a cosign the guard never vetted cannot be spawned" {
     const dio = std.Options.debug_io;
     const root = std.process.Environ.getPosix(processEnviron(), "MALT_COSIGN_PIN_TMP").?;
 
-    const decoy_dir = try std.fmt.allocPrint(a, "{s}/decoy", .{root});
+    const decoy_dir = try a.print("{s}/decoy", .{root});
     defer a.free(decoy_dir);
-    const prefix = try std.fmt.allocPrint(a, "{s}/prefix", .{root});
+    const prefix = try a.print("{s}/prefix", .{root});
     defer a.free(prefix);
-    const prefix_bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    const prefix_bin = try a.print("{s}/bin", .{prefix});
     defer a.free(prefix_bin);
     try std.Io.Dir.cwd().createDirPath(dio, decoy_dir);
     try std.Io.Dir.cwd().createDirPath(dio, prefix_bin);
 
     // access(X_OK) says yes, execve says ENOENT: the kernel walks past it.
-    const decoy = try std.fmt.allocPrint(a, "{s}/cosign", .{decoy_dir});
+    const decoy = try a.print("{s}/cosign", .{decoy_dir});
     defer a.free(decoy);
     try writeExec(dio, decoy, "#!/nonexistent/interp\n");
 
     // The rubber stamp the kernel would reach next.
-    const shim = try std.fmt.allocPrint(a, "{s}/cosign", .{prefix_bin});
+    const shim = try a.print("{s}/cosign", .{prefix_bin});
     defer a.free(shim);
     try writeExec(dio, shim, "#!" ++ "/bin/sh\nexit 0\n");
 
     // The spawn reads PATH from the runtime's environ, the guard from the
     // injected one; set both or the test proves nothing.
-    const path_val = try std.fmt.allocPrintSentinel(a, "{s}:{s}", .{ decoy_dir, prefix_bin }, 0);
+    const path_val = try a.printSentinel("{s}:{s}", .{ decoy_dir, prefix_bin }, 0);
     defer a.free(path_val);
     if (setenv("PATH", path_val.ptr, 1) != 0) return error.SetEnvFailed;
 

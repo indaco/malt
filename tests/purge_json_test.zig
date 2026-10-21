@@ -24,10 +24,10 @@ const ScratchPrefix = struct {
         const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        const cache_dir = try allocator.print("{s}/cache", .{path});
         defer allocator.free(cache_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -217,9 +217,9 @@ test "--output-format=ndjson --housekeeping emits scope events bracketed by purg
     // purge_complete must be the closing line so consumers can rely on
     // a strict bracket — find its byte offset and check it trails
     // every scope_completed event.
-    const close_pos = std.mem.indexOf(u8, stdout_buf.items, "\"event\":\"purge_complete\"").?;
+    const close_pos = std.mem.find(u8, stdout_buf.items, "\"event\":\"purge_complete\"").?;
     var search_start: usize = 0;
-    while (std.mem.indexOfPos(u8, stdout_buf.items, search_start, "\"event\":\"scope_completed\"")) |pos| {
+    while (std.mem.findPos(u8, stdout_buf.items, search_start, "\"event\":\"scope_completed\"")) |pos| {
         try testing.expect(pos < close_pos);
         search_start = pos + 1;
     }
@@ -244,8 +244,8 @@ test "--output-format=ndjson --wipe emits a wipe scope event" {
     const ctx = makeCtx();
     try purge.execute(&ctx, allocator, &[_][]const u8{ "--wipe", "--yes" });
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"scope\":\"wipe\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"event\":\"purge_complete\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"scope\":\"wipe\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"event\":\"purge_complete\"") != null);
 }
 
 test "ndjson stream stays bracketed when --wipe is aborted at confirm" {
@@ -271,9 +271,9 @@ test "ndjson stream stays bracketed when --wipe is aborted at confirm" {
     const rc = purge.execute(&ctx, allocator, &[_][]const u8{"--wipe"});
     try testing.expectError(purge.Error.UserAborted, rc);
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"event\":\"scope_started\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"event\":\"scope_completed\"") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"event\":\"purge_complete\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"event\":\"scope_started\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"event\":\"scope_completed\"") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"event\":\"purge_complete\"") != null);
 }
 
 test "wipe dry-run removed count matches the live freed-path semantic" {
@@ -315,7 +315,7 @@ test "corrupt database surfaces a real error, not the soft no-db skip" {
     // Pre-populate {prefix}/db/malt.db with random bytes so SQLite's
     // header check rejects it. This must take the .unreadable branch
     // and log a loud err, not the soft "no database" path.
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    const db_path = try allocator.print("{s}/db/malt.db", .{prefix.path});
     defer allocator.free(db_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
@@ -339,10 +339,10 @@ test "corrupt database surfaces a real error, not the soft no-db skip" {
     try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"}));
 
     // Must NOT take the soft skip path.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "no database — nothing to inspect") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "no database — nothing to inspect") == null);
     // Must surface the real error so the user can investigate.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "cannot open database") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "store-orphans") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "cannot open database") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "store-orphans") != null);
 }
 
 test "ndjson scope_completed carries removed/bytes counters" {
@@ -369,7 +369,7 @@ test "ndjson scope_completed carries removed/bytes counters" {
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_completed_with_counters = false;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "\"event\":\"scope_completed\"") == null) continue;
+        if (std.mem.find(u8, line, "\"event\":\"scope_completed\"") == null) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
         const obj = parsed.value.object;
@@ -410,7 +410,7 @@ test "ndjson scope_completed reports status:ok on a clean no-op run" {
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_completed_with_status = false;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "\"event\":\"scope_completed\"") == null) continue;
+        if (std.mem.find(u8, line, "\"event\":\"scope_completed\"") == null) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
         const obj = parsed.value.object;
@@ -442,7 +442,7 @@ test "ndjson purge_complete carries status:ok when no scope errored" {
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_purge_complete = false;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "\"event\":\"purge_complete\"") == null) continue;
+        if (std.mem.find(u8, line, "\"event\":\"purge_complete\"") == null) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
         try testing.expectEqualStrings("ok", parsed.value.object.get("status").?.string);
@@ -456,7 +456,7 @@ test "ndjson scope_completed reports status:error and error_kind on corrupt DB" 
     var prefix = try ScratchPrefix.init(allocator, "err_status");
     defer prefix.deinit(allocator);
 
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    const db_path = try allocator.print("{s}/db/malt.db", .{prefix.path});
     defer allocator.free(db_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
@@ -481,7 +481,7 @@ test "ndjson scope_completed reports status:error and error_kind on corrupt DB" 
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_error_completion = false;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "\"event\":\"scope_completed\"") == null) continue;
+        if (std.mem.find(u8, line, "\"event\":\"scope_completed\"") == null) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
         const obj = parsed.value.object;
@@ -501,7 +501,7 @@ test "ndjson purge_complete carries status:error when any scope errored" {
     var prefix = try ScratchPrefix.init(allocator, "purge_err");
     defer prefix.deinit(allocator);
 
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    const db_path = try allocator.print("{s}/db/malt.db", .{prefix.path});
     defer allocator.free(db_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
@@ -526,7 +526,7 @@ test "ndjson purge_complete carries status:error when any scope errored" {
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_purge_complete_error = false;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "\"event\":\"purge_complete\"") == null) continue;
+        if (std.mem.find(u8, line, "\"event\":\"purge_complete\"") == null) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
         try testing.expectEqualStrings("error", parsed.value.object.get("status").?.string);
@@ -538,11 +538,11 @@ test "ndjson purge_complete carries status:error when any scope errored" {
 /// Returns true if the last `event` line has status "error", or null if there is no such line.
 fn lastEventIsError(allocator: std.mem.Allocator, ndjson: []const u8, event: []const u8) !?bool {
     var needle_buf: [64]u8 = undefined;
-    const needle = try std.fmt.bufPrint(&needle_buf, "\"event\":\"{s}\"", .{event});
+    const needle = try std.mem.print(&needle_buf, "\"event\":\"{s}\"", .{event});
     var is_error: ?bool = null;
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, ndjson, "\n"), '\n');
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, needle) == null) continue;
+        if (std.mem.find(u8, line, needle) == null) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
         const status = parsed.value.object.get("status") orelse return error.TestMissingStatus;
@@ -577,7 +577,7 @@ test "ndjson purge_complete reports status:error when an interrupt stops the run
     try testing.expectError(error.UserInterrupted, purge.execute(&ctx, allocator, &[_][]const u8{ "--cache", "--broken-symlinks" }));
 
     const out = stdout_buf.items;
-    try testing.expect(std.mem.indexOf(u8, out, "\"scope\":\"broken-symlinks\"") == null);
+    try testing.expect(std.mem.find(u8, out, "\"scope\":\"broken-symlinks\"") == null);
     // The scope that completed keeps its status. Only the run status changes.
     try testing.expectEqual(@as(?bool, false), try lastEventIsError(allocator, out, "scope_completed"));
     try testing.expectEqual(@as(?bool, true), try lastEventIsError(allocator, out, "purge_complete"));
@@ -664,7 +664,7 @@ test "ndjson purge_complete keeps the first failed scope's error_kind when an in
     var prefix = try ScratchPrefix.init(allocator, "purge_interrupt_kind");
     defer prefix.deinit(allocator);
 
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    const db_path = try allocator.print("{s}/db/malt.db", .{prefix.path});
     defer allocator.free(db_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
@@ -713,7 +713,7 @@ test "ndjson purge_complete keeps the first failed scope's error_kind when an in
         }
     }
     try testing.expect(saw_purge_complete);
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"scope\":\"cache\"") == null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"scope\":\"cache\"") == null);
 }
 
 test "ndjson brackets report status:error when a scope cannot record its result" {
@@ -764,7 +764,7 @@ test "--json summary marks errored scopes with status:error and bumps schema ver
     var prefix = try ScratchPrefix.init(allocator, "summary_err");
     defer prefix.deinit(allocator);
 
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    const db_path = try allocator.print("{s}/db/malt.db", .{prefix.path});
     defer allocator.free(db_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });

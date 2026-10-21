@@ -117,7 +117,7 @@ const FlagSet = struct {
         if (!std.mem.startsWith(u8, flag, "--")) return;
         if (flag.len < 3) return;
         // `--flag=value` and `--flag` are the same flag to a user.
-        const base = if (std.mem.indexOfScalar(u8, flag, '=')) |i| flag[0..i] else flag;
+        const base = if (std.mem.findScalar(u8, flag, '=')) |i| flag[0..i] else flag;
         if (isGlobal(base)) return;
         if (self.has(base)) return;
         try self.items.append(self.allocator, try self.allocator.dupe(u8, base));
@@ -125,7 +125,7 @@ const FlagSet = struct {
 };
 
 fn stripLineComment(line: []const u8) []const u8 {
-    const idx = std.mem.indexOf(u8, line, "//") orelse return line;
+    const idx = std.mem.find(u8, line, "//") orelse return line;
     return line[0..idx];
 }
 
@@ -139,20 +139,20 @@ fn collectParserFlags(set: *FlagSet, src: []const u8) !void {
         // Two parse idioms in this tree: direct argv comparison, and
         // StaticStringMap entries (`.{ "--cask", .cask },`) used by the
         // bigger commands.
-        const matches = std.mem.indexOf(u8, line, "eql(u8,") != null or
-            std.mem.indexOf(u8, line, "startsWith(u8,") != null or
+        const matches = std.mem.find(u8, line, "eql(u8,") != null or
+            std.mem.find(u8, line, "startsWith(u8,") != null or
             // StaticStringMap entries map a flag to an enum tag (`", .`).
             // Requiring the tag excludes argv literals like
             // `&.{ "--cask", name }`, which forward a flag to another command
             // rather than accepting one.
-            (std.mem.indexOf(u8, line, ".{ \"--") != null and
-                std.mem.indexOf(u8, line, "\", .") != null);
+            (std.mem.find(u8, line, ".{ \"--") != null and
+                std.mem.find(u8, line, "\", .") != null);
         if (!matches) continue;
 
         var rest = line;
-        while (std.mem.indexOf(u8, rest, "\"--")) |start| {
+        while (std.mem.find(u8, rest, "\"--")) |start| {
             const after = rest[start + 1 ..];
-            const end = std.mem.indexOfScalar(u8, after, '"') orelse break;
+            const end = std.mem.findScalar(u8, after, '"') orelse break;
             try set.add(after[0..end]);
             rest = after[end..];
         }
@@ -167,7 +167,7 @@ fn readSources(allocator: std.mem.Allocator, cmd: Command) ![]u8 {
 
     for (cmd.sources) |entry| {
         var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "src/cli/{s}", .{entry});
+        const path = try std.mem.print(&path_buf, "src/cli/{s}", .{entry});
 
         if (std.mem.endsWith(u8, entry, ".zig")) {
             const f = try test_io.cwd().openFile(std.Options.debug_io, path, .{});
@@ -222,7 +222,7 @@ fn readsShipped(src: []const u8, needle: []const u8) bool {
             in_test = true;
             continue;
         }
-        if (std.mem.indexOf(u8, stripLineComment(line), needle) != null) return true;
+        if (std.mem.find(u8, stripLineComment(line), needle) != null) return true;
     }
     return false;
 }
@@ -248,14 +248,14 @@ fn bashFlags(allocator: std.mem.Allocator, command: []const u8) !FlagSet {
     errdefer set.deinit();
 
     const script = completions.bash_script;
-    const table_start = std.mem.indexOf(u8, script, "local cmd_flags=\"\"") orelse
+    const table_start = std.mem.find(u8, script, "local cmd_flags=\"\"") orelse
         return error.MissingBashFlagTable;
     const table = script[table_start..];
-    const table_end = std.mem.indexOf(u8, table, "esac") orelse return error.MissingBashFlagTable;
+    const table_end = std.mem.find(u8, table, "esac") orelse return error.MissingBashFlagTable;
 
     var it = std.mem.splitScalar(u8, table[0..table_end], '\n');
     while (it.next()) |line| {
-        const label_at = std.mem.indexOf(u8, line, command) orelse continue;
+        const label_at = std.mem.find(u8, line, command) orelse continue;
         // The label must be a whole word ending the case pattern, or `install`
         // matches inside `uninstall|remove)` and inherits its flag list. A
         // `<cmd>-<sub>)` row holds one subcommand's share of the flags.
@@ -300,11 +300,11 @@ fn zshFlags(allocator: std.mem.Allocator, command: []const u8) !FlagSet {
     const script = completions.zsh_script;
     const start = zshCaseStart(script, command) orelse return set;
     const body = script[start..];
-    const end = std.mem.indexOf(u8, body, ";;") orelse return error.MissingZshCaseEnd;
+    const end = std.mem.find(u8, body, ";;") orelse return error.MissingZshCaseEnd;
 
     var rest = body[0..end];
     // `'--flag[desc]'` and `{--flag,-f}` are the two spellings zsh uses.
-    while (std.mem.indexOf(u8, rest, "--")) |i| {
+    while (std.mem.find(u8, rest, "--")) |i| {
         const after = rest[i..];
         var j: usize = 0;
         while (j < after.len and (std.ascii.isAlphanumeric(after[j]) or
@@ -322,18 +322,18 @@ fn fishFlags(allocator: std.mem.Allocator, command: []const u8) !FlagSet {
 
     // `<cmd>'` or, for a per-subcommand row, `<cmd>; and ...'`.
     var marker_buf: [64]u8 = undefined;
-    const marker = try std.fmt.bufPrint(&marker_buf, "__malt_using_command {s}", .{command});
+    const marker = try std.mem.print(&marker_buf, "__malt_using_command {s}", .{command});
 
     var it = std.mem.splitScalar(u8, completions.fish_script, '\n');
     while (it.next()) |line| {
-        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+        const at = std.mem.find(u8, line, marker) orelse continue;
         const after = line[at + marker.len ..];
         if (!std.mem.startsWith(u8, after, "'") and !std.mem.startsWith(u8, after, ";")) continue;
-        const l_at = std.mem.indexOf(u8, line, " -l ") orelse continue;
+        const l_at = std.mem.find(u8, line, " -l ") orelse continue;
         var tok = std.mem.tokenizeAny(u8, line[l_at + 4 ..], " ");
         const flag = tok.next() orelse continue;
         var buf: [64]u8 = undefined;
-        const long = try std.fmt.bufPrint(&buf, "--{s}", .{flag});
+        const long = try std.mem.print(&buf, "--{s}", .{flag});
         try set.add(long);
     }
     return set;
@@ -459,7 +459,7 @@ test "every command whose help advertises --dry-run reads the global flag" {
     var checked: usize = 0;
     for (commands ++ dry_run_only) |cmd| {
         if (cmd.delegates) continue;
-        if (std.mem.indexOf(u8, malt.cli_help.helpFor(cmd.name), "--dry-run") == null) continue;
+        if (std.mem.find(u8, malt.cli_help.helpFor(cmd.name), "--dry-run") == null) continue;
         checked += 1;
         const src = try readSources(alloc, cmd);
         defer alloc.free(src);
@@ -487,7 +487,7 @@ test "every command whose help advertises --offline reads ctx.offline" {
     var checked: usize = 0;
     for (commands) |cmd| {
         if (cmd.delegates) continue;
-        if (std.mem.indexOf(u8, malt.cli_help.helpFor(cmd.name), "--offline") == null) continue;
+        if (std.mem.find(u8, malt.cli_help.helpFor(cmd.name), "--offline") == null) continue;
         checked += 1;
         const src = try readSources(alloc, cmd);
         defer alloc.free(src);
@@ -547,8 +547,8 @@ const bundle_subcommands = [_]struct { name: []const u8, parser: []const u8 }{
 
 /// A top-level zig fn from its header to the `}` that zig fmt puts at column 0.
 fn functionBody(src: []const u8, header: []const u8) ![]const u8 {
-    const start = std.mem.indexOf(u8, src, header) orelse return error.MissingParser;
-    const end = std.mem.indexOfPos(u8, src, start, "\n}\n") orelse return error.MissingParser;
+    const start = std.mem.find(u8, src, header) orelse return error.MissingParser;
+    const end = std.mem.findPos(u8, src, start, "\n}\n") orelse return error.MissingParser;
     return src[start..end];
 }
 
@@ -566,19 +566,19 @@ fn zshBundleFlags(allocator: std.mem.Allocator, sub: []const u8) !FlagSet {
     const script = completions.zsh_script;
     const start = zshCaseStart(script, "bundle") orelse return error.MissingZshBundleCase;
     const body = script[start..];
-    const end = std.mem.indexOf(u8, body, ";;") orelse return error.MissingZshCaseEnd;
+    const end = std.mem.find(u8, body, ";;") orelse return error.MissingZshCaseEnd;
 
     var in_branch = false;
     var it = std.mem.splitScalar(u8, body[0..end], '\n');
     while (it.next()) |line| {
-        if (std.mem.indexOf(u8, line, "$words[2] ==")) |at| {
+        if (std.mem.find(u8, line, "$words[2] ==")) |at| {
             in_branch = namesSub(line[at + "$words[2] ==".len ..], sub);
             continue;
         }
-        if (std.mem.indexOf(u8, line, "fi") != null and std.mem.trim(u8, line, " ").len == 2) in_branch = false;
+        if (std.mem.find(u8, line, "fi") != null and std.mem.trim(u8, line, " ").len == 2) in_branch = false;
         if (!in_branch) continue;
         var rest = line;
-        while (std.mem.indexOf(u8, rest, "--")) |i| {
+        while (std.mem.find(u8, rest, "--")) |i| {
             const after = rest[i..];
             var j: usize = 0;
             while (j < after.len and (std.ascii.isAlphanumeric(after[j]) or after[j] == '-')) : (j += 1) {}
@@ -596,15 +596,15 @@ fn fishBundleFlags(allocator: std.mem.Allocator, sub: []const u8) !FlagSet {
     const marker = "__malt_using_command bundle; and __fish_seen_subcommand_from ";
     var it = std.mem.splitScalar(u8, completions.fish_script, '\n');
     while (it.next()) |line| {
-        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+        const at = std.mem.find(u8, line, marker) orelse continue;
         const subs = line[at + marker.len ..];
-        const close = std.mem.indexOfScalar(u8, subs, '\'') orelse continue;
+        const close = std.mem.findScalar(u8, subs, '\'') orelse continue;
         if (!namesSub(subs[0..close], sub)) continue;
-        const l_at = std.mem.indexOf(u8, line, " -l ") orelse continue;
+        const l_at = std.mem.find(u8, line, " -l ") orelse continue;
         var tok = std.mem.tokenizeAny(u8, line[l_at + 4 ..], " ");
         const flag = tok.next() orelse continue;
         var buf: [64]u8 = undefined;
-        try set.add(try std.fmt.bufPrint(&buf, "--{s}", .{flag}));
+        try set.add(try std.mem.print(&buf, "--{s}", .{flag}));
     }
     return set;
 }
@@ -632,7 +632,7 @@ test "each bundle subcommand's completions offer exactly the flags it parses" {
         try collectParserFlags(&parsed, try functionBody(src, sub.parser));
 
         var label_buf: [64]u8 = undefined;
-        var bash = try bashFlags(alloc, try std.fmt.bufPrint(&label_buf, "bundle-{s}", .{sub.name}));
+        var bash = try bashFlags(alloc, try std.mem.print(&label_buf, "bundle-{s}", .{sub.name}));
         defer bash.deinit();
         var zsh = try zshBundleFlags(alloc, sub.name);
         defer zsh.deinit();

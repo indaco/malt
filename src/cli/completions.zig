@@ -36,7 +36,7 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
     const shell = parseShell(args[0]) orelse {
         const stderr = ctx.stderr;
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(
+        const msg = std.mem.print(
             &buf,
             "malt: unknown shell '{s}'. Supported shells: bash, zsh, fish\n",
             .{args[0]},

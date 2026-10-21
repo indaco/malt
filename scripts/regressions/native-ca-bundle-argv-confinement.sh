@@ -128,7 +128,7 @@ test "a source symlinked out of the keg is refused by the native path" {
     _ = steps.execute(ctx, formula);
 
     for (flog.notes()) |n| {
-        if (std.mem.indexOf(u8, n, "native trust-store build declined") != null) return;
+        if (std.mem.find(u8, n, "native trust-store build declined") != null) return;
     }
     return error.SymlinkedSourceWasNotRefused;
 }

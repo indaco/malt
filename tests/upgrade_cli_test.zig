@@ -22,10 +22,10 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "upgrade", tag);
         defer allocator.free(base);
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
+        const path = try allocator.printSentinel("{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -53,7 +53,7 @@ test "pinSkip honours --force regardless of pin state" {
     defer s.deinit(testing.allocator);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -90,7 +90,7 @@ test "execute --pinned --force is accepted on an empty prefix" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -106,7 +106,7 @@ test "execute on an empty DB is a clean no-op" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -123,18 +123,18 @@ test "execute upgrades a single named keg, surfaces error.Aborted on cached-404 
     var s = try Scratch.init(testing.allocator, "named_404");
     defer s.deinit(testing.allocator);
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{s.path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{s.path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
 
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_wget.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_wget.404", .{cache_api});
     defer testing.allocator.free(marker);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{ .truncate = true });
     f.close(std.Options.debug_io);
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -164,13 +164,13 @@ test "execute upgrades every named keg, not just the first positional" {
     var s = try Scratch.init(testing.allocator, "multi_named");
     defer s.deinit(testing.allocator);
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{s.path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{s.path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
 
     // First name: cached formula JSON at the installed version → "already
     // at latest", which returns cleanly without touching the network.
-    const up_to_date_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_wget.json", .{cache_api});
+    const up_to_date_json = try testing.allocator.print("{s}/formula_wget.json", .{cache_api});
     defer testing.allocator.free(up_to_date_json);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, up_to_date_json, .{ .truncate = true });
@@ -183,7 +183,7 @@ test "execute upgrades every named keg, not just the first positional" {
 
     // Second name: 404 marker → NotFound → error.Aborted, but only if the
     // CLI actually processes it.
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_ffmpeg.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_ffmpeg.404", .{cache_api});
     defer testing.allocator.free(marker);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{ .truncate = true });
@@ -192,7 +192,7 @@ test "execute upgrades every named keg, not just the first positional" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -219,11 +219,11 @@ test "execute --pinned --dry-run audits without leaking the parsed Formula" {
     var s = try Scratch.init(testing.allocator, "audit_leak");
     defer s.deinit(testing.allocator);
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{s.path});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{s.path});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
 
-    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_jq.json", .{cache_api});
+    const cache_json = try testing.allocator.print("{s}/formula_jq.json", .{cache_api});
     defer testing.allocator.free(cache_json);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
     // Both arrays populated so dependencies + oldnames exercise the
@@ -236,7 +236,7 @@ test "execute --pinned --dry-run audits without leaking the parsed Formula" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -317,17 +317,17 @@ test "execute honours MALT_CACHE for the API cache and the outdated snapshot" {
     var s = try Scratch.init(testing.allocator, "malt_cache");
     defer s.deinit(testing.allocator);
 
-    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{s.path}, 0);
+    const alt = try testing.allocator.printSentinel("{s}/altcache", .{s.path}, 0);
     defer testing.allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
 
     // Offline + a cached formula one version ahead of the keg: the only
     // would-upgrade the audit can find, and only under $MALT_CACHE/api.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    const cache_api = try testing.allocator.print("{s}/api", .{alt});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_regfoo.json", .{cache_api});
+    const cache_json = try testing.allocator.print("{s}/formula_regfoo.json", .{cache_api});
     defer testing.allocator.free(cache_json);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
@@ -338,7 +338,7 @@ test "execute honours MALT_CACHE for the API cache and the outdated snapshot" {
     }
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -359,11 +359,11 @@ test "execute honours MALT_CACHE for the API cache and the outdated snapshot" {
     try upgrade.execute(&ctx, testing.allocator, &.{});
 
     const io = std.Options.debug_io;
-    const snap = try std.fmt.allocPrint(testing.allocator, "{s}/outdated.json", .{alt});
+    const snap = try testing.allocator.print("{s}/outdated.json", .{alt});
     defer testing.allocator.free(snap);
     try test_io.accessAbsolute(io, snap, .{});
 
-    const wrong = try std.fmt.allocPrint(testing.allocator, "{s}/cache/outdated.json", .{s.path});
+    const wrong = try testing.allocator.print("{s}/cache/outdated.json", .{s.path});
     defer testing.allocator.free(wrong);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, wrong, .{}));
 }
@@ -375,15 +375,15 @@ test "execute --dry-run skips a local keg and warms the snapshot with the core k
     var s = try Scratch.init(testing.allocator, "local_keg");
     defer s.deinit(testing.allocator);
 
-    const cache = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/cache", .{s.path}, 0);
+    const cache = try testing.allocator.printSentinel("{s}/cache", .{s.path}, 0);
     defer testing.allocator.free(cache);
     _ = c.setenv("MALT_CACHE", cache.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{cache});
+    const cache_api = try testing.allocator.print("{s}/api", .{cache});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_wget.json", .{cache_api});
+    const cache_json = try testing.allocator.print("{s}/formula_wget.json", .{cache_api});
     defer testing.allocator.free(cache_json);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
@@ -394,7 +394,7 @@ test "execute --dry-run skips a local keg and warms the snapshot with the core k
     }
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -412,12 +412,12 @@ test "execute --dry-run skips a local keg and warms the snapshot with the core k
     ctx.offline = true;
     try upgrade.execute(&ctx, testing.allocator, &.{"--dry-run"});
 
-    const snap = try std.fmt.allocPrint(testing.allocator, "{s}/outdated.json", .{cache});
+    const snap = try testing.allocator.print("{s}/outdated.json", .{cache});
     defer testing.allocator.free(snap);
     const body = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, snap, 4096);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "\"wget\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "older") == null);
+    try testing.expect(std.mem.find(u8, body, "\"wget\"") != null);
+    try testing.expect(std.mem.find(u8, body, "older") == null);
 }
 
 test "execute points a named local keg at a shell-quoted rebuild, and names a control-byte one" {
@@ -428,7 +428,7 @@ test "execute points a named local keg at a shell-quoted rebuild, and names a co
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -447,16 +447,16 @@ test "execute points a named local keg at a shell-quoted rebuild, and names a co
     ctx.offline = true;
     upgrade.execute(&ctx, testing.allocator, &.{ "la", "lx" }) catch {};
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2\x9b") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local '/w/my dir/l'\\''a.rb'") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "mt install --local '/w/my dir/l'\\''a.rb'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
 }
 
 test "execute --cask reports an unreadable casks table instead of not installed" {
     var s = try Scratch.init(testing.allocator, "corrupt_casks");
     defer s.deinit(testing.allocator);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
@@ -475,15 +475,15 @@ test "execute --cask reports an unreadable casks table instead of not installed"
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "box" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database") != null);
 }
 
 test "execute --cask names the cask of an over-long casks row instead of a meaningless error" {
     var s = try Scratch.init(testing.allocator, "long_version");
     defer s.deinit(testing.allocator);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
@@ -502,9 +502,9 @@ test "execute --cask names the cask of an over-long casks row instead of a meani
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "box" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "longer than malt accepts") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not an error") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "longer than malt accepts") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not an error") == null);
 }
 
 // Stderr of an offline `upgrade` over a scratch prefix seeded by `seed`.
@@ -512,7 +512,7 @@ fn upgradeCaptured(captured: *std.ArrayList(u8), name: []const u8, seed: [:0]con
     var s = try Scratch.init(testing.allocator, name);
     defer s.deinit(testing.allocator);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
@@ -539,7 +539,7 @@ test "execute --formula on a cask-only name refuses instead of upgrading the cas
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "formula_flag_cask_only", seed_box_cask, null, &.{ "--formula", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "box is not installed as a formula") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "box is not installed as a formula") != null);
 }
 
 test "execute refuses an empty name instead of upgrading everything" {
@@ -548,8 +548,8 @@ test "execute refuses an empty name instead of upgrading everything" {
         var captured: std.ArrayList(u8) = .empty;
         defer captured.deinit(testing.allocator);
         try upgradeCaptured(&captured, "empty_name", seed_box_cask, null, argv);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "Empty package name") != null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "box") == null);
+        try testing.expect(std.mem.find(u8, captured.items, "Empty package name") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "box") == null);
     }
 }
 
@@ -557,39 +557,39 @@ test "execute reports an unreadable kegs table instead of upgrading a same-named
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "corrupt_kegs", seed_box_both, "kegs", &.{"box"});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read the package database for formula box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not read the package database for formula box") != null);
     // The formula may be the real target: point at --cask, never fall through to it.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "If box is a cask, pass --cask.") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "If box is a cask, pass --cask.") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask box") == null);
 }
 
 test "execute --formula over an unreadable kegs table does not point at --cask" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "corrupt_kegs_formula_flag", seed_box_both, "kegs", &.{ "--formula", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula box") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--cask") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database for formula box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--cask") == null);
 }
 
 test "execute refuses --cask with --formula, as brew does, before touching anything" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "cask_formula_conflict", seed_box_cask, null, &.{ "--cask", "--formula", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
 }
 
 test "execute accepts brew's plural --formulae and --casks" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "plural_aliases", seed_box_cask, null, &.{ "--casks", "--formulae", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
 }
 
 test "execute --cask does not report an unreadable kegs table as a formula read failure" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "corrupt_kegs_cask_flag", seed_box_both, "kegs", &.{ "--cask", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database for formula") == null);
 }
 
 test "execute refuses an unknown flag instead of upgrading everything without it" {
@@ -598,10 +598,10 @@ test "execute refuses an unknown flag instead of upgrading everything without it
         var captured: std.ArrayList(u8) = .empty;
         defer captured.deinit(testing.allocator);
         try upgradeCaptured(&captured, "unknown_flag", seed_box_cask, null, &.{flag});
-        const want = try std.fmt.allocPrint(testing.allocator, "Unknown flag: {s}", .{flag});
+        const want = try testing.allocator.print("Unknown flag: {s}", .{flag});
         defer testing.allocator.free(want);
-        try testing.expect(std.mem.indexOf(u8, captured.items, want) != null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "box") == null);
+        try testing.expect(std.mem.find(u8, captured.items, want) != null);
+        try testing.expect(std.mem.find(u8, captured.items, "box") == null);
     }
 }
 
@@ -609,9 +609,9 @@ test "execute treats every token after `--` as a name, even a dash-led one" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "end_of_options", seed_box_cask, null, &.{ "--formula", "--", "box", "-n" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag") == null);
     // Looked up as a name; old code dropped it as a flag.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "-n is not installed as a formula") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "-n is not installed as a formula") != null);
 }
 
 // A renamed column fails the bulk audit's row SELECT while the table still
@@ -625,12 +625,12 @@ fn bulkUpgradeOverDrift(captured: *std.ArrayList(u8), name: []const u8, drift: ?
     var s = try Scratch.init(testing.allocator, name);
     defer s.deinit(testing.allocator);
     // A developer's exported MALT_CACHE must not receive the snapshot or hide the fixture.
-    const cache = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/cache", .{s.path}, 0);
+    const cache = try testing.allocator.printSentinel("{s}/cache", .{s.path}, 0);
     defer testing.allocator.free(cache);
     _ = c.setenv("MALT_CACHE", cache.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
@@ -640,10 +640,10 @@ fn bulkUpgradeOverDrift(captured: *std.ArrayList(u8), name: []const u8, drift: ?
     }
     // Offline, a cached same-version formula lets a readable keg pass finish clean.
     const io = std.Options.debug_io;
-    const api_dir = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{cache});
+    const api_dir = try testing.allocator.print("{s}/api", .{cache});
     defer testing.allocator.free(api_dir);
     try test_io.cwd().createDirPath(io, api_dir);
-    const json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_box.json", .{api_dir});
+    const json = try testing.allocator.print("{s}/formula_box.json", .{api_dir});
     defer testing.allocator.free(json);
     {
         const f = try test_io.createFileAbsolute(io, json, .{ .truncate = true });
@@ -663,7 +663,7 @@ fn bulkUpgradeOverDrift(captured: *std.ArrayList(u8), name: []const u8, drift: ?
     const run = upgrade.execute(&ctx, testing.allocator, argv);
     if (drift == null) try run else try testing.expectError(error.Aborted, run);
 
-    const snap = try std.fmt.allocPrint(testing.allocator, "{s}/outdated.json", .{cache});
+    const snap = try testing.allocator.print("{s}/outdated.json", .{cache});
     defer testing.allocator.free(snap);
     test_io.accessAbsolute(io, snap, .{}) catch return false;
     return true;
@@ -675,8 +675,8 @@ test "bulk upgrade reports an unreadable kegs table instead of an empty install"
         var captured: std.ArrayList(u8) = .empty;
         defer captured.deinit(testing.allocator);
         _ = try bulkUpgradeOverDrift(&captured, "bulk_drift_kegs", drift_kegs, argv);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") == null);
+        try testing.expect(std.mem.find(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "No formulas installed") == null);
     }
 }
 
@@ -684,12 +684,12 @@ test "bulk upgrade over an unreadable casks table still runs the formula pass" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     _ = try bulkUpgradeOverDrift(&captured, "bulk_drift_casks", drift_casks, &.{});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "All casks are up to date") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "All casks are up to date") == null);
     // One bad table never abandons the other kind's pass, and the footer
     // must not be the last word on a run that failed.
-    const footer = std.mem.indexOf(u8, captured.items, "1 checked") orelse return error.TestUnexpectedResult;
-    const diag = std.mem.lastIndexOf(u8, captured.items, "Could not read installed packages") orelse return error.TestUnexpectedResult;
+    const footer = std.mem.find(u8, captured.items, "1 checked") orelse return error.TestUnexpectedResult;
+    const diag = std.mem.findLast(u8, captured.items, "Could not read installed packages") orelse return error.TestUnexpectedResult;
     try testing.expect(diag > footer);
 }
 
@@ -713,8 +713,8 @@ test "bulk upgrade over two unreadable tables reports each and claims neither is
     defer captured.deinit(testing.allocator);
     try testing.expect(!try bulkUpgradeOverDrift(&captured, "bulk_drift_both", drift_kegs ++ drift_casks, &.{"--dry-run"}));
     try testing.expectEqual(2, std.mem.count(u8, captured.items, "Could not read installed packages (PrepareFailed)"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "All casks are up to date") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "No formulas installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "All casks are up to date") == null);
 }
 
 test "execute reports a malt.db it cannot open instead of exiting clean" {
@@ -723,7 +723,7 @@ test "execute reports a malt.db it cannot open instead of exiting clean" {
     for ([_][]const []const u8{ &.{}, &.{"--dry-run"}, &.{"box"} }) |argv| {
         var s = try Scratch.init(testing.allocator, "db_open_fails");
         defer s.deinit(testing.allocator);
-        const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{s.path});
+        const db_path = try testing.allocator.print("{s}/db/malt.db", .{s.path});
         defer testing.allocator.free(db_path);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_path);
 
@@ -737,8 +737,8 @@ test "execute reports a malt.db it cannot open instead of exiting clean" {
 
         const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
         try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, argv));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to open database") != null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "mt doctor") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "Failed to open database") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "mt doctor") != null);
     }
 }
 
@@ -760,6 +760,6 @@ test "execute on a max-length prefix reaches its database" {
         const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
         try upgrade.execute(&ctx, testing.allocator, argv);
         // A silent return would also be clean; the audit's answer proves the read.
-        try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "No formulas installed") != null);
     }
 }

@@ -183,15 +183,15 @@ test "MismatchInfo formats cleanly through the worker's log template" {
     @memcpy(&info.computed, got);
 
     var buf: [4096]u8 = undefined;
-    const line = try std.fmt.bufPrint(
+    const line = try std.mem.print(
         &buf,
         "  zig: Sha256Mismatch (expected={s} got={s} bytes={d})",
         .{ info.expected[0..@min(64, info.expected.len)], info.computed[0..], info.body_len },
     );
 
-    try testing.expect(std.mem.indexOf(u8, line, exp) != null);
-    try testing.expect(std.mem.indexOf(u8, line, got) != null);
-    try testing.expect(std.mem.indexOf(u8, line, "bytes=36308387") != null);
+    try testing.expect(std.mem.find(u8, line, exp) != null);
+    try testing.expect(std.mem.find(u8, line, got) != null);
+    try testing.expect(std.mem.find(u8, line, "bytes=36308387") != null);
     try testing.expect(line.len < 4096);
 }
 

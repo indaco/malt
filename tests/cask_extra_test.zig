@@ -36,8 +36,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -348,8 +347,7 @@ test "downloadOnly reports a missing cask digest as its own error, not a mismatc
     defer db.close();
     try schema.initSchema(&db);
 
-    const json = try std.fmt.allocPrint(
-        testing.allocator,
+    const json = try testing.allocator.print(
         "{{\"token\":\"nosha\",\"version\":\"1.0\",\"url\":\"http://127.0.0.1:{d}/x.zip\"}}",
         .{port},
     );

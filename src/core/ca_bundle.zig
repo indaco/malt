@@ -276,7 +276,7 @@ comptime {
 
 /// Whether `<prefix>/opt/<keg>` resolves, i.e. the keg is installed.
 pub fn isInstalled(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) bool {
-    const opt = std.fmt.bufPrint(buf, "{s}/opt/{s}", .{ prefix, keg }) catch return false;
+    const opt = std.mem.print(buf, "{s}/opt/{s}", .{ prefix, keg }) catch return false;
     std.Io.Dir.cwd().access(io, opt, .{}) catch return false;
     return true;
 }
@@ -284,7 +284,7 @@ pub fn isInstalled(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) b
 /// `<prefix>/etc/<keg>/cert.pem` formatted into `buf`, when it resolves.
 /// A dangling link does not count: callers export the path as-is.
 pub fn certFile(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) ?[]const u8 {
-    const path = std.fmt.bufPrint(buf, "{s}/etc/{s}/cert.pem", .{ prefix, keg }) catch return null;
+    const path = std.mem.print(buf, "{s}/etc/{s}/cert.pem", .{ prefix, keg }) catch return null;
     std.Io.Dir.cwd().access(io, path, .{}) catch return null;
     return path;
 }
@@ -293,15 +293,15 @@ pub fn certFile(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) ?[]c
 /// `prefix`. A copied file can hold stale roots, so it never counts.
 fn linksToCaCertificates(io: std.Io, raw_prefix: []const u8, path: []const u8) bool {
     const prefix = std.mem.trimEnd(u8, raw_prefix, "/");
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.Io.Dir.readLinkAbsolute(io, path, &link_buf) catch return false;
-    var scratch: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var scratch: [2 * std.Io.Dir.max_path_bytes]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const dir = std.fs.path.dirname(path) orelse return false;
-    const target = std.fs.path.resolvePosix(fba.allocator(), &.{ dir, link_buf[0..n] }) catch return false;
+    const dir = std.Io.Dir.path.dirname(path) orelse return false;
+    const target = std.Io.Dir.path.resolveAllocPosix(fba.allocator(), &.{ dir, link_buf[0..n] }) catch return false;
     inline for (.{ "etc", "opt" }) |sub| {
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root = std.fmt.bufPrint(&root_buf, "{s}/{s}/ca-certificates/", .{ prefix, sub }) catch return false;
+        var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = std.mem.print(&root_buf, "{s}/{s}/ca-certificates/", .{ prefix, sub }) catch return false;
         if (std.mem.startsWith(u8, target, root)) return true;
     }
     return false;
@@ -338,7 +338,7 @@ pub fn isKnownScript(io: std.Io, path: []const u8) bool {
     var digest: Fingerprint = undefined;
     hasher.final(&digest);
     var hex: [Sha256.digest_length * 2]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch return false;
+    _ = std.mem.print(&hex, "{x}", .{&digest}) catch return false;
     return std.mem.eql(u8, &hex, known_script_sha256);
 }
 
@@ -357,8 +357,8 @@ fn visitOrder(gpa: std.mem.Allocator, count: usize, out: *std.ArrayList(usize)) 
         fn lessThan(_: void, a: usize, b: usize) bool {
             var ba: [24]u8 = undefined;
             var bb: [24]u8 = undefined;
-            const sa = std.fmt.bufPrint(&ba, "{d}", .{a + 1}) catch unreachable;
-            const sb = std.fmt.bufPrint(&bb, "{d}", .{b + 1}) catch unreachable;
+            const sa = std.mem.print(&ba, "{d}", .{a + 1}) catch unreachable;
+            const sb = std.mem.print(&bb, "{d}", .{b + 1}) catch unreachable;
             return std.mem.lessThan(u8, sa, sb);
         }
     }.lessThan);
@@ -372,8 +372,8 @@ pub const PemIter = struct {
     pub fn next(self: *PemIter) ?[]const u8 {
         const begin = "-----BEGIN CERTIFICATE-----";
         const end = "-----END CERTIFICATE-----";
-        const s = std.mem.indexOfPos(u8, self.src, self.i, begin) orelse return null;
-        const e = std.mem.indexOfPos(u8, self.src, s, end) orelse return null;
+        const s = std.mem.findPos(u8, self.src, self.i, begin) orelse return null;
+        const e = std.mem.findPos(u8, self.src, s, end) orelse return null;
         var stop = e + end.len;
         if (stop < self.src.len and self.src[stop] == '\n') stop += 1;
         self.i = stop;
@@ -962,7 +962,7 @@ test "a fenced child is wrapped in sandbox-exec, never spawned bare" {
 
     try testing.expectEqualStrings("/usr/bin/sandbox-exec", argv[0]);
     try testing.expectEqualStrings("-p", argv[1]);
-    try testing.expect(std.mem.indexOf(u8, argv[2], "(deny default)") != null);
+    try testing.expect(std.mem.find(u8, argv[2], "(deny default)") != null);
     // The original command survives intact behind the wrapper.
     try testing.expectEqualStrings("/usr/bin/security", argv[3]);
     try testing.expectEqualStrings("verify-cert", argv[4]);

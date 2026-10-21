@@ -43,7 +43,7 @@ const Ctx = struct {
 
         // One "result" the caller will dupe out — same handoff shape
         // the fetchFormula workers use.
-        self.result = std.fmt.allocPrint(a, "worker-{d}-ok", .{self.seed}) catch null;
+        self.result = a.print("worker-{d}-ok", .{self.seed}) catch null;
     }
 };
 
@@ -89,7 +89,7 @@ test "each parallel worker has its own arena; results survive per-worker deinit"
     var expect_buf: [32]u8 = undefined;
     for (duped, 0..) |d, i| {
         const s = d orelse continue;
-        const expect = try std.fmt.bufPrint(&expect_buf, "worker-{d}-ok", .{i + 1});
+        const expect = try std.mem.print(&expect_buf, "worker-{d}-ok", .{i + 1});
         try testing.expectEqualStrings(expect, s);
         got += 1;
     }

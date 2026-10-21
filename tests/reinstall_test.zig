@@ -27,7 +27,7 @@ fn pathExists(path: []const u8) bool {
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "reinstall", suffix);
     defer testing.allocator.free(base);
-    const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{base}, 0);
+    const path = try testing.allocator.printSentinel("{s}", .{base}, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -62,11 +62,11 @@ test "execute errors clearly when the package is not installed" {
 
     // No `installAll` delegation means no `db/malt.lock` reached the disk:
     // the refusal short-circuited before the install pipeline ran.
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghostpkg is not installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghostpkg is not installed") != null);
 }
 
 test "execute short-circuits on --help without touching the DB" {
@@ -88,7 +88,7 @@ test "execute short-circuits on --help without touching the DB" {
 
     try reinstall.execute(&ctx, arena.allocator(), &.{"--help"});
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_file = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
     try testing.expect(!pathExists(db_file));
 }
@@ -123,15 +123,15 @@ test "execute reaches the install pipeline when the keg row exists" {
     // to `installAll`. The lock file's appearance proves we crossed
     // the seam reinstall actually owns; the install pipeline itself
     // is covered by `install_*_test.zig`.
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/RESOLVABLE_FIXTURE/1.0", .{prefix});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/RESOLVABLE_FIXTURE/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
         var db = try malt.sqlite.Database.open(db_path);
@@ -154,7 +154,7 @@ test "execute reaches the install pipeline when the keg row exists" {
     // the assertion is structural — did the dispatch arm hand off?
     reinstall.execute(&ctx, arena.allocator(), &.{ "--quiet", "RESOLVABLE_FIXTURE" }) catch {};
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
     try testing.expect(pathExists(lock_file));
 }
@@ -167,13 +167,13 @@ test "execute refuses an unknown flag before the forced install starts" {
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/RESOLVABLE_FIXTURE/1.0", .{prefix});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/RESOLVABLE_FIXTURE/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
         var db = try malt.sqlite.Database.open(db_path);
@@ -195,10 +195,10 @@ test "execute refuses an unknown flag before the forced install starts" {
     defer arena.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{ "-n", "RESOLVABLE_FIXTURE" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: -n") != null);
 
     // No lock taken and the keg untouched: install never began.
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
     try testing.expect(pathExists(cellar_dir));
@@ -222,8 +222,8 @@ test "execute names an unknown flag before looking the package up" {
     defer arena.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{ "--bogus", "ghost" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
 }
 
 test "execute refuses a formula and a cask in one run before installing anything" {
@@ -235,9 +235,9 @@ test "execute refuses a formula and a cask in one run before installing anything
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.Io.Dir.path.dirname(db_path).?);
     {
         var db = try malt.sqlite.Database.open(db_path);
         defer db.close();
@@ -264,8 +264,8 @@ test "execute refuses a formula and a cask in one run before installing anything
         try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &names));
     }
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Reinstall formulas and casks separately") != null);
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    try testing.expect(std.mem.find(u8, captured.items, "Reinstall formulas and casks separately") != null);
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
 }
@@ -279,9 +279,9 @@ test "execute refuses a later name that is not installed before installing anyth
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.Io.Dir.path.dirname(db_path).?);
     {
         var db = try malt.sqlite.Database.open(db_path);
         defer db.close();
@@ -316,10 +316,10 @@ test "execute refuses a later name that is not installed before installing anyth
         malt.output.beginStderrCapture(testing.allocator, &captured);
         defer malt.output.endStderrCapture();
         try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), case.argv));
-        try testing.expect(std.mem.indexOf(u8, captured.items, case.want) != null);
+        try testing.expect(std.mem.find(u8, captured.items, case.want) != null);
     }
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
 }
@@ -333,9 +333,9 @@ test "execute points a core cask at uninstall then install instead of forcing it
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.Io.Dir.path.dirname(db_path).?);
     {
         var db = try malt.sqlite.Database.open(db_path);
         defer db.close();
@@ -361,7 +361,7 @@ test "execute points a core cask at uninstall then install instead of forcing it
     }
 
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, captured.items, "`mt uninstall --cask firefox` then `mt install --cask firefox`"));
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
 }
@@ -375,9 +375,9 @@ test "execute names a control-byte local keg without echoing the byte" {
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.Io.Dir.path.dirname(db_path).?);
     {
         var db = try malt.sqlite.Database.open(db_path);
         defer db.close();
@@ -398,9 +398,9 @@ test "execute names a control-byte local keg without echoing the byte" {
 
     try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{"lx"}));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2\x9b") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local --force '") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "mt install --local --force '") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
 }
 
 test "execute reports a table it cannot read instead of retargeting or calling the package missing" {
@@ -418,10 +418,10 @@ test "execute reports a table it cannot read instead of retargeting or calling t
             testing.allocator.free(prefix);
             _ = c.unsetenv("MALT_PREFIX");
         }
-        const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+        const db_dir = try testing.allocator.print("{s}/db", .{prefix});
         defer testing.allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-        const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
         defer testing.allocator.free(db_path);
         {
             var db = try malt.sqlite.Database.open(db_path);
@@ -446,8 +446,8 @@ test "execute reports a table it cannot read instead of retargeting or calling t
 
         const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
         try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), case[1]));
-        try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "is a cask") == null);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+        try testing.expect(std.mem.find(u8, captured.items, "package database") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "is a cask") == null);
+        try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
     }
 }

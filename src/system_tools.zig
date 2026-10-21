@@ -28,6 +28,6 @@ test "every trusted system tool uses an absolute path" {
         pkill,     security,
     };
     for (paths) |path| {
-        try std.testing.expect(std.fs.path.isAbsolute(path));
+        try std.testing.expect(std.Io.Dir.path.isAbsolute(path));
     }
 }

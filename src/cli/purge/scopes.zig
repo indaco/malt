@@ -152,7 +152,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     defer removable.deinit(allocator);
     for (orphans) |name| {
         var pkg_buf: [512]u8 = undefined;
-        const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+        const pkg_path = std.mem.print(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (orphanStillLinked(io, allocator, &db, name)) {
             rep.note("keeping {s} — still linked by an installed package", .{name});
         } else if (pkg_path.len == 0 or symlink.isSymlinkOrUnreadable(io, pkg_path)) {
@@ -198,13 +198,13 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             // The on-disk dir is named by pkg_version (`<version>_<revision>`),
             // so derive the leaf from cellar_path — raw `version` would miss a
             // revisioned keg's dir and leave it orphaned.
-            const pkg_version = if (cellar_ptr) |c| std.fs.path.basename(std.mem.sliceTo(c, 0)) else "";
+            const pkg_version = if (cellar_ptr) |c| std.Io.Dir.path.basename(std.mem.sliceTo(c, 0)) else "";
 
             // Credit cellar bytes before unlink: removing the keg deletes
             // the directory we'd otherwise stat.
             if (pkg_version.len > 0) {
                 var path_buf: [512]u8 = undefined;
-                const cellar_path = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch "";
+                const cellar_path = std.mem.print(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch "";
                 if (cellar_path.len > 0) result.bytes += util.pathSize(io, allocator, cellar_path);
             }
 
@@ -230,7 +230,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             }
             {
                 var parent_buf: [512]u8 = undefined;
-                const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+                const parent_path = std.mem.print(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
                 // Parent dir may be non-empty (sibling versions still installed).
                 if (parent_path.len > 0) std.Io.Dir.deleteDirAbsolute(io, parent_path) catch {};
             }
@@ -279,7 +279,7 @@ fn kegHasService(db: *sqlite.Database, name: []const u8) bool {
 /// opt-name set once.
 fn orphanStillLinked(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) bool {
     var needle_buf: [256]u8 = undefined;
-    const needle = std.fmt.bufPrint(&needle_buf, "/opt/{s}/", .{name}) catch return false;
+    const needle = std.mem.print(&needle_buf, "/opt/{s}/", .{name}) catch return false;
 
     var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name != ?1;") catch return false;
     defer stmt.finalize();
@@ -310,7 +310,7 @@ pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []c
     const reaped = relocated_store.reapStaleVersions(ctx.io, allocator, prefix, !dry_run);
     if (reaped.removed > 0) {
         var lbl: [96]u8 = undefined;
-        const label = std.fmt.bufPrint(&lbl, "store-relocated: {d} stale version {s}", .{
+        const label = std.mem.print(&lbl, "store-relocated: {d} stale version {s}", .{
             reaped.removed,
             report.pluralize(reaped.removed, "tree", "trees"),
         }) catch "store-relocated: stale version trees";
@@ -333,7 +333,7 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
     while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory) {
             var sub_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch continue;
+            const sub_path = std.mem.print(&sub_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch continue;
             pruneCacheRecursive(io, sub_path, max_age_days, dry_run, result, rep);
             continue;
         }
@@ -344,7 +344,7 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
             // Full path so users (and the smoke tests) can see WHERE the
             // file lived; the leaf alone hides path-of-cleanup hot spots.
             var label_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch entry.name;
+            const label = std.mem.print(&label_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch entry.name;
             rep.item(label);
             result.bytes += stat.size;
             result.removed += 1;
@@ -389,7 +389,7 @@ pub fn runBrokenSymlinks(ctx: *const AppCtx, prefix: []const u8, dry_run: bool) 
             // A link we cannot unlink was not removed, so don't count it.
             if (!self.dry_run) dir.deleteFile(self.io, name) catch return;
             var buf: [512]u8 = undefined;
-            self.rep.item(std.fmt.bufPrint(&buf, "{s}/{s}", .{ subdir, name }) catch name);
+            self.rep.item(std.mem.print(&buf, "{s}/{s}", .{ subdir, name }) catch name);
             self.removed += 1;
         }
     };
@@ -408,7 +408,7 @@ pub fn runDownloads(ctx: *const AppCtx, cache_dir: []const u8, dry_run: bool) !T
     var rep = report.Reporter.init("downloads", dry_run);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const downloads_path = std.fmt.bufPrint(&path_buf, "{s}/downloads", .{cache_dir}) catch return result;
+    const downloads_path = std.mem.print(&path_buf, "{s}/downloads", .{cache_dir}) catch return result;
 
     var dir = std.Io.Dir.openDirAbsolute(io, downloads_path, .{ .iterate = true }) catch {
         rep.empty("nothing to remove (downloads dir not present)");
@@ -521,7 +521,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
     // Cask download cache
     var cask_cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/Cask", .{cache_dir}) catch return result;
+    const cask_cache_path = std.mem.print(&cask_cache_buf, "{s}/Cask", .{cache_dir}) catch return result;
     if (std.Io.Dir.openDirAbsolute(io, cask_cache_path, .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
         defer dir.close(io);
@@ -561,7 +561,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
     // Caskroom orphans
     var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom", .{prefix}) catch return result;
+    const caskroom_path = std.mem.print(&caskroom_buf, "{s}/Caskroom", .{prefix}) catch return result;
     if (std.Io.Dir.openDirAbsolute(io, caskroom_path, .{ .iterate = true })) |dir_const| {
         var caskroom = dir_const;
         defer caskroom.close(io);
@@ -581,7 +581,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             if (lookup.step() catch |e| return lookupFailed(&result, e)) continue;
 
             var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue;
+            const full = std.mem.print(&path_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue;
             const sz = util.pathSize(io, allocator, full);
             const dup = allocator.dupe(u8, entry.name) catch continue;
             candidates.append(allocator, .{ .kind = .caskroom_dir, .name = dup, .size = sz }) catch {
@@ -611,7 +611,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             .caskroom_dir => {
                 if (!dry_run) {
                     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                    const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, c.name }) catch continue;
+                    const full = std.mem.print(&path_buf, "{s}/Caskroom/{s}", .{ prefix, c.name }) catch continue;
                     std.Io.Dir.cwd().deleteTree(io, full) catch continue;
                 }
                 rep.item(c.name);
@@ -675,12 +675,12 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
 
     var label_buf: [256]u8 = undefined;
     for (candidates.items) |c| {
-        const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ c.name, c.version }) catch c.name;
+        const label = std.mem.print(&label_buf, "{s}/{s}", .{ c.name, c.version }) catch c.name;
         switch (c.kind) {
             .cellar => {
                 if (!dry_run) {
                     var path_buf: [512]u8 = undefined;
-                    const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, c.name, c.version }) catch continue;
+                    const full = std.mem.print(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, c.name, c.version }) catch continue;
                     std.Io.Dir.cwd().deleteTree(io, full) catch continue;
                 }
                 rep.item(label);
@@ -780,7 +780,7 @@ fn collectCellarOldVersions(
     dry_run: bool,
 ) !void {
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return;
+    const cellar_path = std.mem.print(&cellar_buf, "{s}/Cellar", .{prefix}) catch return;
 
     var cellar_dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch return;
     defer cellar_dir.close(io);
@@ -842,7 +842,7 @@ fn collectCellarOldVersions(
             if (keep) continue;
 
             var path_buf: [512]u8 = undefined;
-            const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, formula_entry.name, v.name }) catch continue;
+            const full = std.mem.print(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, formula_entry.name, v.name }) catch continue;
             const sz = util.pathSize(io, allocator, full);
 
             const fdup = allocator.dupe(u8, formula_entry.name) catch continue;
@@ -957,12 +957,12 @@ fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult, dr
 fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, token: []const u8, version: []const u8) u64 {
     var total: u64 = 0;
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
+    if (std.mem.print(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         total += util.pathSize(io, allocator, caskroom_path);
     } else |_| {}
 
     for (cask_mod.cache_extensions ++ cask_mod.sidecar_extensions) |ext| {
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
+        const cache_path = std.mem.print(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;
         } else |_| {}
@@ -977,7 +977,7 @@ fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []cons
 // read-only mount) gates the row so a future writable run can finish.
 fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, cache_dir: []const u8, token: []const u8, version: []const u8) bool {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
+    if (std.mem.print(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         if (std.Io.Dir.accessAbsolute(io, caskroom_path, .{})) |_| {
             std.Io.Dir.cwd().deleteTree(io, caskroom_path) catch return false;
         } else |_| {}
@@ -1005,7 +1005,7 @@ const fs_test_io = std.Options.debug_io;
 fn uniqueCacheDir(allocator: std.mem.Allocator) ![:0]u8 {
     var rand_bytes: [8]u8 = undefined;
     fs_test_io.random(&rand_bytes);
-    return std.fmt.allocPrintSentinel(allocator, "/tmp/malt_snapcache_{x}", .{std.mem.bytesToValue(u64, &rand_bytes)}, 0);
+    return allocator.printSentinel("/tmp/malt_snapcache_{x}", .{std.mem.bytesToValue(u64, &rand_bytes)}, 0);
 }
 
 /// A scratch prefix holding `names` as orphan dependency kegs plus
@@ -1030,13 +1030,12 @@ fn seedOrphanPrefix(
     var first = true;
     for ([_][]const []const u8{ names, keepers }, [_][]const u8{ "dependency", "direct" }) |group, reason| {
         for (group) |name| {
-            const keg = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/1.0", .{ prefix, name });
+            const keg = try allocator.print("{s}/Cellar/{s}/1.0", .{ prefix, name });
             defer allocator.free(keg);
-            const lib = try std.fmt.allocPrint(allocator, "{s}/lib", .{keg});
+            const lib = try allocator.print("{s}/lib", .{keg});
             defer allocator.free(lib);
             try std.Io.Dir.cwd().createDirPath(fs_test_io, lib);
-            const row = try std.fmt.allocPrint(
-                allocator,
+            const row = try allocator.print(
                 "{s}('{s}','{s}','1.0',0,'sha','{s}','{s}')",
                 .{ if (first) "" else ",", name, name, keg, reason },
             );
@@ -1069,8 +1068,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -1082,8 +1080,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1131,7 +1128,7 @@ test "runStaleCasks surfaces db prepare failure when the casks table shape is wr
 
     try testing.expectEqual(util.ScopeStatus.err, result.status);
     try testing.expectEqualStrings("db_prepare", result.error_kind orelse "");
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "stale-casks") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "stale-casks") != null);
 }
 
 test "runStaleCasks self-heals a schema-less db rather than reporting it as a fault" {
@@ -1310,7 +1307,7 @@ test "runCache reclaims relocated kegs orphaned by a past logic-version bump" {
     const stale_root = s.p("/store-relocated/v999999");
     try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store-relocated/v999999/" ++ sha));
     // The live version segment must survive the sweep.
-    const current = try std.fmt.allocPrint(allocator, "{s}/store-relocated/v{d}/{s}", .{
+    const current = try allocator.print("{s}/store-relocated/v{d}/{s}", .{
         prefix, relocated_store.RELOC_LOGIC_VERSION, sha,
     });
     defer allocator.free(current);
@@ -1364,7 +1361,7 @@ fn seedCurrentCask(db: *sqlite.Database, token: []const u8, version: []const u8)
 }
 
 fn touchFile(io: std.Io, path: []const u8) !void {
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         try std.Io.Dir.cwd().createDirPath(io, dir);
     }
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
@@ -1553,8 +1550,7 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
 fn uniqueCellarPrefix(allocator: std.mem.Allocator, comptime tag: []const u8) ![]const u8 {
     var rand_bytes: [8]u8 = undefined;
     fs_test_io.random(&rand_bytes);
-    const prefix = try std.fmt.allocPrint(
-        allocator,
+    const prefix = try allocator.print(
         "/tmp/malt_runOldVersions_cellar_" ++ tag ++ "_{x}",
         .{std.mem.bytesToValue(u64, &rand_bytes)},
     );
@@ -1566,7 +1562,7 @@ fn uniqueCellarPrefix(allocator: std.mem.Allocator, comptime tag: []const u8) ![
 const unused_cache_dir = "/nonexistent/malt_purge_scopes_cache";
 
 fn joinZ(allocator: std.mem.Allocator, base: []const u8, rest: []const u8) ![:0]u8 {
-    return std.fmt.allocPrintSentinel(allocator, "{s}{s}", .{ base, rest }, 0);
+    return allocator.printSentinel("{s}{s}", .{ base, rest }, 0);
 }
 
 fn setMtimeSeconds(path: []const u8, secs: i96) !void {
@@ -1601,8 +1597,7 @@ test "runOldVersions keeps the DB-linked cellar keg even when a stale sibling ha
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) " ++
                 "VALUES('foo','foo','2','sha','{s}/Cellar/foo/2');",
             .{prefix},
@@ -1653,8 +1648,7 @@ test "runOldVersions keeps every live version of a multi-keg formula" {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) VALUES" ++
                 "('openssl','openssl','2','s2','{s}/Cellar/openssl/2')," ++
                 "('openssl','openssl','3','s3','{s}/Cellar/openssl/3');",
@@ -1705,8 +1699,7 @@ test "runOldVersions keeps a revisioned linked keg whose dir name carries the re
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path) " ++
                 "VALUES('foo','foo','1.2.3',1,'sha','{s}/Cellar/foo/1.2.3_1');",
             .{prefix},
@@ -1753,8 +1746,7 @@ test "runOldVersions falls back to newest mtime when the live keg is absent on d
         defer db.close();
         try schema.initSchema(&db);
         // Live version 9 has no dir on disk.
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) " ++
                 "VALUES('foo','foo','9','sha','{s}/Cellar/foo/9');",
             .{prefix},
@@ -1828,8 +1820,7 @@ test "runUnusedDeps keeps an orphan whose Cellar entry is a symlink" {
         var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason) " ++
                 "VALUES ('oniguruma', 'oniguruma', '6.9', 'sha-onig', '{s}/Cellar/oniguruma/6.9', 'dependency');",
             .{prefix},
@@ -1879,8 +1870,7 @@ test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links desp
         var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason) " ++
                 "VALUES ('jq', 'jq', '1.0', 'sha-jq', '{s}/Cellar/jq/1.0', 'direct'), " ++
                 "('oniguruma', 'oniguruma', '6.9', 'sha-onig', '{s}/Cellar/oniguruma/6.9', 'dependency');",
@@ -1947,9 +1937,9 @@ test "runUnusedDeps drops the reaped orphan from the outdated snapshot" {
 
     const raw = try std.Io.Dir.cwd().readFileAlloc(fs_test_io, snap_path, allocator, .unlimited);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "staleboy") == null);
+    try testing.expect(std.mem.find(u8, raw, "staleboy") == null);
     // Every other keg's audit survives; a deleted file would re-audit all.
-    try testing.expect(std.mem.indexOf(u8, raw, "keepme") != null);
+    try testing.expect(std.mem.find(u8, raw, "keepme") != null);
 }
 
 test "runUnusedDeps keeps the audit of a surviving version when one name has two keg rows" {
@@ -1971,8 +1961,7 @@ test "runUnusedDeps keeps the audit of a surviving version when one name has two
     {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) " ++
                 "VALUES('foo','foo','2.0',0,'sha2','{s}/Cellar/foo/2.0','direct');",
             .{prefix},
@@ -1997,9 +1986,9 @@ test "runUnusedDeps keeps the audit of a surviving version when one name has two
 
     const raw = try std.Io.Dir.cwd().readFileAlloc(fs_test_io, snap_path, allocator, .unlimited);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"foo\"") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"foo\"") != null);
     // The lease is not renewed: a reap must not extend a stale audit's TTL.
-    try testing.expect(std.mem.indexOf(u8, raw, "1700000000000") != null);
+    try testing.expect(std.mem.find(u8, raw, "1700000000000") != null);
 }
 
 test "runUnusedDeps reconciles every orphan in the batch and tolerates no snapshot" {
@@ -2038,9 +2027,9 @@ test "runUnusedDeps reconciles every orphan in the batch and tolerates no snapsh
     try testing.expectEqual(@as(u32, 2), (try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false)).removed);
     const raw = try std.Io.Dir.cwd().readFileAlloc(fs_test_io, snap_path, allocator, .unlimited);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"one\"") == null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"two\"") == null);
-    try testing.expect(std.mem.indexOf(u8, raw, "keepme") != null);
+    try testing.expect(std.mem.find(u8, raw, "\"one\"") == null);
+    try testing.expect(std.mem.find(u8, raw, "\"two\"") == null);
+    try testing.expect(std.mem.find(u8, raw, "keepme") != null);
 }
 
 test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
@@ -2080,8 +2069,7 @@ test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) " ++
                 "VALUES('withsvc','withsvc','1.0',0,'sha','{s}/Cellar/withsvc/1.0','dependency')," ++
                 "('plainlib','plainlib','1.0',0,'sha','{s}/Cellar/plainlib/1.0','dependency')," ++
@@ -2150,8 +2138,7 @@ test "runUnusedDeps removes a revisioned orphan's Cellar dir named with the _<re
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        const insert = try std.fmt.allocPrintSentinel(
-            allocator,
+        const insert = try allocator.printSentinel(
             "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) " ++
                 "VALUES('gettext','gettext','0.22',1,'sha','{s}/Cellar/gettext/0.22_1','dependency');",
             .{prefix},
@@ -2178,14 +2165,14 @@ test "runUnusedDeps removes a revisioned orphan's Cellar dir named with the _<re
 test "caskVersionFootprint counts a cached artefact whose path exceeds 512 bytes" {
     const io = std.Options.debug_io;
     const a = std.testing.allocator;
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_footprint_long_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_footprint_long_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
     const seg = &@as([200]u8, @splat('d'));
-    const cask_dir = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}/Cask", .{ root, seg, seg, seg });
+    const cask_dir = try a.print("{s}/{s}/{s}/{s}/Cask", .{ root, seg, seg, seg });
     defer a.free(cask_dir);
     try std.Io.Dir.cwd().createDirPath(io, cask_dir);
-    const art = try std.fmt.allocPrint(a, "{s}/tok-1.0.dmg", .{cask_dir});
+    const art = try a.print("{s}/tok-1.0.dmg", .{cask_dir});
     defer a.free(art);
     try std.testing.expect(art.len > 512);
     const f = try std.Io.Dir.createFileAbsolute(io, art, .{});
@@ -2199,22 +2186,22 @@ test "caskVersionFootprint counts a cached artefact whose path exceeds 512 bytes
 test "cache prune and downloads sweep reach files under a cache dir past 512 bytes" {
     const io = fs_test_io;
     const a = std.testing.allocator;
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_sweep_long_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_sweep_long_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
     const seg = &@as([200]u8, @splat('d'));
-    const cache = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
+    const cache = try a.print("{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
     defer a.free(cache);
     try std.testing.expect(cache.len + "/downloads/stale.bin".len > 512);
-    const nested = try std.fmt.allocPrint(a, "{s}/sub", .{cache});
+    const nested = try a.print("{s}/sub", .{cache});
     defer a.free(nested);
-    const downloads = try std.fmt.allocPrint(a, "{s}/downloads", .{cache});
+    const downloads = try a.print("{s}/downloads", .{cache});
     defer a.free(downloads);
     try std.Io.Dir.cwd().createDirPath(io, nested);
     try std.Io.Dir.cwd().createDirPath(io, downloads);
-    const old = try std.fmt.allocPrint(a, "{s}/old.tmp", .{nested});
+    const old = try a.print("{s}/old.tmp", .{nested});
     defer a.free(old);
-    const stale = try std.fmt.allocPrint(a, "{s}/stale.bin", .{downloads});
+    const stale = try a.print("{s}/stale.bin", .{downloads});
     defer a.free(stale);
     for ([_][]const u8{ old, stale }) |p| (try std.Io.Dir.createFileAbsolute(io, p, .{})).close(io);
 

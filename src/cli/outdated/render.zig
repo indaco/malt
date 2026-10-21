@@ -190,8 +190,8 @@ test "writeJsonArray keeps casks inside the array, not as per-line NDJSON" {
     const out = aw.written();
     try std.testing.expect(std.mem.startsWith(u8, out, "{\"schema_version\":1,\"outdated\":["));
     try std.testing.expectEqualStrings("]}\n", out[out.len - 3 ..]);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"cask\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "}\n{") == null);
+    try std.testing.expect(std.mem.find(u8, out, "\"type\":\"cask\"") != null);
+    try std.testing.expect(std.mem.find(u8, out, "}\n{") == null);
 }
 
 test "writeJsonArray comma-separates a formula-only array with no trailing comma" {
@@ -293,12 +293,12 @@ test "writeCaskEntries human mode no-color path adds the [cask] kind tag" {
     };
     writeCaskEntries(&aw.writer, &entries);
 
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "alpha-cask") != null);
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " (1.0)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " ≠ 2.0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " [cask]") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "alpha-cask") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), " (1.0)") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), " ≠ 2.0") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), " [cask]") != null);
     // No ANSI escape leaked into the no-color path.
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\x1b[") == null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "\x1b[") == null);
 }
 
 test "the plain-text row contains no directional comparison glyph" {
@@ -318,7 +318,7 @@ test "the plain-text row contains no directional comparison glyph" {
     writeFormulaEntries(&aw.writer, &entries);
 
     try std.testing.expectEqualStrings("  \xe2\x96\xb8 alpha (1.0) ≠ 2.0\n", aw.written());
-    try std.testing.expect(std.mem.indexOfAny(u8, aw.written(), "<>") == null);
+    try std.testing.expect(std.mem.findAny(u8, aw.written(), "<>") == null);
 }
 
 test "a backward cask row keeps both tags, kind first" {

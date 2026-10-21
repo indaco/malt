@@ -63,16 +63,15 @@ fn readRelative(io: std.Io, rel_path: []const u8) ![]u8 {
 
 fn scanImports(b: Boundary, content: []const u8, failures: *std.ArrayList([]const u8)) !void {
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, content, cursor, import_prefix)) |start| {
+    while (std.mem.findPos(u8, content, cursor, import_prefix)) |start| {
         const path_start = start + import_prefix.len;
-        const end = std.mem.indexOfScalarPos(u8, content, path_start, '"') orelse break;
+        const end = std.mem.findScalarPos(u8, content, path_start, '"') orelse break;
         const import_path = content[path_start..end];
         cursor = end + 1;
 
         for (b.forbidden) |needle| {
-            if (std.mem.indexOf(u8, import_path, needle) != null) {
-                const msg = try std.fmt.allocPrint(
-                    testing.allocator,
+            if (std.mem.find(u8, import_path, needle) != null) {
+                const msg = try testing.allocator.print(
                     "{s} imports {s} (forbidden: {s})",
                     .{ b.file, import_path, needle },
                 );

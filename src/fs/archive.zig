@@ -16,7 +16,7 @@ const child_allocator = std.heap.c_allocator;
 pub fn isSafeEntryPath(name: []const u8) bool {
     if (name.len == 0) return false;
     if (name[0] == '/') return false;
-    if (std.mem.indexOfScalar(u8, name, 0) != null) return false;
+    if (std.mem.findScalar(u8, name, 0) != null) return false;
     var it = std.mem.splitScalar(u8, name, '/');
     while (it.next()) |comp| {
         if (std.mem.eql(u8, comp, "..")) return false;
@@ -34,7 +34,7 @@ pub fn isSafeEntryPath(name: []const u8) bool {
 pub fn isSafeSymlinkTarget(entry_name: []const u8, link_name: []const u8) bool {
     if (link_name.len == 0) return false;
     if (link_name[0] == '/') return false;
-    if (std.mem.indexOfScalar(u8, link_name, 0) != null) return false;
+    if (std.mem.findScalar(u8, link_name, 0) != null) return false;
 
     // Parent depth: components in entry_name minus the symlink's own slot.
     var parent_depth: isize = 0;
@@ -89,7 +89,7 @@ const Limits = struct {
 };
 
 /// Extract a tar.gz archive from `archive_path` into `dest_dir` using
-/// the native 0.16 `std.compress.flate` + `std.tar.pipeToFileSystem`
+/// the native `std.compress.flate` + `std.tar.extract`
 /// pipeline — no `tar` subprocess. The 0.15 decompressor was known to
 /// panic (unreachable in `Writer.rebase`) on malformed gzip streams;
 /// 0.16's flate surfaces those as plain errors, so we can stream the
@@ -153,7 +153,7 @@ fn extractTarGzLimited(
     // post-pass. Any other logged category is a real failure.
     var diags: std.tar.Diagnostics = .{ .allocator = pre_arena.allocator() };
     defer diags.deinit();
-    std.tar.pipeToFileSystem(io, dir, &decompress.reader, .{ .diagnostics = &diags }) catch
+    std.tar.extract(io, dir, &decompress.reader, .{ .diagnostics = &diags }) catch
         return error.ExtractionFailed;
     for (diags.errors.items) |item| switch (item) {
         .unsupported_file_type => |info| if (info.file_type != .hard_link) return error.ExtractionFailed,
@@ -190,7 +190,7 @@ fn canonicalEntryName(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
 /// archive declared earlier.
 fn traversesSymlink(set: *const std.StringHashMapUnmanaged(void), canon: []const u8) bool {
     var i: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, canon, i, '/')) |slash| {
+    while (std.mem.findScalarPos(u8, canon, i, '/')) |slash| {
         if (set.contains(canon[0..slash])) return true;
         i = slash + 1;
     }
@@ -238,8 +238,8 @@ fn scanEntriesWithIterator(
     var limit_buf: [std.compress.flate.max_window_len]u8 = undefined;
     var limited = decompress.reader.limited(.limited64(limits.bytes), &limit_buf);
 
-    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var diags: std.tar.Diagnostics = .{ .allocator = arena };
     defer diags.deinit();
     var it = std.tar.Iterator.init(&limited.interface, .{
@@ -527,7 +527,7 @@ fn parsePaxOverrides(
         if (slot != null and value_len <= std.Io.Dir.max_path_bytes) {
             const value = arena.alloc(u8, value_len) catch return error.ExtractionFailed;
             r.readSliceAll(value) catch return error.ExtractionFailed;
-            if (std.mem.indexOfScalar(u8, value, 0) != null) return error.ExtractionFailed;
+            if (std.mem.findScalar(u8, value, 0) != null) return error.ExtractionFailed;
             slot.?.* = value;
         } else {
             r.discardAll(value_len) catch return error.ExtractionFailed;
@@ -539,7 +539,7 @@ fn parsePaxOverrides(
 
 /// `nullStr` from std.tar - first NUL terminates, full slice otherwise.
 fn nullSlice(buf: []const u8) []const u8 {
-    return buf[0 .. std.mem.indexOfScalar(u8, buf, 0) orelse buf.len];
+    return buf[0 .. std.mem.findScalar(u8, buf, 0) orelse buf.len];
 }
 
 /// Parse a tar octal field (ASCII digits, possibly leading zeros, often
@@ -792,8 +792,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_archive_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -812,8 +811,7 @@ const Scratch = struct {
 
     /// Absolute path to `sub` (leading slash included); valid until deinit.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -833,7 +831,7 @@ const Scratch = struct {
 fn testTarHeader(name: []const u8, typeflag: u8, link: []const u8, size: u64) [512]u8 {
     var h: [512]u8 = @splat(0);
     @memcpy(h[0..name.len], name);
-    _ = std.fmt.bufPrint(h[124..135], "{o:0>11}", .{size}) catch unreachable;
+    _ = std.mem.print(h[124..135], "{o:0>11}", .{size}) catch unreachable;
     h[156] = typeflag;
     @memcpy(h[157..][0..link.len], link);
     @memcpy(h[257..262], "ustar");
@@ -848,7 +846,7 @@ fn testTarSeal(h: *[512]u8) void {
     @memset(h[148..156], ' ');
     var sum: u64 = 0;
     for (h) |b| sum += b;
-    _ = std.fmt.bufPrint(h[148..154], "{o:0>6}", .{sum}) catch unreachable;
+    _ = std.mem.print(h[148..154], "{o:0>6}", .{sum}) catch unreachable;
     h[154] = 0;
     h[155] = ' ';
 }
@@ -872,7 +870,7 @@ fn testPaxRecord(out: []u8, key: []const u8, value: []const u8) []const u8 {
         digits = std.fmt.count("{d}", .{total});
         total = fixed + digits;
     }
-    return std.fmt.bufPrint(out, "{d} {s}={s}\n", .{ total, key, value }) catch unreachable;
+    return std.mem.print(out, "{d} {s}={s}\n", .{ total, key, value }) catch unreachable;
 }
 
 /// gzip-compress `raw` into `out`, returning the written gzip stream.
@@ -916,7 +914,7 @@ const TestTar = struct {
     /// walk before it can judge the target.
     fn modeEntry(self: *TestTar, name: []const u8, typeflag: u8, link: []const u8, mode: u16) void {
         var h = testTarHeader(name, typeflag, link, 0);
-        _ = std.fmt.bufPrint(h[100..107], "{o:0>7}", .{mode}) catch unreachable;
+        _ = std.mem.print(h[100..107], "{o:0>7}", .{mode}) catch unreachable;
         testTarSeal(&h);
         @memcpy(self.buf[self.len..][0..512], h[0..]);
         self.len += 512;
@@ -1027,7 +1025,7 @@ fn testZeroZip(io: std.Io, s: *Scratch, size: usize, declare: ?u32) ![]const u8 
     if (declare) |n| {
         const bytes = try s.dir.readFileAlloc(io, "big.zip", s.arena.allocator(), .limited(1 << 20));
         std.mem.writeInt(u32, bytes[22..26], n, .little);
-        const central = std.mem.indexOf(u8, bytes, "PK\x01\x02") orelse return error.TestUnexpectedResult;
+        const central = std.mem.find(u8, bytes, "PK\x01\x02") orelse return error.TestUnexpectedResult;
         std.mem.writeInt(u32, bytes[central + 24 ..][0..4], n, .little);
         try s.dir.writeFile(io, .{ .sub_path = "big.zip", .data = bytes });
     }
@@ -1055,7 +1053,7 @@ test "extractTarXzFile refuses an archive whose payload exceeds the byte budget"
 }
 
 test "extractZip counts what unzip writes, not what the archive declares" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1070,7 +1068,7 @@ test "extractZip counts what unzip writes, not what the archive declares" {
 }
 
 test "extractZip admits an archive of empty files under a zero budget" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1085,7 +1083,7 @@ test "extractZip admits an archive of empty files under a zero budget" {
 }
 
 test "extractZip refuses an encrypted archive instead of waiting on a password" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1106,7 +1104,7 @@ test "extractZip refuses an encrypted archive instead of waiting on a password" 
 }
 
 test "extractZip extracts an archive that fits the byte budget" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1120,7 +1118,7 @@ test "extractZip extracts an archive that fits the byte budget" {
 }
 
 test "extractZip ignores a PATH-resident unzip shim" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
 
     var s = try Scratch.init("zip_path_shim");
     defer s.deinit();
@@ -1148,7 +1146,7 @@ test "extractZip ignores a PATH-resident unzip shim" {
     try std.testing.expect(zip_term == .exited and zip_term.exited == 0);
     try std.Io.Dir.symLinkAbsolute(test_io, "/usr/bin/false", shim, .{});
 
-    const path_entry = try std.fmt.allocPrintSentinel(s.arena.allocator(), "PATH={s}", .{shim_dir}, 0);
+    const path_entry = try s.arena.allocator().printSentinel("PATH={s}", .{shim_dir}, 0);
     const entries = [_:null]?[*:0]const u8{path_entry.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
     var shim_io: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = environ });
@@ -1310,7 +1308,7 @@ test "extractTarGz rejects an escaping GNU long-link target" {
     t.entry("alias", '2', "benign");
 
     const result = testExtract(io, &s, t.bytes());
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.Io.Dir.readLinkAbsolute(io, s.p("/dest/alias"), &link_buf)) |_| {
         return error.TestUnexpectedResult;
     } else |err| try std.testing.expectEqual(error.FileNotFound, err);
@@ -1417,7 +1415,7 @@ test "extractTarGz lets an old-style file entry consume a GNU long link" {
     t.entry("alias", '2', "benign");
 
     try testExtract(io, &s, t.bytes());
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(io, s.p("/dest/alias"), &link_buf);
     try std.testing.expectEqualStrings("benign", link_buf[0..n]);
     // The walk only runs while this link is counted, so assert it survived.
@@ -1622,7 +1620,7 @@ test "extractTarGz accepts safe GNU long-name and long-link metadata" {
     t.entry("placeholder", '2', "placeholder");
 
     try testExtract(io, &s, t.bytes());
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const link_len = try std.Io.Dir.readLinkAbsolute(io, s.p("/dest/nested/alias"), &link_buf);
     try std.testing.expectEqualStrings("../target", link_buf[0..link_len]);
 }

@@ -22,12 +22,12 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "link", tag);
         defer allocator.free(base);
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
+        const path = try allocator.printSentinel("{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const sub = [_][]const u8{ "db", "bin", "opt" };
         for (sub) |s| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, s });
+            const dir = try allocator.print("{s}/{s}", .{ path, s });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
@@ -52,18 +52,18 @@ fn unquiet() void {
 // Insert a keg row + Cellar/<name>/<v>/bin/<bin> on disk so the linker
 // has a real source tree to symlink from.
 fn seedKeg(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, version: []const u8, bin_name: []const u8) !void {
-    const cellar_path = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const cellar_path = try allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer allocator.free(cellar_path);
-    const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{cellar_path});
+    const bin_dir = try allocator.print("{s}/bin", .{cellar_path});
     defer allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
-    const bin_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin_dir, bin_name });
+    const bin_path = try allocator.print("{s}/{s}", .{ bin_dir, bin_name });
     defer allocator.free(bin_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{ .truncate = true });
     f.close(std.Options.debug_io);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -110,7 +110,7 @@ test "executeLink on a non-installed package returns Aborted" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -131,7 +131,7 @@ test "executeLink refuses a damaged record whose cellar path is not absolute" {
     try seedKeg(testing.allocator, s.path, "relpkg", "1.0", "relbin");
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET cellar_path = 'Cellar/relpkg/1.0' WHERE name = 'relpkg';");
@@ -146,7 +146,7 @@ test "executeLink refuses a damaged record whose cellar path is not absolute" {
             link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"relpkg"}),
         );
     }
-    const link_path = try std.fmt.allocPrint(testing.allocator, "{s}/bin/relbin", .{s.path});
+    const link_path = try testing.allocator.print("{s}/bin/relbin", .{s.path});
     defer testing.allocator.free(link_path);
     try testing.expect(!pathExists(link_path));
 }
@@ -165,9 +165,9 @@ test "executeLink refuses an unknown flag before linking anything" {
         error.Aborted,
         link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "-n", "foo" }),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: -n") != null);
 
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(!pathExists(linked));
 }
@@ -181,7 +181,7 @@ test "executeLink takes the name after `--`, even a dash-led one" {
 
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--", "-foo" });
 
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(pathExists(linked));
 }
@@ -198,7 +198,7 @@ test "executeLink creates symlinks for an installed keg, executeUnlink removes t
 
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
 
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(pathExists(linked));
 
@@ -211,7 +211,7 @@ test "--dry-run link, unlink and link --isolate preview without touching links" 
     var s = try Scratch.init(testing.allocator, "dry_run");
     defer s.deinit(testing.allocator);
     try seedKeg(testing.allocator, s.path, "foo", "1.0", "foobin");
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
 
     var captured: std.ArrayList(u8) = .empty;
@@ -223,12 +223,12 @@ test "--dry-run link, unlink and link --isolate preview without touching links" 
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
     output.setDryRun(false);
     try testing.expect(!pathExists(linked));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would link foo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would link foo") != null);
 
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET install_reason = 'dependency' WHERE name = 'foo';");
@@ -240,8 +240,8 @@ test "--dry-run link, unlink and link --isolate preview without touching links" 
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "foo" });
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "--all" });
     try testing.expect(pathExists(linked));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would unlink foo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would isolate foo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would unlink foo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would isolate foo") != null);
 }
 
 test "executeLink --overwrite forces relink past the conflict guard" {
@@ -252,15 +252,15 @@ test "executeLink --overwrite forces relink past the conflict guard" {
     try seedKeg(testing.allocator, s.path, "foo", "1.0", "shared");
 
     // A second pseudo-keg whose `shared` already lives in prefix/bin.
-    const sentinel_target = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/other/1.0/bin/shared", .{s.path});
+    const sentinel_target = try testing.allocator.print("{s}/Cellar/other/1.0/bin/shared", .{s.path});
     defer testing.allocator.free(sentinel_target);
-    if (std.fs.path.dirname(sentinel_target)) |d| {
+    if (std.Io.Dir.path.dirname(sentinel_target)) |d| {
         test_io.cwd().createDirPath(std.Options.debug_io, d) catch {};
     }
     const f = try test_io.createFileAbsolute(std.Options.debug_io, sentinel_target, .{ .truncate = true });
     f.close(std.Options.debug_io);
 
-    const link_at = try std.fmt.allocPrint(testing.allocator, "{s}/bin/shared", .{s.path});
+    const link_at = try testing.allocator.print("{s}/bin/shared", .{s.path});
     defer testing.allocator.free(link_at);
     try test_io.symLinkAbsolute(std.Options.debug_io, sentinel_target, link_at, .{});
 
@@ -304,7 +304,7 @@ test "executeUnlink on a non-installed package returns Aborted" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -335,10 +335,10 @@ test "executeUnlink refuses a flag instead of unlinking the keg" {
     for ([_][]const []const u8{ &.{ "foo", "-n" }, &.{ "-n", "foo" } }) |argv| {
         try testing.expectError(error.Aborted, link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, argv));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -n") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: -n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
 
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(pathExists(linked));
 }
@@ -353,7 +353,7 @@ test "executeUnlink takes the name after `--`, even a dash-led one" {
 
     try link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--", "-foo" });
 
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(!pathExists(linked));
 }
@@ -395,7 +395,7 @@ fn seedDepKeg(
 ) !void {
     try seedKeg(allocator, prefix, name, version, bin_name);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("UPDATE kegs SET install_reason = 'dependency' WHERE name = ?1;");
@@ -414,7 +414,7 @@ test "executeLink --isolate on a dep keg removes bin links and sets bin_isolated
 
     // First, link normally so the bin/ row + symlink exist.
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"depbin"});
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/depbin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/depbin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(pathExists(linked));
 
@@ -423,7 +423,7 @@ test "executeLink --isolate on a dep keg removes bin links and sets bin_isolated
     try testing.expect(!pathExists(linked));
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE name='depbin';");
@@ -456,7 +456,7 @@ test "executeLink --isolate without a name and without --all is rejected" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -486,7 +486,7 @@ test "executeLink --isolate <missing-name> returns Aborted" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -504,7 +504,7 @@ test "executeLink --isolate --all on a prefix with no dep kegs is a clean info" 
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -525,7 +525,7 @@ test "executeLink on an isolated dep re-links bins and clears bin_isolated" {
     // Isolate first.
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"depbin"});
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "depbin" });
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/depbin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/depbin", .{s.path});
     defer testing.allocator.free(linked);
     try testing.expect(!pathExists(linked));
 
@@ -534,7 +534,7 @@ test "executeLink on an isolated dep re-links bins and clears bin_isolated" {
     try testing.expect(pathExists(linked));
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE name='depbin';");
@@ -548,7 +548,7 @@ test "link and unlink refuse a second name instead of dropping it" {
     var s = try Scratch.init(testing.allocator, "extra_name");
     defer s.deinit(testing.allocator);
     try seedKeg(testing.allocator, s.path, "foo", "1.0", "foobin");
-    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    const linked = try testing.allocator.print("{s}/bin/foobin", .{s.path});
     defer testing.allocator.free(linked);
 
     var captured: std.ArrayList(u8) = .empty;
@@ -558,10 +558,10 @@ test "link and unlink refuse a second name instead of dropping it" {
 
     try testing.expectError(error.Aborted, link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "foo", "bar" }));
     try testing.expect(!pathExists(linked));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Usage: mt link") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Usage: mt link") != null);
 
     try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
     try testing.expectError(error.Aborted, link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "foo", "bar" }));
     try testing.expect(pathExists(linked));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Usage: mt unlink") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Usage: mt unlink") != null);
 }

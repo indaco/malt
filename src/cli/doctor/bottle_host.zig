@@ -74,9 +74,9 @@ pub const Report = struct {
 
     fn addFlagged(self: *Report, allocator: std.mem.Allocator, name: []const u8, remedy: Remedy) void {
         const line = switch (remedy) {
-            .reinstall => std.fmt.allocPrint(allocator, "{s}: mt reinstall {s}", .{ name, name }),
+            .reinstall => allocator.print("{s}: mt reinstall {s}", .{ name, name }),
             // A library's dependents block a plain uninstall.
-            .uninstall => std.fmt.allocPrint(allocator, "{s}: no bottle for this macOS — mt uninstall {s}, dependents first", .{ name, name }),
+            .uninstall => allocator.print("{s}: no bottle for this macOS — mt uninstall {s}, dependents first", .{ name, name }),
         } catch return;
         self.lines.append(allocator, line) catch return allocator.free(line);
         switch (remedy) {
@@ -87,7 +87,7 @@ pub const Report = struct {
 
     fn addUnchecked(self: *Report, allocator: std.mem.Allocator, name: []const u8) void {
         self.unchecked += 1;
-        const line = std.fmt.allocPrint(allocator, "{s}: not checked", .{name}) catch return;
+        const line = allocator.print("{s}: not checked", .{name}) catch return;
         self.unchecked_lines.append(allocator, line) catch allocator.free(line);
     }
 
@@ -110,7 +110,7 @@ pub fn collect(
 ) Report {
     var report: Report = .{};
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return report;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return report;
     var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return report;
     defer db.close();
     var stmt = db.prepare("SELECT name, tap, store_sha256, cellar_path FROM kegs ORDER BY name;") catch return report;
@@ -123,7 +123,7 @@ pub fn collect(
     if (index_bytes) |b| {
         var it = std.mem.splitScalar(u8, b, '\n');
         while (it.next()) |line| {
-            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            const tab = std.mem.findScalar(u8, line, '\t') orelse continue;
             index.put(allocator, line[0..tab], line[tab + 1 ..]) catch break;
         }
     }
@@ -203,7 +203,7 @@ fn judge(io: std.Io, files: Files, sha: []const u8, keg_path: []const u8, host_m
 /// ponytail: one binary per keg, since Homebrew builds a keg against one
 /// deployment target; a vendored older binary found first would hide it.
 fn kegMacosFloor(io: std.Io, keg_path: []const u8) ?u32 {
-    if (!std.fs.path.isAbsolute(keg_path)) return null;
+    if (!std.Io.Dir.path.isAbsolute(keg_path)) return null;
     var keg = std.Io.Dir.openDirAbsolute(io, keg_path, .{}) catch return null;
     defer keg.close(io);
     for ([_][]const u8{ "bin", "lib" }) |sub| {
@@ -235,7 +235,7 @@ fn parseTags(allocator: std.mem.Allocator, tags: []const u8) !Files {
     errdefer files.deinit(allocator);
     var it = std.mem.tokenizeScalar(u8, tags, ',');
     while (it.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const eq = std.mem.findScalar(u8, pair, '=') orelse continue;
         try files.map.put(allocator, pair[0..eq], .{ .cellar = "", .url = "", .sha256 = pair[eq + 1 ..] });
     }
     return files;
@@ -250,20 +250,20 @@ pub fn detail(buf: []u8, report: Report) ?[]const u8 {
     const fallback = "Some kegs were poured from a bottle built for a newer macOS; reinstall or uninstall them.";
     if (report.count() == 0) {
         if (report.unchecked == 0) return null;
-        return std.fmt.bufPrint(buf, "{d} keg(s) " ++ unchecked_note, .{report.unchecked}) catch unchecked_note;
+        return std.mem.print(buf, "{d} keg(s) " ++ unchecked_note, .{report.unchecked}) catch unchecked_note;
     }
-    const head = std.fmt.bufPrint(
+    const head = std.mem.print(
         buf,
         "{d} keg(s) were poured from a bottle built for a newer macOS and may fail to load: {d} to reinstall (mt reinstall <name>), {d} with no bottle for this macOS (mt uninstall <name>, dependents first)",
         .{ report.count(), report.reinstall, report.uninstall },
     ) catch return fallback;
     if (report.unchecked == 0) return head;
-    const tail = std.fmt.bufPrint(buf[head.len..], "; {d} more " ++ unchecked_note, .{report.unchecked}) catch return head;
+    const tail = std.mem.print(buf[head.len..], "; {d} more " ++ unchecked_note, .{report.unchecked}) catch return head;
     return buf[0 .. head.len + tail.len];
 }
 
 const testing = std.testing;
-const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+const arch = if (@import("builtin").target.cpu.arch == .aarch64) "arm64_" else "";
 const sha_a = &@as([64]u8, @splat('a'));
 const sha_b = &@as([64]u8, @splat('b'));
 
@@ -346,9 +346,9 @@ test "detail names both remedies with their counts" {
     var buf: [512]u8 = undefined;
     const text = detail(&buf, .{ .reinstall = 2, .uninstall = 1 }).?;
     try testing.expect(std.mem.startsWith(u8, text, "3 keg(s)"));
-    try testing.expect(std.mem.indexOf(u8, text, "2 to reinstall (mt reinstall <name>)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "1 with no bottle for this macOS (mt uninstall <name>, dependents first)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "not checked") == null);
+    try testing.expect(std.mem.find(u8, text, "2 to reinstall (mt reinstall <name>)") != null);
+    try testing.expect(std.mem.find(u8, text, "1 with no bottle for this macOS (mt uninstall <name>, dependents first)") != null);
+    try testing.expect(std.mem.find(u8, text, "not checked") == null);
 }
 
 test "detail admits kegs it could not check instead of a bare all-clear" {

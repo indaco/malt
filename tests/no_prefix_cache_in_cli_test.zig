@@ -62,7 +62,7 @@ fn scanContent(scanned_root: []const u8, rel_path: []const u8, content: []const 
     var hits: usize = 0;
     for (forbidden) |needle| {
         var cursor: usize = 0;
-        while (std.mem.indexOfPos(u8, content, cursor, needle)) |start| {
+        while (std.mem.findPos(u8, content, cursor, needle)) |start| {
             cursor = start + needle.len;
             const line = 1 + std.mem.count(u8, content[0..start], "\n");
             if (mode == .report) std.debug.print("{s}/{s}:{d} builds the cache dir from the prefix; use atomic.maltCacheDir\n", .{ scanned_root, rel_path, line });
@@ -74,8 +74,8 @@ fn scanContent(scanned_root: []const u8, rel_path: []const u8, content: []const 
 
 test "scanContent flags both hand-built spellings and ignores the helper call" {
     try testing.expectEqual(@as(usize, 0), scanContent("src/x", "ok.zig", "const d = atomic.maltCacheDir(allocator) catch return;\n", .quiet));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "bad.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache\", .{prefix});\n", .quiet));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "cask.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Cask/{s}\", .{ prefix, name });\n", .quiet));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "tap.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Tap\", .{prefix});\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "bad.zig", "const d = std.mem.print(&buf, \"{s}/cache\", .{prefix});\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "cask.zig", "const d = std.mem.print(&buf, \"{s}/cache/Cask/{s}\", .{ prefix, name });\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "tap.zig", "const d = std.mem.print(&buf, \"{s}/cache/Tap\", .{prefix});\n", .quiet));
     try testing.expectEqual(@as(usize, 1), scanContent("src/x", "join.zig", "const d = prefix_path.join(&buf, prefix, \"/cache\") catch return;\n", .quiet));
 }

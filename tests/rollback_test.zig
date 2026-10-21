@@ -25,7 +25,7 @@ fn unsetPrefix() void {
 /// `zig build test` (or the ReleaseSafe regression harness) and fails the
 /// WAL-mode open; keying on the pid keeps each runner isolated.
 fn rbPrefix(buf: []u8, comptime name: []const u8) [:0]const u8 {
-    return std.fmt.bufPrintSentinel(buf, "/tmp/malt_rb_{d}_" ++ name, .{std.c.getpid()}, 0) catch unreachable;
+    return std.mem.printSentinel(buf, "/tmp/malt_rb_{d}_" ++ name, .{std.c.getpid()}, 0) catch unreachable;
 }
 
 /// Create a sandboxed malt prefix with an initialized empty DB. Caller must
@@ -35,11 +35,11 @@ fn makeSandbox(path: [:0]const u8) !void {
     try test_io.makeDirAbsolute(std.Options.debug_io, path);
 
     var db_sub_buf: [512]u8 = undefined;
-    const db_sub = try std.fmt.bufPrint(&db_sub_buf, "{s}/db", .{path});
+    const db_sub = try std.mem.print(&db_sub_buf, "{s}/db", .{path});
     try test_io.makeDirAbsolute(std.Options.debug_io, db_sub);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -52,7 +52,7 @@ test "schema creates kegs table with expected columns" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [96]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/rb.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_buf, "{s}/rb.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -102,7 +102,7 @@ test "rollback returns error.Aborted when no previous version exists in store" {
     // Record an installed keg but deliberately omit the store/ directory so
     // the store-scan path fails with "Cannot read store directory".
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec("INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason) VALUES ('wget', 'wget', '1.24', 0, 'homebrew/core', 'deadbeef', '/tmp/none', 'direct');");
     db.close();
@@ -130,7 +130,7 @@ test "rollback distinguishes a cask token from a truly missing package" {
     // installed, just not as a formula. This test pins the corrected
     // diagnostic so the lie doesn't quietly come back.
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec(
         \\INSERT INTO casks (token, name, version, url, sha256)
@@ -156,8 +156,8 @@ test "rollback distinguishes a cask token from a truly missing package" {
 
     // The corrected diagnostic names the cask shape and steers the user
     // away from the "package is missing" mental model.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "cask") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "is not installed") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "cask") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "is not installed") == null);
 }
 
 test "schema version table exists" {
@@ -167,7 +167,7 @@ test "schema version table exists" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db_buf: [96]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/sv.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_buf, "{s}/sv.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -186,7 +186,7 @@ const output = malt.output;
 /// so `execute` clears its "package not installed" guard.
 fn insertCurrentKeg(prefix: [:0]const u8, name: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -220,11 +220,11 @@ fn seedStoreEntry(
 ) !void {
     const io = std.Options.debug_io;
     var buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
+    const dir = try std.mem.print(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
     try test_io.cwd().createDirPath(io, dir);
 
     var f_buf: [600]u8 = undefined;
-    const file_path = try std.fmt.bufPrint(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
+    const file_path = try std.mem.print(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
     const f = try test_io.createFileAbsolute(io, file_path, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, "{}");
@@ -260,15 +260,15 @@ test "rollback --list prints every store entry available for the package" {
     try rollback.execute(&ctx, testing.allocator, &.{ "--list", "wget" });
 
     const out = stdout_buf.items;
-    try testing.expect(std.mem.indexOf(u8, out, "wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
+    try testing.expect(std.mem.find(u8, out, "wget") != null);
+    try testing.expect(std.mem.find(u8, out, "1.20") != null);
+    try testing.expect(std.mem.find(u8, out, "1.21") != null);
     // Current version is excluded from the listing.
-    try testing.expect(std.mem.indexOf(u8, out, "1.22") == null);
+    try testing.expect(std.mem.find(u8, out, "1.22") == null);
 
     // Newest entry (sha_newer/1.21) precedes the older one (sha_older/1.20).
-    const v21 = std.mem.indexOf(u8, out, "1.21").?;
-    const v20 = std.mem.indexOf(u8, out, "1.20").?;
+    const v21 = std.mem.find(u8, out, "1.21").?;
+    const v20 = std.mem.find(u8, out, "1.20").?;
     try testing.expect(v21 < v20);
 }
 
@@ -348,7 +348,7 @@ test "rollback --to <current_version> is a clean no-op, not a confusing refusal"
 
     // The "not in the store" refusal must NOT fire — that line is what we
     // explicitly do not want surfacing in this case.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "is not in the store") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "is not in the store") == null);
 }
 
 test "rollback --to <version> refuses with the listing when the version is absent" {
@@ -378,8 +378,8 @@ test "rollback --to <version> refuses with the listing when the version is absen
 
     const out = stdout_buf.items;
     // The refusal must surface the actual available versions so the user can pick one.
-    try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
+    try testing.expect(std.mem.find(u8, out, "1.20") != null);
+    try testing.expect(std.mem.find(u8, out, "1.21") != null);
 }
 
 // --- cask `--list` / `--to` integration ---------------------------------
@@ -391,7 +391,7 @@ test "rollback reports a casks table it cannot read instead of not installed" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try seedCask(prefix, "flux-markdown", "1.32.427");
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -402,13 +402,13 @@ test "rollback reports a casks table it cannot read instead of not installed" {
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"flux-markdown"}));
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "is not installed") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "package database") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "is not installed") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "package database") != null);
 }
 
 fn seedCask(prefix: [:0]const u8, token: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare(
@@ -423,7 +423,7 @@ fn seedCask(prefix: [:0]const u8, token: []const u8, version: []const u8) !void 
 
 fn seedCaskVersion(prefix: [:0]const u8, token: []const u8, version: []const u8, installed_at: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare(
@@ -463,12 +463,12 @@ test "rollback <cask> --list lists every retained cask version" {
     try rollback.execute(&ctx, testing.allocator, &.{ "flux-markdown", "--list" });
 
     const out = stdout_buf.items;
-    try testing.expect(std.mem.indexOf(u8, out, "1.30.0") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.31.0") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.32.427") == null);
+    try testing.expect(std.mem.find(u8, out, "1.30.0") != null);
+    try testing.expect(std.mem.find(u8, out, "1.31.0") != null);
+    try testing.expect(std.mem.find(u8, out, "1.32.427") == null);
 
-    const p31 = std.mem.indexOf(u8, out, "1.31.0").?;
-    const p30 = std.mem.indexOf(u8, out, "1.30.0").?;
+    const p31 = std.mem.find(u8, out, "1.31.0").?;
+    const p30 = std.mem.find(u8, out, "1.30.0").?;
     try testing.expect(p31 < p30);
 }
 
@@ -497,7 +497,7 @@ test "rollback <cask> --to <missing> refuses with the cask listing" {
     try testing.expectError(error.Aborted, err);
 
     // Listing must accompany the refusal so the user knows which versions exist.
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "1.30.0") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "1.30.0") != null);
 }
 
 test "rollback <cask> --to <current> is an idempotent no-op" {
@@ -570,7 +570,7 @@ test "rollback <cask> (no flag) lands on the newest non-current entry" {
 
     const err = rollback.execute(&ctx, testing.allocator, &.{"flux-markdown"});
     try testing.expectError(error.Aborted, err);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1.31.0") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "1.31.0") != null);
 }
 
 test "rollback <cask> with empty history refuses with a useful diagnostic" {
@@ -599,8 +599,8 @@ test "rollback <cask> with empty history refuses with a useful diagnostic" {
     try testing.expectError(error.Aborted, err);
 
     // The user must be told *why* there's nothing to roll back to.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "No previous version") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1.32.427") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "No previous version") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "1.32.427") != null);
 }
 
 // --- failed-rollback safety -----------------------------------------------
@@ -626,11 +626,11 @@ fn installKegAs(
     const io = std.Options.debug_io;
 
     var keg_buf: [512]u8 = undefined;
-    const keg_bin = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version });
+    const keg_bin = try std.mem.print(&keg_buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version });
     try test_io.cwd().createDirPath(io, keg_bin);
 
     var exe_buf: [600]u8 = undefined;
-    const exe = try std.fmt.bufPrint(&exe_buf, "{s}/{s}", .{ keg_bin, name });
+    const exe = try std.mem.print(&exe_buf, "{s}/{s}", .{ keg_bin, name });
     {
         const f = try test_io.createFileAbsolute(io, exe, .{});
         defer f.close(io);
@@ -638,18 +638,18 @@ fn installKegAs(
     }
 
     var bin_dir_buf: [512]u8 = undefined;
-    const bin_dir = try std.fmt.bufPrint(&bin_dir_buf, "{s}/bin", .{prefix});
+    const bin_dir = try std.mem.print(&bin_dir_buf, "{s}/bin", .{prefix});
     try test_io.cwd().createDirPath(io, bin_dir);
 
     var link_buf: [600]u8 = undefined;
-    const link = try std.fmt.bufPrint(&link_buf, "{s}/{s}", .{ bin_dir, name });
+    const link = try std.mem.print(&link_buf, "{s}/{s}", .{ bin_dir, name });
     try test_io.symLinkAbsolute(io, exe, link, .{});
 
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
+    const cellar_path = try std.mem.print(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -682,13 +682,13 @@ fn installKegAs(
 /// entry has to stay discoverable by `collectEntries`).
 fn denyAccess(prefix: [:0]const u8, sha: []const u8, name: []const u8, pkg_version: []const u8, mode: c_uint) void {
     var buf: [512]u8 = undefined;
-    const dir = std.fmt.bufPrintSentinel(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version }, 0) catch return;
+    const dir = std.mem.printSentinel(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version }, 0) catch return;
     _ = std.c.chmod(dir.ptr, @intCast(mode));
 }
 
 fn installedVersion(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -735,11 +735,11 @@ test "a rollback that cannot materialize leaves the current version installed" {
     const io = std.Options.debug_io;
     var buf: [512]u8 = undefined;
 
-    const cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
+    const cellar = try std.mem.print(&buf, "{s}/Cellar/wget/1.22", .{prefix});
     try test_io.accessAbsolute(io, cellar, .{});
 
     var buf2: [512]u8 = undefined;
-    const link = try std.fmt.bufPrint(&buf2, "{s}/bin/wget", .{prefix});
+    const link = try std.mem.print(&buf2, "{s}/bin/wget", .{prefix});
     try test_io.accessAbsolute(io, link, .{});
 
     const ver = try installedVersion(prefix, testing.allocator, "wget");
@@ -749,12 +749,12 @@ test "a rollback that cannot materialize leaves the current version installed" {
 
 fn kegFlag(prefix: [:0]const u8, name: []const u8, column: []const u8) !bool {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
     var sql_buf: [128]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(&sql_buf, "SELECT {s} FROM kegs WHERE name = ?1;", .{column}, 0);
+    const sql = try std.mem.printSentinel(&sql_buf, "SELECT {s} FROM kegs WHERE name = ?1;", .{column}, 0);
     var stmt = try db.prepare(sql);
     defer stmt.finalize();
     try stmt.bindText(1, name);
@@ -773,7 +773,7 @@ test "a completed rollback preserves bin isolation and the hold" {
     try installKegIsolated(prefix, "wget", "1.22", true);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET pinned = 1 WHERE name = 'wget';");
@@ -804,12 +804,12 @@ test "a completed rollback preserves bin isolation and the hold" {
     // The version we rolled away from is gone from disk only after the swap.
     const io = std.Options.debug_io;
     var buf: [512]u8 = undefined;
-    const old_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
+    const old_cellar = try std.mem.print(&buf, "{s}/Cellar/wget/1.22", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, old_cellar, .{}));
 
     // Dependents resolve through opt/, so it has to follow the rollback.
     var opt_buf: [512]u8 = undefined;
-    const opt_link = try std.fmt.bufPrint(&opt_buf, "{s}/opt/wget", .{prefix});
+    const opt_link = try std.mem.print(&opt_buf, "{s}/opt/wget", .{prefix});
     var target_buf: [512]u8 = undefined;
     const opt_target = try test_io.readLinkAbsolute(io, opt_link, &target_buf);
     try testing.expect(std.mem.endsWith(u8, opt_target, "/Cellar/wget/1.20"));
@@ -817,7 +817,7 @@ test "a completed rollback preserves bin isolation and the hold" {
 
 fn kegInstallReason(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -861,7 +861,7 @@ test "rolling back a dependency keeps it marked as a dependency" {
 
 fn depNames(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -884,7 +884,7 @@ fn depNames(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8
 
 fn addDep(prefix: [:0]const u8, name: []const u8, dep: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -934,7 +934,7 @@ test "a completed rollback keeps the keg's dependency edges" {
 /// already torn the current version's symlinks down.
 fn seedColliding(prefix: [:0]const u8, name: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -978,13 +978,13 @@ test "a rollback that fails mid-swap restores the current version's links" {
 
     // The symlink `unlink` removed is back on disk...
     var link_buf: [512]u8 = undefined;
-    const link = try std.fmt.bufPrint(&link_buf, "{s}/bin/wget", .{prefix});
+    const link = try std.mem.print(&link_buf, "{s}/bin/wget", .{prefix});
     try test_io.accessAbsolute(io, link, .{});
 
     // ...and so is its DB row, courtesy of the transaction rollback.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var stmt = try db.prepare("SELECT COUNT(*) FROM links WHERE link_path = ?1;");
@@ -996,12 +996,12 @@ test "a rollback that fails mid-swap restores the current version's links" {
 
     // The current version's Cellar tree was never touched...
     var cur_buf: [512]u8 = undefined;
-    const cur_cellar = try std.fmt.bufPrint(&cur_buf, "{s}/Cellar/wget/1.22", .{prefix});
+    const cur_cellar = try std.mem.print(&cur_buf, "{s}/Cellar/wget/1.22", .{prefix});
     try test_io.accessAbsolute(io, cur_cellar, .{});
 
     // ...and the half-installed target was cleaned up.
     var new_buf: [512]u8 = undefined;
-    const new_cellar = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
+    const new_cellar = try std.mem.print(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, new_cellar, .{}));
 }
 
@@ -1043,8 +1043,8 @@ test "a rollback that cannot open its DB transaction says why and drops the mate
     var db_path_buf: [512]u8 = undefined;
     var lock_path_buf: [512]u8 = undefined;
     var squatter: WriteLockSquatter = .{
-        .db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0),
-        .lk = try lock.LockFile.acquire(std.Options.debug_io, try std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}), 1000),
+        .db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0),
+        .lk = try lock.LockFile.acquire(std.Options.debug_io, try std.mem.print(&lock_path_buf, "{s}/db/malt.lock", .{prefix}), 1000),
     };
     const thread = try std.Thread.spawn(.{}, WriteLockSquatter.run, .{&squatter});
     defer {
@@ -1073,21 +1073,21 @@ test "a rollback that cannot open its DB transaction says why and drops the mate
     // Precondition first: if the squatter won the write lock before schema
     // init, the run never reached the transaction and the test, not the
     // product, needs a wider margin.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Failed to initialize database schema") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Failed to initialize database schema") == null);
     // A silent non-zero exit gives the user nothing to act on.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Could not begin DB transaction for wget") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Could not begin DB transaction for wget") != null);
 
     const io = std.Options.debug_io;
 
     // The target was materialized before the transaction and must not be
     // left behind as a Cellar dir no row points at...
     var new_buf: [512]u8 = undefined;
-    const new_cellar = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
+    const new_cellar = try std.mem.print(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, new_cellar, .{}));
 
     // ...while the current version is untouched.
     var cur_buf: [512]u8 = undefined;
-    const cur_cellar = try std.fmt.bufPrint(&cur_buf, "{s}/Cellar/wget/1.22", .{prefix});
+    const cur_cellar = try std.mem.print(&cur_buf, "{s}/Cellar/wget/1.22", .{prefix});
     try test_io.accessAbsolute(io, cur_cellar, .{});
     const ver = try installedVersion(prefix, testing.allocator, "wget");
     defer testing.allocator.free(ver);
@@ -1098,10 +1098,10 @@ test "a rollback that cannot open its DB transaction says why and drops the mate
 /// affecting anything else in the prefix.
 fn freezeKegDir(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8, mode: c_uint) void {
     var buf: [512]u8 = undefined;
-    const bin = std.fmt.bufPrintSentinel(&buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version }, 0) catch return;
+    const bin = std.mem.printSentinel(&buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version }, 0) catch return;
     _ = std.c.chmod(bin.ptr, @intCast(mode));
     var buf2: [512]u8 = undefined;
-    const dir = std.fmt.bufPrintSentinel(&buf2, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }, 0) catch return;
+    const dir = std.mem.printSentinel(&buf2, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }, 0) catch return;
     _ = std.c.chmod(dir.ptr, @intCast(mode));
 }
 
@@ -1149,15 +1149,15 @@ test "a rollback still succeeds when the old cellar dir cannot be removed" {
 
     const io = std.Options.debug_io;
     var buf: [512]u8 = undefined;
-    const new_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.20", .{prefix});
+    const new_cellar = try std.mem.print(&buf, "{s}/Cellar/wget/1.20", .{prefix});
     try test_io.accessAbsolute(io, new_cellar, .{});
 
     // ...the stale dir is all that is left behind...
-    const old_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
+    const old_cellar = try std.mem.print(&buf, "{s}/Cellar/wget/1.22", .{prefix});
     try test_io.accessAbsolute(io, old_cellar, .{});
 
     // ...and the user was told about it.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Could not remove cellar entry") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Could not remove cellar entry") != null);
 }
 
 // --- outdated snapshot invalidation -----------------------------------------
@@ -1166,10 +1166,10 @@ test "a rollback still succeeds when the old cellar dir cannot be removed" {
 fn seedFreshSnapshot(prefix: [:0]const u8) !void {
     const io = std.Options.debug_io;
     var dir_buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    const dir = try std.mem.print(&dir_buf, "{s}/cache", .{prefix});
     try test_io.cwd().createDirPath(io, dir);
     var path_buf: [600]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/outdated.json", .{dir});
+    const path = try std.mem.print(&path_buf, "{s}/outdated.json", .{dir});
     const f = try test_io.createFileAbsolute(io, path, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, "{\"version\":2,\"generated_at_ms\":9999999999999,\"formulas\":[],\"casks\":[]}");
@@ -1177,7 +1177,7 @@ fn seedFreshSnapshot(prefix: [:0]const u8) !void {
 
 fn readSnapshotBytes(prefix: [:0]const u8, allocator: std.mem.Allocator) ![]u8 {
     var path_buf: [600]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    const path = try std.mem.print(&path_buf, "{s}/cache/outdated.json", .{prefix});
     return test_io.readFileAbsoluteAlloc(std.Options.debug_io, allocator, path, 4096);
 }
 
@@ -1220,7 +1220,7 @@ test "a completed rollback drops the outdated snapshot when the API cache is col
     defer testing.allocator.free(ver);
     try testing.expectEqualStrings("1.20", ver);
     var path_buf: [600]u8 = undefined;
-    const snap = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    const snap = try std.mem.print(&path_buf, "{s}/cache/outdated.json", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, snap, .{}));
 }
 
@@ -1228,10 +1228,10 @@ test "a completed rollback drops the outdated snapshot when the API cache is col
 fn seedCachedFormula(prefix: [:0]const u8, name: []const u8, body: []const u8) !void {
     const io = std.Options.debug_io;
     var dir_buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache/api", .{prefix});
+    const dir = try std.mem.print(&dir_buf, "{s}/cache/api", .{prefix});
     try test_io.cwd().createDirPath(io, dir);
     var path_buf: [600]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/formula_{s}.json", .{ dir, name });
+    const path = try std.mem.print(&path_buf, "{s}/formula_{s}.json", .{ dir, name });
     const f = try test_io.createFileAbsolute(io, path, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, body);
@@ -1266,7 +1266,7 @@ test "a completed rollback keeps the outdated snapshot and lists the rolled-back
     try rollback.execute(&ctx, testing.allocator, &.{"wget"});
 
     var dir_buf: [512]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    const cache_dir = try std.mem.print(&dir_buf, "{s}/cache", .{prefix});
     const snap = malt.cli_outdated.readSnapshot(std.Options.debug_io, testing.allocator, cache_dir) orelse return error.SnapshotDropped;
     defer malt.cli_outdated.freeSnapshot(testing.allocator, snap);
     try testing.expectEqual(@as(i64, 9999999999999), snap.generated_at_ms);
@@ -1287,7 +1287,7 @@ test "a completed rollback of a tap keg ignores a same-named core formula and dr
     try installKeg(prefix, "wget", "1.22");
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET tap = 'user/repo' WHERE name = 'wget';");
@@ -1311,7 +1311,7 @@ test "a completed rollback of a tap keg ignores a same-named core formula and dr
     try rollback.execute(&ctx, testing.allocator, &.{"wget"});
 
     var path_buf: [600]u8 = undefined;
-    const snap = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    const snap = try std.mem.print(&path_buf, "{s}/cache/outdated.json", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, snap, .{}));
 }
 
@@ -1386,7 +1386,7 @@ test "a completed rollback survives a malformed MALT_CACHE" {
     const ver = try installedVersion(prefix, testing.allocator, "wget");
     defer testing.allocator.free(ver);
     try testing.expectEqualStrings("1.20", ver);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "rolled back to 1.20") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "rolled back to 1.20") != null);
 }
 
 // --- a name installed as both a formula and a cask ------------------------
@@ -1424,7 +1424,7 @@ const SharedRun = struct {
 
     fn saw(self: *const SharedRun, comptime stream: enum { stdout, stderr }, needle: []const u8) bool {
         const hay = if (stream == .stdout) self.stdout.items else self.stderr.items;
-        return std.mem.indexOf(u8, hay, needle) != null;
+        return std.mem.find(u8, hay, needle) != null;
     }
 };
 
@@ -1567,7 +1567,7 @@ test "a bare rollback still reaches the formula when the casks table cannot be r
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try seedSharedName(prefix);
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
     setPrefix(prefix);
     defer unsetPrefix();
 

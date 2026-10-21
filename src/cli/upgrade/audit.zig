@@ -150,8 +150,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -160,7 +159,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths
         // the code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -171,8 +170,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -213,7 +211,7 @@ const TempDb = struct {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', 0);",
         .{ name, name, version, name, version },
@@ -224,7 +222,7 @@ fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8) !void 
 
 fn insertPinnedKeg(db: *sqlite.Database, name: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', 1);",
         .{ name, name, version, name, version },
@@ -235,7 +233,7 @@ fn insertPinnedKeg(db: *sqlite.Database, name: []const u8, version: []const u8) 
 
 fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', '{s}');",
         .{ name, name, version, name, version, tap },
@@ -248,7 +246,7 @@ fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap
 /// these still resolve from the bulk dump.
 fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.com');",
         .{ token, token, version },
@@ -259,7 +257,7 @@ fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !voi
 
 fn insertCaskTap(db: *sqlite.Database, token: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '{s}', 'https://example.com', '{s}');",
         .{ token, token, version, tap },
@@ -270,13 +268,13 @@ fn insertCaskTap(db: *sqlite.Database, token: []const u8, version: []const u8, t
 
 /// Plant the `<name>\t<stable>\t<revision>` side-car the bulk path reads.
 fn writeVersionsIndex(cache_dir: []const u8, kind: Kind, body: []const u8) !void {
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.mem.print(&dir_buf, "{s}/api", .{cache_dir});
     std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir) catch {};
     var key_buf: [64]u8 = undefined;
     const key = api_mod.BrewApi.versionsKey(&key_buf, kind);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_{s}.txt", .{ cache_dir, key });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const p = try std.mem.print(&path_buf, "{s}/api/versions_{s}.txt", .{ cache_dir, key });
     const f = try std.Io.Dir.cwd().createFile(std.Options.debug_io, p, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, body);
@@ -554,7 +552,7 @@ test "an unparseable upstream version reaches the plan as unknown" {
     try insertKeg(&t.db, "alpha", "1.0");
 
     var body_buf: [512]u8 = undefined;
-    const body = try std.fmt.bufPrint(&body_buf, "alpha\t1.{s}\t0\n", .{&@as([300]u8, @splat('9'))});
+    const body = try std.mem.print(&body_buf, "alpha\t1.{s}\t0\n", .{&@as([300]u8, @splat('9'))});
     try writeVersionsIndex(t.dir(), .formula, body);
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);

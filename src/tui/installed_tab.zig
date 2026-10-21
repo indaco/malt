@@ -295,7 +295,7 @@ comptime {
 }
 
 fn guardText(buf: []u8, name: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
+    return std.mem.print(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
 }
 
 /// True while the uninstall guard is armed; the shell then freezes other input.
@@ -772,7 +772,7 @@ test "the guard banner names the latched package even after the selection moved"
     _ = stepKey(&s, ch('x')); // arm on curl
     s.chrome.view.selected = 2; // selection moved to ffmpeg
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Uninstall curl? [y/N]") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "Uninstall curl? [y/N]") != null);
 }
 
 test "while the guard is up, Enter cancels it and does not open a detail read" {
@@ -788,10 +788,10 @@ test "render heads the columns in bold, aligned over their values" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    try testing.expect(std.mem.find(u8, out, color.Style.bold.code()) != null);
     // Exact padding proves NAME / VERSION / SIZE sit over their value columns.
-    try testing.expect(std.mem.indexOf(u8, out, "NAME" ++ &@as([19]u8, @splat(' ')) ++ "VERSION" ++ &@as([8]u8, @splat(' ')) ++ "SIZE") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "brotli") != null); // the list still renders below
+    try testing.expect(std.mem.find(u8, out, "NAME" ++ &@as([19]u8, @splat(' ')) ++ "VERSION" ++ &@as([8]u8, @splat(' ')) ++ "SIZE") != null);
+    try testing.expect(std.mem.find(u8, out, "brotli") != null); // the list still renders below
 }
 
 test "the heading sits at the top row and shifts the first list row down one" {
@@ -800,11 +800,11 @@ test "the heading sits at the top row and shifts the first list row down one" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 5, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
-    const head = std.mem.indexOf(u8, out, "\x1b[5;1H").?; // heading at the content top row
-    const first = std.mem.indexOf(u8, out, "\x1b[6;1H").?; // first item one row below
+    const head = std.mem.find(u8, out, "\x1b[5;1H").?; // heading at the content top row
+    const first = std.mem.find(u8, out, "\x1b[6;1H").?; // first item one row below
     try testing.expect(head < first);
-    try testing.expect(std.mem.indexOf(u8, out[head..first], "NAME") != null); // heading on the top row
-    try testing.expect(std.mem.indexOf(u8, out[first..], "brotli") != null); // first item below it
+    try testing.expect(std.mem.find(u8, out[head..first], "NAME") != null); // heading on the top row
+    try testing.expect(std.mem.find(u8, out[first..], "brotli") != null); // first item below it
 }
 
 test "render at height one shows only the heading and never traps" {
@@ -812,7 +812,7 @@ test "render at height one shows only the heading and never traps" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // the heading eats the only row
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "NAME") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "NAME") != null);
 }
 
 test "render lists rows with name, version, and a humanized size" {
@@ -821,18 +821,18 @@ test "render lists rows with name, version, and a humanized size" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "brotli") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "8.20.0") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "MB") != null); // size humanized
+    try testing.expect(std.mem.find(u8, out, "brotli") != null);
+    try testing.expect(std.mem.find(u8, out, "8.20.0") != null);
+    try testing.expect(std.mem.find(u8, out, "MB") != null); // size humanized
 }
 
 test "installed row renders a sub-KB size with the canonical decimal shape" {
     var buf: [row_buf_len]u8 = undefined;
     // The convergence: sub-KB sizes now carry the decimal like every other surface.
     const small = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 512, .linked = true };
-    try testing.expect(std.mem.indexOf(u8, formatRow(&buf, small), "512.0 B") != null);
+    try testing.expect(std.mem.find(u8, formatRow(&buf, small), "512.0 B") != null);
     const zero = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 0, .linked = true };
-    try testing.expect(std.mem.indexOf(u8, formatRow(&buf, zero), "0.0 B") != null);
+    try testing.expect(std.mem.find(u8, formatRow(&buf, zero), "0.0 B") != null);
 }
 
 test "the sub-KB size field stays padded to the width-10 column" {
@@ -855,7 +855,7 @@ test "the detail pane renders a sub-KB size with the canonical decimal shape" {
     const pkg = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 512, .linked = true };
     const s: State = .{ .items = &.{pkg}, .detail = .{ .pkg = pkg, .info = .{} } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "512.0 B") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "512.0 B") != null);
 }
 
 test "render shows pinned and unlinked markers" {
@@ -864,8 +864,8 @@ test "render shows pinned and unlinked markers" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "pinned") != null); // curl is pinned
-    try testing.expect(std.mem.indexOf(u8, out, "unlinked") != null); // curl is unlinked
+    try testing.expect(std.mem.find(u8, out, "pinned") != null); // curl is pinned
+    try testing.expect(std.mem.find(u8, out, "unlinked") != null); // curl is unlinked
 }
 
 test "render narrows to the filter" {
@@ -875,9 +875,9 @@ test "render narrows to the filter" {
     s.chrome.filter.push("curl");
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "curl") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "brotli") == null); // filtered out
-    try testing.expect(std.mem.indexOf(u8, out, "ffmpeg") == null);
+    try testing.expect(std.mem.find(u8, out, "curl") != null);
+    try testing.expect(std.mem.find(u8, out, "brotli") == null); // filtered out
+    try testing.expect(std.mem.find(u8, out, "ffmpeg") == null);
 }
 
 test "render highlights the selected row" {
@@ -887,7 +887,7 @@ test "render highlights the selected row" {
     s.chrome.view.selected = 1; // curl
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     // The reverse-video SGR marks the cursor row.
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "render shows the detail pane with the dependency list when open" {
@@ -900,8 +900,8 @@ test "render shows the detail pane with the dependency list when open" {
     };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "homebrew/core") != null); // tap
-    try testing.expect(std.mem.indexOf(u8, out, "zstd") != null); // a dep that is not a list row
+    try testing.expect(std.mem.find(u8, out, "homebrew/core") != null); // tap
+    try testing.expect(std.mem.find(u8, out, "zstd") != null); // a dep that is not a list row
 }
 
 test "render draws the [y/N] guard banner naming the package when confirming" {
@@ -912,8 +912,8 @@ test "render draws the [y/N] guard banner naming the package when confirming" {
     _ = stepKey(&s, ch('x')); // arm through the real transition so the target latches
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "curl") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, "curl") != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
 }
 
 test "the in-list guard wraps to keep the whole name and [y/N]" {
@@ -923,8 +923,8 @@ test "the in-list guard wraps to keep the whole name and [y/N]" {
     s.confirm_uninstall = ConfirmTarget.init(&@as([35]u8, @splat('a')), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 6 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, &@as([35]u8, @splat('a'))) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, &@as([35]u8, @splat('a'))) != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
 }
 
 test "the in-list guard keeps a name longer than the row buffer" {
@@ -934,8 +934,8 @@ test "the in-list guard keeps a name longer than the row buffer" {
     s.confirm_uninstall = ConfirmTarget.init(&@as([250]u8, @splat('n')), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, &@as([50]u8, @splat('n'))) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, &@as([50]u8, @splat('n'))) != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
 }
 
 test "the in-list guard stays in the rows it is given when the rect is short" {
@@ -945,8 +945,8 @@ test "the in-list guard stays in the rows it is given when the rect is short" {
     s.confirm_uninstall = ConfirmTarget.init(&@as([120]u8, @splat('a')), .formula);
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;") == null); // nothing below the one row
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3;") != null);
+    try testing.expect(std.mem.find(u8, out, "\x1b[4;") == null); // nothing below the one row
+    try testing.expect(std.mem.find(u8, out, "\x1b[3;") != null);
 }
 
 test "the in-list guard keeps the name and [y/N] when the body has only one row" {
@@ -955,8 +955,8 @@ test "the in-list guard keeps the name and [y/N] when the body has only one row"
     var s: State = .{ .items = &sample };
     s.confirm_uninstall = ConfirmTarget.init(&@as([44]u8, @splat('a')), .formula); // "<name>? " fills the row
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "aaaa") != null); // the name stays too
+    try testing.expect(std.mem.find(u8, f.slice(), "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "aaaa") != null); // the name stays too
 }
 
 test "the in-list guard takes one row when the prompt fits" {
@@ -973,11 +973,11 @@ test "the in-list guard takes at most the rows the rect gives" {
     s.confirm_uninstall = ConfirmTarget.init(&@as([120]u8, @splat('a')), .formula);
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 2 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[5;") == null); // no third row
+    try testing.expect(std.mem.find(u8, out, "\x1b[5;") == null); // no third row
     var needle: [32]u8 = undefined;
-    const second_row = try std.fmt.bufPrint(&needle, "\x1b[4;1H{s}", .{color.Style.reverse.code()});
-    try testing.expect(std.mem.indexOf(u8, out, second_row) != null); // second guard row, not the heading
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    const second_row = try std.mem.print(&needle, "\x1b[4;1H{s}", .{color.Style.reverse.code()});
+    try testing.expect(std.mem.find(u8, out, second_row) != null); // second guard row, not the heading
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
 }
 
 test "the in-list guard paints nothing in a zero-width rect" {
@@ -986,7 +986,7 @@ test "the in-list guard paints nothing in a zero-width rect" {
     var s: State = .{ .items = &sample };
     s.confirm_uninstall = ConfirmTarget.init("curl", .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 0, .height = 5 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Uninstall") == null);
+    try testing.expect(std.mem.find(u8, f.slice(), "Uninstall") == null);
 }
 
 test "the in-list guard tail never splits a multibyte name" {
@@ -997,7 +997,7 @@ test "the in-list guard tail never splits a multibyte name" {
     render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
     const out = f.slice();
     try testing.expect(std.unicode.utf8ValidateSlice(out));
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
 }
 
 test "the in-list guard tail keeps every row within the rect width" {
@@ -1008,11 +1008,11 @@ test "the in-list guard tail keeps every row within the rect width" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 11, .height = 3 });
     const out = f.slice();
     try testing.expect(std.unicode.utf8ValidateSlice(out));
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
     // 3 rows x 11 codepoints: two full rows of "é", then 4 "é" and the keys
-    try testing.expect(std.mem.indexOf(u8, out, std.mem.asBytes(&@as([11][2]u8, @splat("é".*)))) != null);
-    try testing.expect(std.mem.indexOf(u8, out, std.mem.asBytes(&@as([12][2]u8, @splat("é".*)))) == null);
-    try testing.expect(std.mem.indexOf(u8, out, std.mem.asBytes(&@as([4][2]u8, @splat("é".*))) ++ "? [y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, std.mem.asBytes(&@as([11][2]u8, @splat("é".*)))) != null);
+    try testing.expect(std.mem.find(u8, out, std.mem.asBytes(&@as([12][2]u8, @splat("é".*)))) == null);
+    try testing.expect(std.mem.find(u8, out, std.mem.asBytes(&@as([4][2]u8, @splat("é".*))) ++ "? [y/N]") != null);
 }
 
 test "the in-list guard reserves only the rows its tail paints" {
@@ -1035,7 +1035,7 @@ test "the in-list guard tail survives a stray continuation byte" {
     var s: State = .{ .items = &sample };
     s.confirm_uninstall = ConfirmTarget.init(std.mem.asBytes(&@as([20][4]u8, @splat("a\x80\x80\x80".*))), .formula);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 8, .height = 2 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "[y/N]") != null);
 }
 
 test "the in-list guard never splits a multibyte name" {
@@ -1046,7 +1046,7 @@ test "the in-list guard never splits a multibyte name" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 6 });
     const out = f.slice();
     try testing.expect(std.unicode.utf8ValidateSlice(out));
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
 }
 
 test "the wrapped in-list guard and the docked detail pane both stay visible" {
@@ -1057,8 +1057,8 @@ test "the wrapped in-list guard and the docked detail pane both stay visible" {
     const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 50, .height = 12 };
     render(&s, &f, rect);
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Tap") != null);
+    try testing.expect(std.mem.find(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, out, "Tap") != null);
     try testing.expect(hitTest(&s, rect, 2, 1) == null); // second guard row
     try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 4, 1).?.index); // below the heading
 }
@@ -1106,7 +1106,7 @@ test "render on a one-row rect still paints the armed guard banner" {
     s.chrome.view.selected = 1; // curl
     _ = stepKey(&s, ch('x'));
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "[y/N]") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -1125,7 +1125,7 @@ test "render on an empty list shows the empty-state placeholder, not a blank pan
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 }); // must not trap
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "No packages installed") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "No packages installed") != null);
 }
 
 test "a filter that excludes every row shows the no-matches placeholder" {
@@ -1134,7 +1134,7 @@ test "a filter that excludes every row shows the no-matches placeholder" {
     var s: State = .{ .items = &sample };
     s.chrome.filter.push("zzznomatch");
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "No matches") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "No matches") != null);
 }
 
 test "hitTest maps a click on the first list row to filtered index 0" {

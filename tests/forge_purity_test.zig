@@ -31,15 +31,14 @@ test "core/forge.zig imports neither cli/* nor ui/*" {
     }
 
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, content, cursor, import_prefix)) |start| {
+    while (std.mem.findPos(u8, content, cursor, import_prefix)) |start| {
         const path_start = start + import_prefix.len;
-        const end = std.mem.indexOfScalarPos(u8, content, path_start, '"') orelse break;
+        const end = std.mem.findScalarPos(u8, content, path_start, '"') orelse break;
         const import_path = content[path_start..end];
         cursor = end + 1;
 
         if (crossesInto(import_path, "cli") or crossesInto(import_path, "ui")) {
-            const msg = try std.fmt.allocPrint(
-                testing.allocator,
+            const msg = try testing.allocator.print(
                 "{s} imports {s}",
                 .{ forge_path, import_path },
             );

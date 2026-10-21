@@ -25,7 +25,7 @@ fn resolvePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
     }
     const prefix = environ.getPosix("MALT_PREFIX") orelse atomic.fallback_prefix;
     prefix_path.validatePrefix(prefix) catch return null;
-    return std.fmt.bufPrint(buf, "{s}" ++ default_suffix, .{prefix}) catch return null;
+    return std.mem.print(buf, "{s}" ++ default_suffix, .{prefix}) catch return null;
 }
 
 /// Read the user theme file into `buf`, or null when there is nothing safe to
@@ -41,8 +41,8 @@ pub fn read(io: std.Io, environ: std.process.Environ, buf: []u8) ?[]const u8 {
     // reports `kind == .sym_link` and is refused, as are a directory, fifo,
     // device, or missing file. Operating relative to the opened parent fd also
     // pins the directory for the open that follows.
-    const dir_path = std.fs.path.dirname(path) orelse return null;
-    const base = std.fs.path.basename(path);
+    const dir_path = std.Io.Dir.path.dirname(path) orelse return null;
+    const base = std.Io.Dir.path.basename(path);
     var parent = std.Io.Dir.openDirAbsolute(io, dir_path, .{}) catch return null;
     defer parent.close(io);
 
@@ -141,8 +141,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -155,8 +154,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -173,11 +171,11 @@ const Scratch = struct {
 /// only known at run time, so `envSlice`'s comptime literals cannot be used.
 /// Storage lives in the caller's frame for as long as the returned block.
 const ThemesEnv = struct {
-    buf: [std.fs.max_path_bytes + 32]u8 = undefined,
+    buf: [std.Io.Dir.max_path_bytes + 32]u8 = undefined,
     entries: [1:null]?[*:0]const u8 = undefined,
 
     fn env(self: *ThemesEnv, path: []const u8) !std.process.Environ {
-        const kv = try std.fmt.bufPrintSentinel(&self.buf, "MALT_THEMES_FILE={s}", .{path}, 0);
+        const kv = try std.mem.printSentinel(&self.buf, "MALT_THEMES_FILE={s}", .{path}, 0);
         self.entries = .{kv.ptr};
         return .{ .block = .{ .slice = &self.entries } };
     }

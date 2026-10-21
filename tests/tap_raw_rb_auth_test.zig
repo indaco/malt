@@ -97,7 +97,7 @@ test "getRawFile: gitlab raw fetch carries a 600-byte token in full through the 
     defer server_thread.join();
 
     var url_buf: [80]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/-/raw/glow.rb", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/-/raw/glow.rb", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, envWithLongGitlabToken(), std.testing.allocator);
@@ -125,7 +125,7 @@ test "getRawFile: github raw fetch carries no auth header even with MALT_GITHUB_
     defer server_thread.join();
 
     var url_buf: [80]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/Formula/glow.rb", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/Formula/glow.rb", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, envWithToken(), std.testing.allocator);

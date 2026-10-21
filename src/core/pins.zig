@@ -51,7 +51,7 @@ pub fn lookupIn(manifest: []const u8, name: []const u8) ?[]const u8 {
 
         // Split on the first run of whitespace. Names are
         // [a-z0-9@._+-], so any space/tab ends the name field.
-        const sep = std.mem.indexOfAny(u8, line, " \t") orelse continue;
+        const sep = std.mem.findAny(u8, line, " \t") orelse continue;
         const entry_name = line[0..sep];
         if (!std.mem.eql(u8, entry_name, name)) continue;
 

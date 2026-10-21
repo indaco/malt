@@ -133,7 +133,7 @@ fn nowNs() i128 {
 /// events when parallel workers finish their bars concurrently.
 fn writePlainLine(label: []const u8, status: []const u8) void {
     var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s}: {s}\n", .{ label, status }) catch return;
+    const line = std.mem.print(&buf, "{s}: {s}\n", .{ label, status }) catch return;
     if (builtin.is_test) {
         if (capture_list) |list| {
             list.appendSlice(capture_allocator, line) catch {};
@@ -422,9 +422,9 @@ pub const ProgressBar = struct {
         if (rate <= 0) return "--";
         const rate_kb = rate / 1024.0;
         if (rate_kb >= 1024.0) {
-            return std.fmt.bufPrint(buf, "{d:.1} MB/s", .{rate_kb / 1024.0}) catch return "--";
+            return std.mem.print(buf, "{d:.1} MB/s", .{rate_kb / 1024.0}) catch return "--";
         }
-        return std.fmt.bufPrint(buf, "{d:.0} KB/s", .{rate_kb}) catch return "--";
+        return std.mem.print(buf, "{d:.0} KB/s", .{rate_kb}) catch return "--";
     }
 
     pub fn formatEta(buf: []u8, remaining_bytes: u64, rate: f64) []const u8 {
@@ -432,9 +432,9 @@ pub const ProgressBar = struct {
         const eta_secs: u64 = @intFromFloat(@as(f64, @floatFromInt(remaining_bytes)) / rate);
         if (eta_secs > 3600) return "";
         if (eta_secs >= 60) {
-            return std.fmt.bufPrint(buf, "ETA {d}m{d:0>2}s", .{ eta_secs / 60, eta_secs % 60 }) catch return "";
+            return std.mem.print(buf, "ETA {d}m{d:0>2}s", .{ eta_secs / 60, eta_secs % 60 }) catch return "";
         }
-        return std.fmt.bufPrint(buf, "ETA {d}s", .{eta_secs}) catch return "";
+        return std.mem.print(buf, "ETA {d}s", .{eta_secs}) catch return "";
     }
 
     fn writeLabel(self: *const ProgressBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -551,7 +551,7 @@ pub const ProgressBar = struct {
                 .counter => {
                     // Too narrow for a bar: drop to "  <glyph> <label> NN%".
                     var pct_buf: [8]u8 = undefined;
-                    const pct_str = std.fmt.bufPrint(&pct_buf, "{d}%", .{pct}) catch "%";
+                    const pct_str = std.mem.print(&pct_buf, "{d}%", .{pct}) catch "%";
                     self.writeCounterLine(&w, cols.?, pct_str) catch break :body;
                 },
                 .bar => |bw_u16| {
@@ -606,12 +606,12 @@ pub const ProgressBar = struct {
         const size_kb = current / 1024;
         const total_kb = self.total / 1024;
         const size_str = if (total_kb > 1024)
-            std.fmt.bufPrint(&size_buf, "{d:.1}/{d:.1} MB", .{
+            std.mem.print(&size_buf, "{d:.1}/{d:.1} MB", .{
                 @as(f64, @floatFromInt(size_kb)) / 1024.0,
                 @as(f64, @floatFromInt(total_kb)) / 1024.0,
             }) catch ""
         else
-            std.fmt.bufPrint(&size_buf, "{d}/{d} KB", .{ size_kb, total_kb }) catch "";
+            std.mem.print(&size_buf, "{d}/{d} KB", .{ size_kb, total_kb }) catch "";
 
         const rate = self.computeRate();
         var rate_buf: [32]u8 = undefined;
@@ -656,9 +656,9 @@ pub const ProgressBar = struct {
         const size_kb = self.cur() / 1024;
         var size_buf: [32]u8 = undefined;
         const size_str = if (size_kb > 1024)
-            std.fmt.bufPrint(&size_buf, "{d:.1} MB", .{@as(f64, @floatFromInt(size_kb)) / 1024.0}) catch ""
+            std.mem.print(&size_buf, "{d:.1} MB", .{@as(f64, @floatFromInt(size_kb)) / 1024.0}) catch ""
         else
-            std.fmt.bufPrint(&size_buf, "{d} KB", .{size_kb}) catch "";
+            std.mem.print(&size_buf, "{d} KB", .{size_kb}) catch "";
 
         const rate = self.computeRate();
         var rate_buf: [32]u8 = undefined;
@@ -825,7 +825,7 @@ test "overflow keeps the full label and drops the tail, still erasing" {
 
     const frame = buf.items;
     try std.testing.expectEqual(@as(usize, 750), std.mem.count(u8, frame, "x"));
-    try std.testing.expect(std.mem.indexOfScalar(u8, frame, '%') == null);
+    try std.testing.expect(std.mem.findScalar(u8, frame, '%') == null);
     try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[K"));
 }
 
@@ -856,7 +856,7 @@ test "overflow in a multi-progress row still restores the cursor" {
     const frame = buf.items;
     try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[3A")); // cursor-up lead
     try std.testing.expectEqual(@as(usize, 740), std.mem.count(u8, frame, "x"));
-    try std.testing.expect(std.mem.indexOf(u8, frame, "\x1b[K") != null); // erase present
+    try std.testing.expect(std.mem.find(u8, frame, "\x1b[K") != null); // erase present
     try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[3B\r")); // cursor-down + CR restore
 }
 
@@ -1090,7 +1090,7 @@ test "ProgressBar quiet trumps plain mode" {
 // future rename can't silently break the CI-friendly default.
 test "resolveModeFromEnviron flips to plain when CI=true is set" {
     var buf: [64:0]u8 = undefined;
-    const env_value = std.fmt.bufPrintSentinel(&buf, "CI=true", .{}, 0) catch unreachable;
+    const env_value = std.mem.printSentinel(&buf, "CI=true", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{env_value.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1100,8 +1100,8 @@ test "resolveModeFromEnviron flips to plain when CI=true is set" {
 test "resolveModeFromEnviron honours an explicit MALT_PROGRESS=none even with CI=true" {
     var ci_buf: [64:0]u8 = undefined;
     var prog_buf: [64:0]u8 = undefined;
-    const ci_value = std.fmt.bufPrintSentinel(&ci_buf, "CI=true", .{}, 0) catch unreachable;
-    const prog_value = std.fmt.bufPrintSentinel(&prog_buf, "MALT_PROGRESS=none", .{}, 0) catch unreachable;
+    const ci_value = std.mem.printSentinel(&ci_buf, "CI=true", .{}, 0) catch unreachable;
+    const prog_value = std.mem.printSentinel(&prog_buf, "MALT_PROGRESS=none", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ ci_value.ptr, prog_value.ptr };
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1110,7 +1110,7 @@ test "resolveModeFromEnviron honours an explicit MALT_PROGRESS=none even with CI
 
 test "resolveModeFromEnviron flips to plain on GITHUB_ACTIONS=true" {
     var buf: [64:0]u8 = undefined;
-    const v = std.fmt.bufPrintSentinel(&buf, "GITHUB_ACTIONS=true", .{}, 0) catch unreachable;
+    const v = std.mem.printSentinel(&buf, "GITHUB_ACTIONS=true", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{v.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1127,7 +1127,7 @@ test "resolveModeFromEnviron returns tty on an empty environ" {
 // users into the plain bar.
 test "resolveModeFromEnviron treats empty CI value as unset" {
     var buf: [16:0]u8 = undefined;
-    const v = std.fmt.bufPrintSentinel(&buf, "CI=", .{}, 0) catch unreachable;
+    const v = std.mem.printSentinel(&buf, "CI=", .{}, 0) catch unreachable;
     const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{v.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
 
@@ -1253,9 +1253,9 @@ test "a resize repaints the whole group with autowrap re-asserted" {
     termsize.setResizedForTest(true);
     bars[1].update(50);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "alpha") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "bravo") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "alpha") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "bravo") != null);
     // The flag is consumed — a burst can't trigger a second repaint this tick.
     try std.testing.expect(!termsize.takeResized());
 
@@ -1263,8 +1263,8 @@ test "a resize repaints the whole group with autowrap re-asserted" {
     buf.clearRetainingCapacity();
     bars[0].last_render_ns = 0; // bypass the 10 Hz throttle
     bars[0].update(60);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "alpha") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "bravo") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "alpha") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "bravo") == null);
 }
 
 // AC: migrate's indeterminate bars inherit the repaint with no bespoke code —
@@ -1306,10 +1306,10 @@ test "a resize repaints indeterminate (migrate) bars" {
     termsize.setResizedForTest(true);
     bars[0].update(4096);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "redis") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "redis") != null);
     // The sibling bar, whose worker did not tick, was repainted too.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "kafka") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "kafka") != null);
 }
 
 // AC headline: the repaint re-derives the live width. A terminal that narrows
@@ -1357,10 +1357,10 @@ test "a resize repaints at the new width, collapsing to counters when it narrows
     bars[0].last_render_ns = 0;
     bars[0].update(600);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\x1b[?7l") != null);
     try std.testing.expectEqual(@as(usize, 0), barCellCount(buf.items)); // counters at new width
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "alpha") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "bravo") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "alpha") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "bravo") != null);
 }
 
 // Edge: a resize before the caller registers its bars must not crash on the
@@ -1398,8 +1398,8 @@ test "a resize with no registered bars re-asserts autowrap without crashing" {
     termsize.setResizedForTest(true);
     bar.update(50);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "solo") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "solo") != null);
 }
 
 // AC: single-package `upgrade` draws through SingleBar — a group of one. A
@@ -1438,9 +1438,9 @@ test "a resize repaints the single-bar (upgrade) group at the new width" {
     bar.last_render_ns = 0;
     bar.update(500);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\x1b[?7l") != null);
     try std.testing.expectEqual(@as(usize, 0), barCellCount(buf.items)); // counter at new width
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ffmpeg") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "ffmpeg") != null);
     sp.finish();
 }
 
@@ -1706,8 +1706,8 @@ test "determinate render drops ETA before shrinking the bar" {
 
     try std.testing.expect(visibleColumns(buf.items) <= 80);
     try std.testing.expectEqual(@as(usize, 30), barCellCount(buf.items)); // bar not collapsed
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ETA") == null); // ETA dropped
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "MB") != null); // size kept
+    try std.testing.expect(std.mem.find(u8, buf.items, "ETA") == null); // ETA dropped
+    try std.testing.expect(std.mem.find(u8, buf.items, "MB") != null); // size kept
 }
 
 // AC: below the floor-bar threshold the bar is dropped entirely for a bare
@@ -1734,8 +1734,8 @@ test "determinate render collapses to a bare counter on a very narrow terminal" 
 
     try std.testing.expect(visibleColumns(buf.items) <= 20);
     try std.testing.expectEqual(@as(usize, 0), barCellCount(buf.items)); // no bar
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "tree") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "75%") != null); // counter
+    try std.testing.expect(std.mem.find(u8, buf.items, "tree") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "75%") != null); // counter
 }
 
 // AC: a non-TTY (winsize → NotATty, modelled by a null override) keeps the
@@ -1786,9 +1786,9 @@ test "indeterminate render collapses to label + bytes on a very narrow terminal"
     bar.update(12 * 1024 * 1024);
 
     try std.testing.expect(visibleColumns(buf.items) <= 18);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "kafka") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "MB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "(") == null); // no detail parens
+    try std.testing.expect(std.mem.find(u8, buf.items, "kafka") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "MB") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "(") == null); // no detail parens
 }
 
 test "update publishes the byte count through the atomic counter" {

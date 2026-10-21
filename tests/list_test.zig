@@ -26,7 +26,7 @@ const TempDb = struct {
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
+        const path = try std.mem.printSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -42,7 +42,7 @@ const TempDb = struct {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', {d});",
         .{ name, name, version, name, version, @intFromBool(pinned) },
@@ -53,7 +53,7 @@ fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8, pinned
 
 fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', '{s}');",
         .{ name, name, version, name, version, tap },
@@ -64,7 +64,7 @@ fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap
 
 fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.com');",
         .{ token, token, version },
@@ -75,7 +75,7 @@ fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !voi
 
 fn insertCaskTap(db: *sqlite.Database, token: []const u8, version: []const u8, tap: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '{s}', 'https://example.com', '{s}');",
         .{ token, token, version, tap },
@@ -143,8 +143,8 @@ fn runBuildFull(
 fn writeTreeFile(parent: []const u8, rel: []const u8, body: []const u8) !void {
     const io = std.Options.debug_io;
     var buf: [512]u8 = undefined;
-    const abs = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ parent, rel });
-    if (std.fs.path.dirname(abs)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
+    const abs = try std.mem.print(&buf, "{s}/{s}", .{ parent, rel });
+    if (std.Io.Dir.path.dirname(abs)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
     const f = try std.Io.Dir.createFileAbsolute(io, abs, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, body);
@@ -218,9 +218,9 @@ test "writeHumanOutput non-quiet keeps the bullet prefix and decorations" {
     const out = try runHuman(testing.allocator, &t.db, true, false, true, false, false);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "  ▸ alpha") != null);
-    try testing.expect(std.mem.indexOf(u8, out, " (1.0)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[pinned]") != null);
+    try testing.expect(std.mem.find(u8, out, "  ▸ alpha") != null);
+    try testing.expect(std.mem.find(u8, out, " (1.0)") != null);
+    try testing.expect(std.mem.find(u8, out, "[pinned]") != null);
 }
 
 test "buildListJson: empty DB, both flags" {
@@ -237,7 +237,7 @@ test "buildListJson: empty DB, both flags" {
     );
     // Suffix structure intact.
     try testing.expect(std.mem.endsWith(u8, out, "}\n"));
-    try testing.expect(std.mem.indexOf(u8, out, ",\"time_ms\":") != null);
+    try testing.expect(std.mem.find(u8, out, ",\"time_ms\":") != null);
 }
 
 test "buildListJson: formula-only, two kegs, pinned flag preserved" {
@@ -458,10 +458,10 @@ test "writeHumanOutput --pinned drops the [pinned] tag (every row is pinned by d
     const out = try runHuman(testing.allocator, &t.db, true, true, false, true, false);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "[pinned]") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "alpha") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "bravo") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "[cask]") != null);
+    try testing.expect(std.mem.find(u8, out, "[pinned]") == null);
+    try testing.expect(std.mem.find(u8, out, "alpha") != null);
+    try testing.expect(std.mem.find(u8, out, "bravo") != null);
+    try testing.expect(std.mem.find(u8, out, "[cask]") != null);
 }
 
 test "writeHumanOutput --pinned merges pinned formulas + casks in one sorted list" {
@@ -481,13 +481,13 @@ test "writeHumanOutput --pinned merges pinned formulas + casks in one sorted lis
 
     // Single sorted output: firefox (cask) then zsh (formula). 'loose' and
     // 'slack' excluded by the pinned filter.
-    try testing.expect(std.mem.indexOf(u8, out, "  ▸ firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "  ▸ zsh") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "loose") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "slack") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "[cask]") != null);
-    const firefox_pos = std.mem.indexOf(u8, out, "firefox").?;
-    const zsh_pos = std.mem.indexOf(u8, out, "zsh").?;
+    try testing.expect(std.mem.find(u8, out, "  ▸ firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "  ▸ zsh") != null);
+    try testing.expect(std.mem.find(u8, out, "loose") == null);
+    try testing.expect(std.mem.find(u8, out, "slack") == null);
+    try testing.expect(std.mem.find(u8, out, "[cask]") != null);
+    const firefox_pos = std.mem.find(u8, out, "firefox").?;
+    const zsh_pos = std.mem.find(u8, out, "zsh").?;
     try testing.expect(firefox_pos < zsh_pos);
 }
 
@@ -683,12 +683,12 @@ test "buildListJson --size sums size_bytes from the keg cellar dir" {
     defer t.deinit();
 
     var cb: [256]u8 = undefined;
-    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/treesize/1.0", .{t.dir});
+    const cellar = try std.mem.print(&cb, "{s}/Cellar/treesize/1.0", .{t.dir});
     try writeTreeFile(cellar, "bin/a", "12345"); // 5 bytes
     try writeTreeFile(cellar, "lib/b", "678"); // 3 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('treesize','treesize','1.0','deadbeef','{s}');",
         .{cellar},
@@ -719,7 +719,7 @@ test "buildListJson --size emits size_bytes:0 when the keg cellar dir is missing
     const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, false, null, t.dir);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":0") != null);
+    try testing.expect(std.mem.find(u8, out, "\"size_bytes\":0") != null);
 }
 
 test "buildListJson --size emits size_bytes:0 for an empty cellar dir" {
@@ -727,11 +727,11 @@ test "buildListJson --size emits size_bytes:0 for an empty cellar dir" {
     defer t.deinit();
 
     var cb: [256]u8 = undefined;
-    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/empty/1.0", .{t.dir});
+    const cellar = try std.mem.print(&cb, "{s}/Cellar/empty/1.0", .{t.dir});
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cellar);
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('empty','empty','1.0','deadbeef','{s}');",
         .{cellar},
@@ -742,7 +742,7 @@ test "buildListJson --size emits size_bytes:0 for an empty cellar dir" {
     const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, false, null, t.dir);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":0") != null);
+    try testing.expect(std.mem.find(u8, out, "\"size_bytes\":0") != null);
 }
 
 test "buildListJson --size sums a cask's Caskroom dir and app_path bundle" {
@@ -750,15 +750,15 @@ test "buildListJson --size sums a cask's Caskroom dir and app_path bundle" {
     defer t.deinit();
 
     var crb: [256]u8 = undefined;
-    const caskroom = try std.fmt.bufPrint(&crb, "{s}/Caskroom/widget", .{t.dir});
+    const caskroom = try std.mem.print(&crb, "{s}/Caskroom/widget", .{t.dir});
     try writeTreeFile(caskroom, "1.0/data", "abcd"); // 4 bytes in-prefix bookkeeping
 
     var ab: [256]u8 = undefined;
-    const app = try std.fmt.bufPrint(&ab, "{s}/Applications/Widget.app", .{t.dir});
+    const app = try std.mem.print(&ab, "{s}/Applications/Widget.app", .{t.dir});
     try writeTreeFile(app, "Contents/MacOS/widget", "binary"); // 6 bytes app payload
 
     var sb: [700]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO casks (token, name, version, url, app_path) VALUES ('widget','Widget','1.0','https://example.invalid','{s}');",
         .{app},
@@ -787,14 +787,14 @@ test "buildListJson --size on a cask with no app_path counts only the Caskroom d
     defer t.deinit();
 
     var crb: [256]u8 = undefined;
-    const caskroom = try std.fmt.bufPrint(&crb, "{s}/Caskroom/barecask", .{t.dir});
+    const caskroom = try std.mem.print(&crb, "{s}/Caskroom/barecask", .{t.dir});
     try writeTreeFile(caskroom, "1.0/payload", "abcdef"); // 6 bytes
     try insertCask(&t.db, "barecask", "1.0"); // app_path stays NULL
 
     const out = try runBuildFull(testing.allocator, &t.db, false, true, false, true, false, null, t.dir);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":6") != null);
+    try testing.expect(std.mem.find(u8, out, "\"size_bytes\":6") != null);
 }
 
 test "buildListJson --size does not double-count a cask app_path symlinked into Caskroom" {
@@ -806,22 +806,22 @@ test "buildListJson --size does not double-count a cask app_path symlinked into 
     const io = std.Options.debug_io;
 
     var crb: [256]u8 = undefined;
-    const caskroom = try std.fmt.bufPrint(&crb, "{s}/Caskroom/tool", .{t.dir});
+    const caskroom = try std.mem.print(&crb, "{s}/Caskroom/tool", .{t.dir});
     try writeTreeFile(caskroom, "2.0/tool", "1234567"); // 7 bytes
 
     var binb: [256]u8 = undefined;
-    const bindir = try std.fmt.bufPrint(&binb, "{s}/bin", .{t.dir});
+    const bindir = try std.mem.print(&binb, "{s}/bin", .{t.dir});
     std.Io.Dir.cwd().createDirPath(io, bindir) catch {};
     var tgtb: [320]u8 = undefined;
-    const target = try std.fmt.bufPrint(&tgtb, "{s}/2.0/tool", .{caskroom});
+    const target = try std.mem.print(&tgtb, "{s}/2.0/tool", .{caskroom});
     var bd = try std.Io.Dir.openDirAbsolute(io, bindir, .{});
     defer bd.close(io);
     bd.symLink(io, target, "tool", .{}) catch {};
 
     var appb: [256]u8 = undefined;
-    const app = try std.fmt.bufPrint(&appb, "{s}/tool", .{bindir});
+    const app = try std.mem.print(&appb, "{s}/tool", .{bindir});
     var sb: [700]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO casks (token, name, version, url, app_path) VALUES ('tool','tool','2.0','https://example.invalid','{s}');",
         .{app},
@@ -832,7 +832,7 @@ test "buildListJson --size does not double-count a cask app_path symlinked into 
     const out = try runBuildFull(testing.allocator, &t.db, false, true, false, true, false, null, t.dir);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":7") != null);
+    try testing.expect(std.mem.find(u8, out, "\"size_bytes\":7") != null);
 }
 
 // --- --linked ----------------------------------------------------------
@@ -894,11 +894,11 @@ test "buildListJson --size --linked emits size_bytes before linked" {
     defer t.deinit();
 
     var cb: [256]u8 = undefined;
-    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/combo/1.0", .{t.dir});
+    const cellar = try std.mem.print(&cb, "{s}/Cellar/combo/1.0", .{t.dir});
     try writeTreeFile(cellar, "bin/x", "ab"); // 2 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path) VALUES (1,'combo','combo','1.0','aa','{s}');",
         .{cellar},
@@ -912,7 +912,7 @@ test "buildListJson --size --linked emits size_bytes before linked" {
     const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, true, null, t.dir);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         out,
         "\"pinned\":false,\"size_bytes\":2,\"linked\":true}",
@@ -926,11 +926,11 @@ test "buildListJson --tap --size --linked keeps column alignment in the tap SQL"
     defer t.deinit();
 
     var cb: [256]u8 = undefined;
-    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/tapped/1.0", .{t.dir});
+    const cellar = try std.mem.print(&cb, "{s}/Cellar/tapped/1.0", .{t.dir});
     try writeTreeFile(cellar, "bin/y", "abc"); // 3 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, tap) VALUES (1,'tapped','tapped','1.0','aa','{s}','user/repo');",
         .{cellar},
@@ -964,11 +964,11 @@ test "buildListJson --pinned --size --linked enriches the pinned installed rows"
     defer t.deinit();
 
     var cb: [256]u8 = undefined;
-    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/held/1.0", .{t.dir});
+    const cellar = try std.mem.print(&cb, "{s}/Cellar/held/1.0", .{t.dir});
     try writeTreeFile(cellar, "bin/h", "abcd"); // 4 bytes
 
     var sb: [600]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sb,
         "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, pinned) VALUES (1,'held','held','1.0','aa','{s}',1);",
         .{cellar},
@@ -1004,7 +1004,7 @@ test "buildListJson --pinned --linked marks pinned casks linked" {
     const out = try runBuildFull(testing.allocator, &t.db, false, true, true, false, true, null, t.dir);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(
         u8,
         out,
         "\"type\":\"cask\",\"pinned\":true,\"linked\":true",

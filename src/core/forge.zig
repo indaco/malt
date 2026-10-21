@@ -21,7 +21,7 @@ const gitlab_browse_fmt = "{s}{s}/{s}/{s}";
 /// scheme; a test writes a cleartext loopback host, which the fetch layer
 /// still refuses for anything but loopback.
 fn scheme(host: []const u8) []const u8 {
-    return if (std.mem.indexOf(u8, host, "://") != null) "" else "https://";
+    return if (std.mem.find(u8, host, "://") != null) "" else "https://";
 }
 
 /// Browse URL for `taps.url`, written into a caller buffer. `host` is
@@ -32,11 +32,11 @@ pub fn repoBrowseUrl(
     host: []const u8,
     owner: []const u8,
     repo: []const u8,
-) std.fmt.BufPrintError![]const u8 {
+) std.mem.PrintError![]const u8 {
     return switch (forge) {
-        .github => std.fmt.bufPrint(buf, github_browse_fmt, .{ owner, repo }),
+        .github => std.mem.print(buf, github_browse_fmt, .{ owner, repo }),
         // gitlab, gitea, and gogs all browse at the instance host.
-        .gitlab, .gitea, .gogs => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ scheme(host), host, owner, repo }),
+        .gitlab, .gitea, .gogs => std.mem.print(buf, gitlab_browse_fmt, .{ scheme(host), host, owner, repo }),
     };
 }
 
@@ -50,8 +50,8 @@ pub fn allocRepoBrowseUrl(
     repo: []const u8,
 ) std.mem.Allocator.Error![]const u8 {
     return switch (forge) {
-        .github => std.fmt.allocPrint(allocator, github_browse_fmt, .{ owner, repo }),
-        .gitlab, .gitea, .gogs => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ scheme(host), host, owner, repo }),
+        .github => allocator.print(github_browse_fmt, .{ owner, repo }),
+        .gitlab, .gitea, .gogs => allocator.print(gitlab_browse_fmt, .{ scheme(host), host, owner, repo }),
     };
 }
 
@@ -87,18 +87,18 @@ pub fn rawFileUrl(
     sha: []const u8,
     kind: RawKind,
     name: []const u8,
-) std.fmt.BufPrintError![]const u8 {
+) std.mem.PrintError![]const u8 {
     // Root-layout taps drop the subdir entirely: `<base>/<sha>/<name>.rb`.
     // Branch before the forge switch so no empty infix collapses to `//`.
     // The forge-specific infix already lives in `raw_base`, so this one
     // arm covers every forge.
     if (kind == .formula_root) {
-        return std.fmt.bufPrint(buf, "{s}/{s}/{s}.rb", .{ raw_base, sha, name });
+        return std.mem.print(buf, "{s}/{s}/{s}.rb", .{ raw_base, sha, name });
     }
     return switch (forge) {
         // Same tail for all: the forge-specific infix already lives in
         // `raw_base` (github: bare; gitlab: `/-/raw`; gitea/gogs: `/raw`).
-        .github, .gitlab, .gitea, .gogs => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
+        .github, .gitlab, .gitea, .gogs => std.mem.print(buf, "{s}/{s}/{s}/{s}.rb", .{
             raw_base, sha, kind.subdir(), name,
         }),
     };
@@ -194,22 +194,19 @@ pub fn buildBaseUrls(
     switch (forge) {
         .github => {
             // github hosts are fixed; only the gitlab arm consults `host`.
-            const api_head_url = try std.fmt.allocPrint(
-                allocator,
+            const api_head_url = try allocator.print(
                 "https://api.github.com/repos/{s}/{s}/commits/HEAD",
                 .{ owner, repo },
             );
             errdefer allocator.free(api_head_url);
 
-            const repo_url = try std.fmt.allocPrint(
-                allocator,
+            const repo_url = try allocator.print(
                 "https://github.com/{s}/{s}",
                 .{ owner, repo },
             );
             errdefer allocator.free(repo_url);
 
-            const raw_base = try std.fmt.allocPrint(
-                allocator,
+            const raw_base = try allocator.print(
                 "https://raw.githubusercontent.com/{s}/{s}",
                 .{ owner, repo },
             );
@@ -225,17 +222,16 @@ pub fn buildBaseUrls(
             // enc is sized for the worst case, so encoding cannot overflow it.
             const path = encodeProjectPath(enc, owner, repo) catch unreachable;
 
-            const api_head_url = try std.fmt.allocPrint(
-                allocator,
+            const api_head_url = try allocator.print(
                 "{s}{s}/api/v4/projects/{s}/repository/commits/HEAD",
                 .{ scheme(host), host, path },
             );
             errdefer allocator.free(api_head_url);
 
-            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ scheme(host), host, owner, repo });
+            const repo_url = try allocator.print(gitlab_browse_fmt, .{ scheme(host), host, owner, repo });
             errdefer allocator.free(repo_url);
 
-            const raw_base = try std.fmt.allocPrint(allocator, "{s}{s}/{s}/{s}/-/raw", .{ scheme(host), host, owner, repo });
+            const raw_base = try allocator.print("{s}{s}/{s}/{s}/-/raw", .{ scheme(host), host, owner, repo });
             errdefer allocator.free(raw_base);
 
             return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
@@ -247,17 +243,16 @@ pub fn buildBaseUrls(
             // unlike gitlab); `commits?limit=1` returns a one-element array
             // so HEAD costs one round-trip. Raw has no `/-/` infix. All
             // three URLs ride the row's `host` for self-hosted Forgejo/Gogs.
-            const api_head_url = try std.fmt.allocPrint(
-                allocator,
+            const api_head_url = try allocator.print(
                 "{s}{s}/api/v1/repos/{s}/{s}/commits?limit=1&stat=false",
                 .{ scheme(host), host, owner, repo },
             );
             errdefer allocator.free(api_head_url);
 
-            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ scheme(host), host, owner, repo });
+            const repo_url = try allocator.print(gitlab_browse_fmt, .{ scheme(host), host, owner, repo });
             errdefer allocator.free(repo_url);
 
-            const raw_base = try std.fmt.allocPrint(allocator, "{s}{s}/{s}/{s}/raw", .{ scheme(host), host, owner, repo });
+            const raw_base = try allocator.print("{s}{s}/{s}/{s}/raw", .{ scheme(host), host, owner, repo });
             errdefer allocator.free(raw_base);
 
             return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
@@ -279,8 +274,7 @@ pub fn commitUrl(
     sha: []const u8,
 ) std.mem.Allocator.Error![]const u8 {
     switch (forge_kind) {
-        .github => return std.fmt.allocPrint(
-            allocator,
+        .github => return allocator.print(
             "https://api.github.com/repos/{s}/{s}/commits/{s}",
             .{ owner, repo, sha },
         ),
@@ -292,8 +286,7 @@ pub fn commitUrl(
             defer allocator.free(enc);
             // enc is sized for the worst case, so encoding cannot overflow it.
             const path = encodeProjectPath(enc, owner, repo) catch unreachable;
-            return std.fmt.allocPrint(
-                allocator,
+            return allocator.print(
                 "{s}{s}/api/v4/projects/{s}/repository/commits/{s}",
                 .{ scheme(host), host, path, sha },
             );
@@ -301,16 +294,14 @@ pub fn commitUrl(
         // Gitea/Forgejo serve a single commit at `git/commits/<sha>` (the
         // git-data route); the bare `commits/<sha>` verb 404s. Keyed by
         // plain owner/repo (no encoding) on the instance host.
-        .gitea => return std.fmt.allocPrint(
-            allocator,
+        .gitea => return allocator.print(
             "{s}{s}/api/v1/repos/{s}/{s}/git/commits/{s}",
             .{ scheme(host), host, owner, repo, sha },
         ),
         // Gogs predates Gitea's git-data API: it has no `git/commits/<sha>`
         // route and serves the single commit at the bare `commits/<sha>`
         // (the inverse of Gitea, where that bare verb 404s).
-        .gogs => return std.fmt.allocPrint(
-            allocator,
+        .gogs => return allocator.print(
             "{s}{s}/api/v1/repos/{s}/{s}/commits/{s}",
             .{ scheme(host), host, owner, repo, sha },
         ),
@@ -338,7 +329,7 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) AuthErr
         .github => {
             const raw = std.process.Environ.getPosix(environ, "MALT_GITHUB_TOKEN") orelse return null;
             if (raw.len == 0) return null;
-            const value = std.fmt.bufPrint(buf, "token {s}", .{raw}) catch return error.AuthTokenTooLong;
+            const value = std.mem.print(buf, "token {s}", .{raw}) catch return error.AuthTokenTooLong;
             return .{ .name = "Authorization", .value = value };
         },
         .gitlab => return gitlabPrivateToken(environ, buf),
@@ -354,7 +345,7 @@ fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) AuthError!?std.ht
     const raw = std.process.Environ.getPosix(environ, "MALT_GITLAB_TOKEN") orelse return null;
     if (raw.len == 0) return null;
     // Bare PAT — no scheme prefix, unlike github's/gitea's `token`.
-    const value = std.fmt.bufPrint(buf, "{s}", .{raw}) catch return error.AuthTokenTooLong;
+    const value = std.mem.print(buf, "{s}", .{raw}) catch return error.AuthTokenTooLong;
     return .{ .name = "PRIVATE-TOKEN", .value = value };
 }
 
@@ -367,7 +358,7 @@ fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) AuthError!?std.ht
 fn giteaToken(environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     const raw = std.process.Environ.getPosix(environ, "MALT_GITEA_TOKEN") orelse return null;
     if (raw.len == 0) return null;
-    const value = std.fmt.bufPrint(buf, "token {s}", .{raw}) catch return error.AuthTokenTooLong;
+    const value = std.mem.print(buf, "token {s}", .{raw}) catch return error.AuthTokenTooLong;
     return .{ .name = "Authorization", .value = value };
 }
 
@@ -403,12 +394,12 @@ fn isCommitSha(sha: []const u8) bool {
 /// match a longer key (`"short_id"` won't match `"id"`). Untrusted input —
 /// malformed/unexpected shapes return null. Result borrows from `body`.
 fn firstShaField(body: []const u8, marker: []const u8) ?[]const u8 {
-    const idx = std.mem.indexOf(u8, body, marker) orelse return null;
+    const idx = std.mem.find(u8, body, marker) orelse return null;
     var cur = idx + marker.len;
     while (cur < body.len and (body[cur] == ' ' or body[cur] == ':' or body[cur] == '\t')) : (cur += 1) {}
     if (cur >= body.len or body[cur] != '"') return null;
     cur += 1;
-    const end = std.mem.indexOfScalarPos(u8, body, cur, '"') orelse return null;
+    const end = std.mem.findScalarPos(u8, body, cur, '"') orelse return null;
     const sha = body[cur..end];
     if (!isCommitSha(sha)) return null;
     return sha;
@@ -809,7 +800,7 @@ test "rawFileUrl github: formula_root kind builds the no-subdir root tail" {
     );
     // No `Formula/` infix and no `//` collapse: an empty subdir segment
     // must never leak into the tail (that double-slash 404s the CDN).
-    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
+    try std.testing.expect(std.mem.find(u8, url["https://".len..], "//") == null);
 }
 
 test "rawFileUrl github: formula_root overflowing buffer surfaces NoSpaceLeft" {
@@ -955,7 +946,7 @@ test "rawFileUrl gitlab: formula_root kind builds the /-/raw root tail" {
         gitlab_raw_base ++ "/" ++ raw_sha_fixture ++ "/glow.rb",
         url,
     );
-    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
+    try std.testing.expect(std.mem.find(u8, url["https://".len..], "//") == null);
 }
 
 // ── fromHost (gitea) ────────────────────────────────────────────
@@ -1101,7 +1092,7 @@ test "rawFileUrl gitea: formula_root kind builds the /raw root tail" {
         gitea_raw_base ++ "/" ++ raw_sha_fixture ++ "/glow.rb",
         url,
     );
-    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
+    try std.testing.expect(std.mem.find(u8, url["https://".len..], "//") == null);
 }
 
 // ── authHeader (gitea) ──────────────────────────────────────────
@@ -1211,7 +1202,7 @@ test "commitUrl gogs: bare v1 commits/<sha> endpoint — Gogs has no git/ infix"
 }
 
 fn commitUrlAndFree(allocator: std.mem.Allocator) !void {
-    // gitlab is the allocating-twice arm (encode buffer + allocPrint).
+    // gitlab is the allocating-twice arm (encode buffer + `Allocator.print`).
     const url = try commitUrl(allocator, .gitlab, "gitlab.com", "grp", "tap", commit_sha_fixture);
     allocator.free(url);
 }
@@ -1286,7 +1277,7 @@ test "rawFileUrl gogs: shares the /raw root tail" {
         "https://git.example.org/team/tap/raw/" ++ raw_sha_fixture ++ "/glow.rb",
         url,
     );
-    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
+    try std.testing.expect(std.mem.find(u8, url["https://".len..], "//") == null);
 }
 
 test "repoBrowseUrl gogs: the instance host drives the browse URL" {

@@ -19,12 +19,12 @@ const prefix_path = @import("../fs/prefix_path.zig");
 /// pipeline) report the same text as the global `output`.
 pub fn initFailureMessage(buf: []u8, e: schema.MigrateError, db_version: i64, prefix: []const u8) []const u8 {
     return switch (e) {
-        error.SchemaTooNew => std.fmt.bufPrint(
+        error.SchemaTooNew => std.mem.print(
             buf,
             "Database at {s}/db/malt.db is schema v{d}; this malt supports up to v{d}. It was written by a newer malt — run that malt, or upgrade (mt version update / brew upgrade --cask malt).",
             .{ prefix, db_version, schema.known_schema_version },
         ) catch "Database schema is newer than this malt supports — upgrade malt.",
-        else => std.fmt.bufPrint(
+        else => std.mem.print(
             buf,
             "Failed to initialize database schema at {s}/db/malt.db ({s})",
             .{ prefix, @errorName(e) },
@@ -52,7 +52,7 @@ pub fn openPreviewable(io: std.Io, db_path: [:0]const u8, dry_run: bool) sqlite.
 /// For commands whose real run creates `db/` first: a preview of a prefix
 /// without one reads an empty database and creates nothing.
 pub fn openPreviewableCreating(io: std.Io, db_path: [:0]const u8, dry_run: bool) sqlite.SqliteError!sqlite.Database {
-    if (dry_run and prefix_path.dirMissing(io, std.fs.path.dirname(db_path).?)) return sqlite.Database.open(":memory:");
+    if (dry_run and prefix_path.dirMissing(io, std.Io.Dir.path.dirname(db_path).?)) return sqlite.Database.open(":memory:");
     return openPreviewable(io, db_path, dry_run);
 }
 
@@ -61,43 +61,43 @@ test "initFailureMessage names the DB version, the supported ceiling and the pat
     const msg = initFailureMessage(&buf, error.SchemaTooNew, schema.known_schema_version + 1, "/opt/malt");
 
     var want_db: [16]u8 = undefined;
-    const db_tag = try std.fmt.bufPrint(&want_db, "v{d}", .{schema.known_schema_version + 1});
+    const db_tag = try std.mem.print(&want_db, "v{d}", .{schema.known_schema_version + 1});
     var want_max: [16]u8 = undefined;
-    const max_tag = try std.fmt.bufPrint(&want_max, "v{d}", .{schema.known_schema_version});
+    const max_tag = try std.mem.print(&want_max, "v{d}", .{schema.known_schema_version});
 
-    try std.testing.expect(std.mem.indexOf(u8, msg, db_tag) != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, max_tag) != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "/opt/malt/db/malt.db") != null);
+    try std.testing.expect(std.mem.find(u8, msg, db_tag) != null);
+    try std.testing.expect(std.mem.find(u8, msg, max_tag) != null);
+    try std.testing.expect(std.mem.find(u8, msg, "/opt/malt/db/malt.db") != null);
     // Both ways out: the dev build that wrote it, or a release upgrade.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "run that malt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "upgrade") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "run that malt") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "upgrade") != null);
 }
 
 test "initFailureMessage names the SQLite error and the path otherwise" {
     var buf: [512]u8 = undefined;
     const msg = initFailureMessage(&buf, error.ExecFailed, schema.known_schema_version, "/opt/malt");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "ExecFailed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "/opt/malt/db/malt.db") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "ExecFailed") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "/opt/malt/db/malt.db") != null);
     // A real SQLite failure must never be dressed up as a version mismatch.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "upgrade") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "upgrade") == null);
 }
 
 test "initFailureMessage degrades to a generic line when buf is too small" {
     var tiny: [8]u8 = undefined;
     const too_new = initFailureMessage(&tiny, error.SchemaTooNew, 99, "/opt/malt");
-    try std.testing.expect(std.mem.indexOf(u8, too_new, "upgrade malt") != null);
+    try std.testing.expect(std.mem.find(u8, too_new, "upgrade malt") != null);
     const broken = initFailureMessage(&tiny, error.StepFailed, 1, "/opt/malt");
-    try std.testing.expect(std.mem.indexOf(u8, broken, "schema") != null);
+    try std.testing.expect(std.mem.find(u8, broken, "schema") != null);
 }
 
 test "openPreviewable creates the file for a real run and nothing for a preview" {
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt-open-prefix-{d}.db", .{std.c.getpid()}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/tmp/malt-open-prefix-{d}.db", .{std.c.getpid()}, 0);
     const io = std.Options.debug_io;
     const cwd = std.Io.Dir.cwd();
     defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
         var buf: [80]u8 = undefined;
-        cwd.deleteFile(io, std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
+        cwd.deleteFile(io, std.mem.print(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
     };
     cwd.deleteFile(io, path) catch {};
 
@@ -114,9 +114,9 @@ test "openPreviewable creates the file for a real run and nothing for a preview"
 
 test "openPreviewableCreating previews a prefix without db/ as empty and leaves it so" {
     var dir_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-open-creating-{d}", .{std.c.getpid()});
+    const dir = try std.mem.print(&dir_buf, "/tmp/malt-open-creating-{d}", .{std.c.getpid()});
     var path_buf: [80]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{dir}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "{s}/db/malt.db", .{dir}, 0);
     const io = std.Options.debug_io;
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};

@@ -81,7 +81,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Stays sub-100ms: wipe API cache + invalidate snapshot; the next
     // `mt outdated` recomputes against the new world.
     var api_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir})) |api_path| {
+    if (std.mem.print(&api_buf, "{s}/api", .{cache_dir})) |api_path| {
         std.Io.Dir.cwd().deleteTree(ctx.io, api_path) catch {};
     } else |_| {}
 
@@ -115,7 +115,7 @@ fn reportCheckFailure(e: anyerror) void {
 fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8) !void {
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
 
     var db = outdated_mod.openPrefixDb(ctx.io, db_path, output.isDryRun()) catch |e| switch (e) {
         error.Absent => {
@@ -151,12 +151,12 @@ test "reportCheckFailure names an unverified audit in plain words, other errors 
     defer output.endStderrCapture();
 
     reportCheckFailure(error.AuditIncomplete);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify every package") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "AuditIncomplete") == null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "Could not verify every package") != null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "AuditIncomplete") == null);
 
     err_buf.clearRetainingCapacity();
     reportCheckFailure(error.ConnectionRefused);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "ConnectionRefused") != null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "ConnectionRefused") != null);
 }
 
 test "reportCheckFailure points an unreadable database at mt doctor instead of a raw error name" {
@@ -168,7 +168,7 @@ test "reportCheckFailure points an unreadable database at mt doctor instead of a
     for ([_]anyerror{ error.PrepareFailed, error.StepFailed, error.Corrupt }) |e| {
         err_buf.clearRetainingCapacity();
         reportCheckFailure(e);
-        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "mt doctor") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Failed to refresh") == null);
+        try std.testing.expect(std.mem.find(u8, err_buf.items, "mt doctor") != null);
+        try std.testing.expect(std.mem.find(u8, err_buf.items, "Failed to refresh") == null);
     }
 }

@@ -28,7 +28,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     inline for (.{ "store", "Cellar", "cache", "db" }) |sub| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ path, sub });
+        const dir = try testing.allocator.print("{s}/{s}", .{ path, sub });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
@@ -37,10 +37,10 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
 }
 
 fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !void {
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.json", .{ cache_api, name });
+    const path = try testing.allocator.print("{s}/formula_{s}.json", .{ cache_api, name });
     defer testing.allocator.free(path);
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
@@ -51,14 +51,13 @@ fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !voi
 // path and never reaches the network. The same layout an offline-cached
 // run would produce.
 fn seedStoreBottle(prefix: []const u8, sha: []const u8, name: []const u8, version: []const u8) !void {
-    const inner = try std.fmt.allocPrint(
-        testing.allocator,
+    const inner = try testing.allocator.print(
         "{s}/store/{s}/{s}/{s}",
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, inner);
-    const readme = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{inner});
+    const readme = try testing.allocator.print("{s}/README", .{inner});
     defer testing.allocator.free(readme);
     const f = try test_io.cwd().createFile(std.Options.debug_io, readme, .{});
     defer f.close(std.Options.debug_io);
@@ -68,8 +67,7 @@ fn seedStoreBottle(prefix: []const u8, sha: []const u8, name: []const u8, versio
 fn warmFormulaJson(allocator: std.mem.Allocator, name: []const u8, sha: []const u8) ![]const u8 {
     // `"all"` platform key wins on every host arch — keeps these tests
     // arch-independent and avoids encoding the macOS codename list twice.
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",
@@ -90,8 +88,7 @@ fn warmFormulaJson(allocator: std.mem.Allocator, name: []const u8, sha: []const 
 }
 
 fn kegRowCount(prefix: []const u8) !i64 {
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -126,11 +123,11 @@ fn runTar(argv: []const []const u8) !void {
 /// Seed `<prefix>/cache/Tap/<sha>.bin` with `body` so `materializeRubyFormula`
 /// takes the warm-cache branch and never touches the network.
 fn seedRawBinaryCache(prefix: []const u8, sha: []const u8, body: []const u8) ![]const u8 {
-    var parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const parent = try std.fmt.bufPrint(&parent_buf, "{s}/cache", .{prefix});
+    var parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const parent = try std.mem.print(&parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, parent);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try malt.tap_cache.cachePath(&path_buf, parent, sha, ".bin");
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
@@ -255,13 +252,12 @@ test "--download-only prints the resolved bottle path under the prefix store" {
 
     try install.execute(&ctx, arena.allocator(), &.{ "--download-only", "pathpkg" });
 
-    const expected = try std.fmt.allocPrint(
-        testing.allocator,
+    const expected = try testing.allocator.print(
         "pathpkg 1.0 downloaded to {s}/store/{s}",
         .{ prefix, sha },
     );
     defer testing.allocator.free(expected);
-    try testing.expect(std.mem.indexOf(u8, captured.items, expected) != null);
+    try testing.expect(std.mem.find(u8, captured.items, expected) != null);
 }
 
 test "--download-only --dry-run prints the plan and never touches the store" {
@@ -297,12 +293,12 @@ test "--download-only --dry-run prints the plan and never touches the store" {
 
     try install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--dry-run", "dr" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would install") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "downloaded to") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would install") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "downloaded to") == null);
 
     // Nothing seeded the store, and dry-run skipped the fetch, so the
     // SHA directory must still be absent.
-    const store_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    const store_dir = try testing.allocator.print("{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_dir);
     try testing.expect(!pathExists(store_dir));
 }
@@ -344,12 +340,12 @@ test "--download-only with multiple packages prints one resolved path per packag
 
     try install.execute(&ctx, arena.allocator(), &.{ "--download-only", "alpha", "beta" });
 
-    const want_a = try std.fmt.allocPrint(testing.allocator, "alpha 1.0 downloaded to {s}/store/{s}", .{ prefix, sha_a });
+    const want_a = try testing.allocator.print("alpha 1.0 downloaded to {s}/store/{s}", .{ prefix, sha_a });
     defer testing.allocator.free(want_a);
-    const want_b = try std.fmt.allocPrint(testing.allocator, "beta 1.0 downloaded to {s}/store/{s}", .{ prefix, sha_b });
+    const want_b = try testing.allocator.print("beta 1.0 downloaded to {s}/store/{s}", .{ prefix, sha_b });
     defer testing.allocator.free(want_b);
-    try testing.expect(std.mem.indexOf(u8, captured.items, want_a) != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, want_b) != null);
+    try testing.expect(std.mem.find(u8, captured.items, want_a) != null);
+    try testing.expect(std.mem.find(u8, captured.items, want_b) != null);
 }
 
 test "--download-only with one cached + one 404 package exits PartialFailure" {
@@ -370,10 +366,10 @@ test "--download-only with one cached + one 404 package exits PartialFailure" {
     const a_json = try warmFormulaJson(arena_json.allocator(), "alpha", sha_a);
     try seedFormulaCache(prefix, "alpha", a_json);
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
     inline for (.{ "formula_zzbad.404", "cask_zzbad.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         f.close(std.Options.debug_io);
@@ -415,10 +411,10 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
 
     // Seed a `casks` row for the same token so the normal `isInstalled`
     // gate would short-circuit. `--download-only` must skip the gate.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
         var db = try malt.sqlite.Database.open(db_path);
@@ -464,8 +460,8 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
         install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--cask", "ghost-cask" }),
     );
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost-cask is already installed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Cask 'ghost-cask' not found") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghost-cask is already installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Cask 'ghost-cask' not found") != null);
 }
 
 test "--download-only on tap formula with warm tap cache prints path + skips Cellar" {
@@ -483,11 +479,11 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
 
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ee".*)));
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
 
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
@@ -506,8 +502,7 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -545,7 +540,7 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         true, // download_only
@@ -553,15 +548,14 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
         malt.install_sink.terminal,
     );
 
-    const want = try std.fmt.allocPrint(
-        testing.allocator,
+    const want = try testing.allocator.print(
         "tappkg 1.0 downloaded to {s}",
         .{cache_path},
     );
     defer testing.allocator.free(want);
-    try testing.expect(std.mem.indexOf(u8, captured.items, want) != null);
+    try testing.expect(std.mem.find(u8, captured.items, want) != null);
 
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tappkg", .{prefix});
+    const cellar = try testing.allocator.print("{s}/Cellar/tappkg", .{prefix});
     defer testing.allocator.free(cellar);
     try testing.expect(!pathExists(cellar));
 
@@ -581,11 +575,11 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
 
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("22".*)));
 
-    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
+    var cache_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.mem.print(&cache_dir_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_dir);
 
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_dir, sha, ".tar.gz");
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
@@ -604,8 +598,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -634,7 +627,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         true, // force
         true, // download_only
@@ -646,7 +639,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
     try test_io.accessAbsolute(std.Options.debug_io, cache_path, .{});
 
     // Cellar untouched.
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/forcetap", .{prefix});
+    const cellar = try testing.allocator.print("{s}/Cellar/forcetap", .{prefix});
     defer testing.allocator.free(cellar);
     try testing.expect(!pathExists(cellar));
 
@@ -665,11 +658,11 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
 
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("11".*)));
 
-    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
+    var cache_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.mem.print(&cache_dir_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_dir);
 
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_dir, sha, ".tar.gz");
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
@@ -688,8 +681,7 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -727,7 +719,7 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         true, // download_only
@@ -771,11 +763,11 @@ test "--download-only populates the store and skips Cellar + kegs" {
 
     try install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--quiet", "warmpkg" });
 
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/warmpkg/1.0", .{prefix});
+    const cellar = try testing.allocator.print("{s}/Cellar/warmpkg/1.0", .{prefix});
     defer testing.allocator.free(cellar);
     try testing.expect(!pathExists(cellar));
 
-    const store_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    const store_dir = try testing.allocator.print("{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_dir);
     try testing.expect(pathExists(store_dir));
 
@@ -803,25 +795,25 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     // Build a real source-tree tarball (a file NOT named after the
     // formula) and seed it at the sha-keyed cache path so materialise
     // takes the warm-cache branch and never hits the network.
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/srcwork", .{prefix});
+    const work = try testing.allocator.print("{s}/srcwork", .{prefix});
     defer testing.allocator.free(work);
     {
-        const payload_dir = try std.fmt.allocPrint(testing.allocator, "{s}/payload", .{work});
+        const payload_dir = try testing.allocator.print("{s}/payload", .{work});
         defer testing.allocator.free(payload_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, payload_dir);
     }
     {
-        const readme = try std.fmt.allocPrint(testing.allocator, "{s}/payload/readme.txt", .{work});
+        const readme = try testing.allocator.print("{s}/payload/readme.txt", .{work});
         defer testing.allocator.free(readme);
         const f = try test_io.cwd().createFile(std.Options.debug_io, readme, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, "source, no binary\n");
     }
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "payload" });
 
@@ -836,8 +828,7 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const db_path = try testing.allocator.printSentinel(
         "{s}/db/malt.db",
         .{prefix},
         0,
@@ -866,7 +857,7 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -875,7 +866,7 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     ));
 
     // Keg unwound: the version dir is gone and no keg row was written.
-    const keg_ver = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/srcpkg/1.0", .{prefix});
+    const keg_ver = try testing.allocator.print("{s}/Cellar/srcpkg/1.0", .{prefix});
     defer testing.allocator.free(keg_ver);
     try testing.expect(!pathExists(keg_ver));
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
@@ -896,23 +887,23 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
 
     // Keg-shaped archive: a top-level lib/ with one file, no binary.
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/libwork", .{prefix});
+    const work = try testing.allocator.print("{s}/libwork", .{prefix});
     defer testing.allocator.free(work);
     {
-        const lib_dir = try std.fmt.allocPrint(testing.allocator, "{s}/lib", .{work});
+        const lib_dir = try testing.allocator.print("{s}/lib", .{work});
         defer testing.allocator.free(lib_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, lib_dir);
-        const dylib = try std.fmt.allocPrint(testing.allocator, "{s}/libfoo.dylib", .{lib_dir});
+        const dylib = try testing.allocator.print("{s}/libfoo.dylib", .{lib_dir});
         defer testing.allocator.free(dylib);
         const f = try test_io.cwd().createFile(std.Options.debug_io, dylib, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, "prebuilt lib\n");
     }
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "lib" });
 
@@ -927,7 +918,7 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -952,7 +943,7 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -963,7 +954,7 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     // Recorded and linked: a keg row exists and lib/libfoo.dylib is linked
     // into the prefix.
     try testing.expectEqual(@as(i64, 1), try kegRowCount(prefix));
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/lib/libfoo.dylib", .{prefix});
+    const link = try testing.allocator.print("{s}/lib/libfoo.dylib", .{prefix});
     defer testing.allocator.free(link);
     try testing.expect(pathExists(link));
 }
@@ -1008,10 +999,10 @@ test "--download-only reports a Ctrl-C as an interruption" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     install.execute(&ctx, arena.allocator(), &.{ "--download-only", "intpkg" }) catch {};
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Interrupted") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted") != null);
     // Paired half of the same flag: a cancelled job must not also be listed
     // as a download failure.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Download failed for") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Download failed for") == null);
 }
 
 test "materializeRubyFormula installs a tap formula whose url is an uncompressed binary" {
@@ -1040,7 +1031,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1067,7 +1058,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1075,7 +1066,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
         malt.install_sink.terminal,
     );
 
-    const dest = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/rawpkg/1.0/bin/rawpkg", .{prefix});
+    const dest = try testing.allocator.print("{s}/Cellar/rawpkg/1.0/bin/rawpkg", .{prefix});
     defer testing.allocator.free(dest);
     try testing.expect(pathExists(dest));
 
@@ -1088,7 +1079,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
 
     // Recorded and linked like any other keg.
     try testing.expectEqual(@as(i64, 1), try kegRowCount(prefix));
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/bin/rawpkg", .{prefix});
+    const link = try testing.allocator.print("{s}/bin/rawpkg", .{prefix});
     defer testing.allocator.free(link);
     try testing.expect(pathExists(link));
 }
@@ -1116,7 +1107,7 @@ test "materializeRubyFormula honours binary_name when staging an uncompressed bi
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1142,7 +1133,7 @@ test "materializeRubyFormula honours binary_name when staging an uncompressed bi
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1150,11 +1141,11 @@ test "materializeRubyFormula honours binary_name when staging an uncompressed bi
         malt.install_sink.terminal,
     );
 
-    const dest = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/rawtoken/2.0/bin/rawtool", .{prefix});
+    const dest = try testing.allocator.print("{s}/Cellar/rawtoken/2.0/bin/rawtool", .{prefix});
     defer testing.allocator.free(dest);
     try testing.expect(pathExists(dest));
 
-    const wrong = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/rawtoken/2.0/bin/rawtoken", .{prefix});
+    const wrong = try testing.allocator.print("{s}/Cellar/rawtoken/2.0/bin/rawtoken", .{prefix});
     defer testing.allocator.free(wrong);
     try testing.expect(!pathExists(wrong));
 }
@@ -1183,7 +1174,7 @@ test "materializeRubyFormula refuses a compressed body arriving on the raw-binar
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1208,7 +1199,7 @@ test "materializeRubyFormula refuses a compressed body arriving on the raw-binar
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1216,7 +1207,7 @@ test "materializeRubyFormula refuses a compressed body arriving on the raw-binar
         malt.install_sink.terminal,
     ));
 
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bzpkg", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/bzpkg", .{prefix});
     defer testing.allocator.free(keg);
     try testing.expect(!pathExists(keg));
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
@@ -1245,7 +1236,7 @@ test "materializeRubyFormula truncated body on the raw-binary path is refused" {
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1270,7 +1261,7 @@ test "materializeRubyFormula truncated body on the raw-binary path is refused" {
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1304,7 +1295,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1315,7 +1306,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
     // Pre-seed the deps as installed kegs so the install step is a no-op and
     // the test stays offline; the rows are what this pins.
     for ([_][]const u8{ "flac", "libogg" }) |dep| {
-        const dep_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0", .{ prefix, dep });
+        const dep_cellar = try testing.allocator.print("{s}/Cellar/{s}/1.0", .{ prefix, dep });
         defer testing.allocator.free(dep_cellar);
         try test_io.cwd().createDirPath(std.Options.debug_io, dep_cellar);
         _ = malt.install_record.recordKegFields(&db, .{
@@ -1350,7 +1341,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1387,7 +1378,7 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1422,7 +1413,7 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         true, // dry_run
         false, // force
         false, // download_only
@@ -1430,7 +1421,7 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
         malt.install_sink.terminal,
     );
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "libvorbis") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "libvorbis") != null);
     // A plan must stay a plan: nothing recorded.
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
 }
@@ -1448,23 +1439,23 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("7a".*)));
 
     // Keg-shaped archive: top-level bin/ holding the formula's binary.
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/tarwork", .{prefix});
+    const work = try testing.allocator.print("{s}/tarwork", .{prefix});
     defer testing.allocator.free(work);
     {
-        const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{work});
+        const bin_dir = try testing.allocator.print("{s}/bin", .{work});
         defer testing.allocator.free(bin_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
-        const tool = try std.fmt.allocPrint(testing.allocator, "{s}/tarpkg", .{bin_dir});
+        const tool = try testing.allocator.print("{s}/tarpkg", .{bin_dir});
         defer testing.allocator.free(tool);
         const f = try test_io.cwd().createFile(std.Options.debug_io, tool, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, &macho_stub);
     }
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
 
@@ -1479,7 +1470,7 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1504,7 +1495,7 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1512,7 +1503,7 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
         malt.install_sink.terminal,
     );
 
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tarpkg/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/tarpkg/1.0", .{prefix});
     defer testing.allocator.free(keg);
     const stamp = malt.cellar.readRelocStamp(ctx.io, keg).?;
     try testing.expectEqual(
@@ -1524,11 +1515,11 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
 /// Seed `<prefix>/cache/Cask/<token>-<version>.pkg` and return its sha256, so a
 /// digest-pinned prefetch takes the warm-cache branch and never hits the network.
 fn seedCaskPkgCache(prefix: []const u8, token: []const u8, version: []const u8, body: []const u8) ![64]u8 {
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache/Cask", .{prefix});
+    const dir = try testing.allocator.print("{s}/cache/Cask", .{prefix});
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}-{s}.pkg", .{ dir, token, version });
+    const path = try testing.allocator.print("{s}/{s}-{s}.pkg", .{ dir, token, version });
     defer testing.allocator.free(path);
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
@@ -1537,7 +1528,7 @@ fn seedCaskPkgCache(prefix: []const u8, token: []const u8, version: []const u8, 
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    _ = std.mem.print(&hex, "{x}", .{&digest}) catch unreachable;
     return hex;
 }
 
@@ -1566,7 +1557,7 @@ test "a tap PKG cask upgrade refuses before its prefetch fills the slot" {
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1594,7 +1585,7 @@ test "a tap PKG cask upgrade refuses before its prefetch fills the slot" {
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         true, // force
         true, // download_only — the upgrade route's prefetch pass
@@ -1614,14 +1605,14 @@ test "--download-only on a tap app cask refuses a bin entry the cask cannot take
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // A formula owns the name the cask's `binary` would take.
-    const formula_bin = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/zed/1.0/bin/zed", .{prefix});
+    const formula_bin = try testing.allocator.print("{s}/Cellar/zed/1.0/bin/zed", .{prefix});
     defer testing.allocator.free(formula_bin);
     try test_io.cwd().createDirPath(std.Options.debug_io, test_io.path.dirname(formula_bin).?);
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, formula_bin, .{});
         f.close(std.Options.debug_io);
     }
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/bin/zed", .{prefix});
+    const link = try testing.allocator.print("{s}/bin/zed", .{prefix});
     defer testing.allocator.free(link);
     try test_io.cwd().createDirPath(std.Options.debug_io, test_io.path.dirname(link).?);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, formula_bin, link, .{});
@@ -1636,7 +1627,7 @@ test "--download-only on a tap app cask refuses a bin entry the cask cannot take
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1671,15 +1662,15 @@ test "--download-only on a tap app cask refuses a bin entry the cask cannot take
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         true, // download_only
         null, // prefetch_slot
         malt.install_sink.terminal,
     ));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "is not this cask's link") != null);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(std.mem.find(u8, captured.items, "is not this cask's link") != null);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(std.Options.debug_io, link, &buf);
     try testing.expectEqualStrings(formula_bin, buf[0..n]);
 }
@@ -1692,13 +1683,13 @@ fn materializeOptedOut(suffix: []const u8, url: []const u8, allow_unpinned: bool
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
+    var cache_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.mem.print(&cache_dir_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_dir);
     if (seed_empty_key) {
         // The slot a digest-less recipe would name if it ever consulted the
         // SHA-keyed cache: trusting it would install unrelated bytes.
-        var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var p_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = try malt.tap_cache.cachePath(&p_buf, cache_dir, "", ".tar.gz");
         const f = try test_io.cwd().createFile(std.Options.debug_io, p, .{});
         defer f.close(std.Options.debug_io);
@@ -1716,7 +1707,7 @@ fn materializeOptedOut(suffix: []const u8, url: []const u8, allow_unpinned: bool
     defer http.deinit();
     http.offline = true;
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1753,28 +1744,28 @@ test "an opted-out tap recipe never installs from a warm cache entry" {
     // Offline, so the only way to succeed would be the seeded slot.
     try testing.expectEqual(@as(?anyerror, install_record.InstallError.DownloadFailed), r.err);
     // It went to the network rather than trusting the seeded slot.
-    try testing.expect(std.mem.indexOf(u8, r.stderr, "Failed to download nocheck") != null);
+    try testing.expect(std.mem.find(u8, r.stderr, "Failed to download nocheck") != null);
 }
 
 test "an opted-out tap recipe is refused without the run's --allow-unpinned" {
     const r = try materializeOptedOut("nocheck_noflag", "https://malt-tap-test.invalid/nocheck-1.0.tar.gz", false, false, false);
     defer testing.allocator.free(r.stderr);
     try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
-    try testing.expect(std.mem.indexOf(u8, r.stderr, "sha256 :no_check") != null);
+    try testing.expect(std.mem.find(u8, r.stderr, "sha256 :no_check") != null);
 }
 
 test "an opted-out tap .pkg is refused even under --allow-unpinned" {
     const r = try materializeOptedOut("nocheck_pkg", "https://malt-tap-test.invalid/nocheck-1.0.pkg", true, false, false);
     defer testing.allocator.free(r.stderr);
     try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
-    try testing.expect(std.mem.indexOf(u8, r.stderr, "unpinned .pkg") != null);
+    try testing.expect(std.mem.find(u8, r.stderr, "unpinned .pkg") != null);
 }
 
 test "--download-only refuses an opted-out tap formula whose cache no install would read" {
     const r = try materializeOptedOut("nocheck_dlonly", "https://malt-tap-test.invalid/nocheck-1.0.tar.gz", true, false, true);
     defer testing.allocator.free(r.stderr);
     try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
-    try testing.expect(std.mem.indexOf(u8, r.stderr, "--download-only") != null);
+    try testing.expect(std.mem.find(u8, r.stderr, "--download-only") != null);
 }
 
 /// `--force` over an installed `latest` keg with a warm archive whose
@@ -1782,31 +1773,31 @@ test "--download-only refuses an opted-out tap formula whose cache no install wo
 /// left for the caller to inspect and delete.
 fn reinstallLatestOver(prefix: []const u8, payload_file: []const u8) !void {
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work", .{prefix});
+    const work = try testing.allocator.print("{s}/work", .{prefix});
     defer testing.allocator.free(work);
     {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/payload", .{work});
+        const dir = try testing.allocator.print("{s}/payload", .{work});
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-        const file = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, payload_file });
+        const file = try testing.allocator.print("{s}/{s}", .{ dir, payload_file });
         defer testing.allocator.free(file);
         const f = try test_io.cwd().createFile(std.Options.debug_io, file, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, "new\n");
     }
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "payload" });
 
     // The working keg a `version :latest` upgrade reinstalls over in place.
     {
-        const old_bin = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nightly/latest/bin", .{prefix});
+        const old_bin = try testing.allocator.print("{s}/Cellar/nightly/latest/bin", .{prefix});
         defer testing.allocator.free(old_bin);
         try test_io.cwd().createDirPath(std.Options.debug_io, old_bin);
-        const old = try std.fmt.allocPrint(testing.allocator, "{s}/nightly", .{old_bin});
+        const old = try testing.allocator.print("{s}/nightly", .{old_bin});
         defer testing.allocator.free(old);
         const f = try test_io.cwd().createFile(std.Options.debug_io, old, .{});
         defer f.close(std.Options.debug_io);
@@ -1821,7 +1812,7 @@ fn reinstallLatestOver(prefix: []const u8, payload_file: []const u8) !void {
     const allocator = arena.allocator();
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1840,7 +1831,7 @@ fn reinstallLatestOver(prefix: []const u8, payload_file: []const u8) !void {
 }
 
 fn readKegBin(prefix: []const u8, buf: []u8) ![]const u8 {
-    const p = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nightly/latest/bin/nightly", .{prefix});
+    const p = try testing.allocator.print("{s}/Cellar/nightly/latest/bin/nightly", .{prefix});
     defer testing.allocator.free(p);
     return std.Io.Dir.cwd().readFile(std.Options.debug_io, p, buf);
 }
@@ -1867,7 +1858,7 @@ test "a successful same-version --force reinstall replaces the keg and leaves no
     var buf: [16]u8 = undefined;
     try testing.expectEqualStrings("new\n", try readKegBin(prefix, &buf));
     // The parked copy is dropped once the new keg commits.
-    const tmp = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{prefix});
+    const tmp = try testing.allocator.print("{s}/tmp", .{prefix});
     defer testing.allocator.free(tmp);
     var dir = std.Io.Dir.openDirAbsolute(std.Options.debug_io, tmp, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return,

@@ -35,7 +35,7 @@ const forges = std.StaticStringMap(PathRule).initComptime(.{
 /// Null when the url is not on a forge OSV indexes by repository.
 pub fn identify(buf: []u8, url: []const u8, version: []const u8) ?Target {
     const after_scheme = stripScheme(url) orelse return null;
-    const host_end = std.mem.indexOfScalar(u8, after_scheme, '/') orelse after_scheme.len;
+    const host_end = std.mem.findScalar(u8, after_scheme, '/') orelse after_scheme.len;
     const host = after_scheme[0..host_end];
     const path = after_scheme[host_end..];
     const repo_path = switch (forges.get(host) orelse return null) {
@@ -43,7 +43,7 @@ pub fn identify(buf: []u8, url: []const u8, version: []const u8) ?Target {
         .gitlab => gitlabPath(path),
     } orelse return null;
 
-    const repo_url = std.fmt.bufPrint(buf, "https://{s}/{s}", .{ host, repo_path }) catch return null;
+    const repo_url = std.mem.print(buf, "https://{s}/{s}", .{ host, repo_path }) catch return null;
     // OSV's GIT ecosystem lowercases github paths (GitHub itself is
     // case-insensitive); the other forges are case-sensitive and kept as is.
     if (std.mem.eql(u8, host, "github.com")) _ = std.ascii.lowerString(repo_url, repo_url);
@@ -79,7 +79,7 @@ fn gitlabPath(path: []const u8) ?[]const u8 {
     var segments: usize = 0;
     var end: usize = 0;
     while (end < rel.len) {
-        const next = std.mem.indexOfScalarPos(u8, rel, end, '/') orelse rel.len;
+        const next = std.mem.findScalarPos(u8, rel, end, '/') orelse rel.len;
         if (next == end) return null;
         segments += 1;
         end = next;
@@ -110,22 +110,22 @@ fn tagOf(url: []const u8) ?[]const u8 {
         .{ "/archive/", ".tar.gz" },
         .{ "/archive/", ".zip" },
     }) |shape| {
-        if (std.mem.lastIndexOf(u8, url, shape[0])) |at| {
+        if (std.mem.findLast(u8, url, shape[0])) |at| {
             const rest = url[at + shape[0].len ..];
             if (std.mem.endsWith(u8, rest, shape[1])) {
                 const tag = rest[0 .. rest.len - shape[1].len];
-                if (tag.len > 0 and std.mem.indexOfScalar(u8, tag, '/') == null) return tag;
+                if (tag.len > 0 and std.mem.findScalar(u8, tag, '/') == null) return tag;
             }
         }
     }
     // A release asset: `/releases/download/<tag>/<file>`.
-    if (std.mem.indexOf(u8, url, "/releases/download/")) |at| {
+    if (std.mem.find(u8, url, "/releases/download/")) |at| {
         const rest = url[at + "/releases/download/".len ..];
-        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| if (slash > 0) return rest[0..slash];
+        if (std.mem.findScalar(u8, rest, '/')) |slash| if (slash > 0) return rest[0..slash];
     }
-    if (std.mem.lastIndexOf(u8, url, "/tarball/")) |at| {
+    if (std.mem.findLast(u8, url, "/tarball/")) |at| {
         const tag = url[at + "/tarball/".len ..];
-        if (tag.len > 0 and std.mem.indexOfScalar(u8, tag, '/') == null) return tag;
+        if (tag.len > 0 and std.mem.findScalar(u8, tag, '/') == null) return tag;
     }
     return null;
 }

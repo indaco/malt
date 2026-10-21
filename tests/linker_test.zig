@@ -46,7 +46,7 @@ test "atomic symlink via tmp+rename pattern" {
 
     // Build absolute target path
     var target_buf: [512]u8 = undefined;
-    const target = try std.fmt.bufPrint(&target_buf, "{s}/target_bin", .{tmp_dir});
+    const target = try std.mem.print(&target_buf, "{s}/target_bin", .{tmp_dir});
 
     // Atomic symlink: create at tmp name, rename into place
     dir.deleteFile(std.Options.debug_io, ".malt_tmp_mylink") catch {};
@@ -54,7 +54,7 @@ test "atomic symlink via tmp+rename pattern" {
     try dir.rename(".malt_tmp_mylink", dir, "mylink", std.Options.debug_io);
 
     // Verify the symlink exists and points to the right target
-    var link_target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const link_target_len = try dir.readLink(std.Options.debug_io, "mylink", &link_target_buf);
     try testing.expectEqualStrings(target, link_target_buf[0..link_target_len]);
 }
@@ -78,9 +78,9 @@ test "symlink replacement is atomic" {
     }
 
     var v1_buf: [512]u8 = undefined;
-    const v1 = try std.fmt.bufPrint(&v1_buf, "{s}/v1", .{tmp_dir});
+    const v1 = try std.mem.print(&v1_buf, "{s}/v1", .{tmp_dir});
     var v2_buf: [512]u8 = undefined;
-    const v2 = try std.fmt.bufPrint(&v2_buf, "{s}/v2", .{tmp_dir});
+    const v2 = try std.mem.print(&v2_buf, "{s}/v2", .{tmp_dir});
 
     // Create initial symlink to v1
     try dir.symLink(std.Options.debug_io, v1, "current", .{});
@@ -91,7 +91,7 @@ test "symlink replacement is atomic" {
     try dir.rename(".malt_tmp_current", dir, "current", std.Options.debug_io);
 
     // Verify it now points to v2
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target_len = try dir.readLink(std.Options.debug_io, "current", &link_buf);
     try testing.expectEqualStrings(v2, link_buf[0..target_len]);
 }
@@ -110,7 +110,7 @@ test "conflict detection by reading existing symlink targets" {
 
     // Now "keg B" also has a "tool" binary — check for conflict
     const keg_b_path = "/opt/malt/Cellar/bar/2.0";
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const existing_target_len = try dir.readLink(std.Options.debug_io, "tool", &link_buf);
 
     // The existing symlink does NOT start with keg_b_path — conflict!

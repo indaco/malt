@@ -53,7 +53,7 @@ fn serveStub(s: *Stub) void {
     while (true) {
         var req = srv.receiveHead() catch return;
         const target = req.head.target;
-        if (std.mem.indexOf(u8, target, "/token") != null) {
+        if (std.mem.find(u8, target, "/token") != null) {
             s.token_count += 1;
             var body_buf: [big_token_len + 64]u8 = undefined;
             const body = if (s.big_token) blk: {
@@ -61,10 +61,10 @@ fn serveStub(s: *Stub) void {
                 @memset(&tok, 'A');
                 // Keep each minted token distinct so a replayed one is visible.
                 tok[0] = '0' + @as(u8, @intCast(s.token_count % 10));
-                break :blk std.fmt.bufPrint(&body_buf, "{{\"token\":\"{s}\"}}", .{tok}) catch return;
-            } else std.fmt.bufPrint(&body_buf, "{{\"token\":\"t{d}\"}}", .{s.token_count}) catch return;
+                break :blk std.mem.print(&body_buf, "{{\"token\":\"{s}\"}}", .{tok}) catch return;
+            } else std.mem.print(&body_buf, "{{\"token\":\"t{d}\"}}", .{s.token_count}) catch return;
             req.respond(body, .{}) catch return;
-        } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
+        } else if (std.mem.find(u8, target, "/blobs/") != null) {
             const idx = @min(s.blob_count, s.blob_auth.len - 1);
             var it = req.iterateHeaders();
             while (it.next()) |h| {
@@ -107,7 +107,7 @@ test "downloadBlob invalidates the cached token and retries once on a 401" {
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -149,7 +149,7 @@ test "downloadBlob returns Unauthorized after a second 401 (retry bounded to onc
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -189,7 +189,7 @@ test "downloadBlob does not refresh the token on a non-401 error" {
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -253,7 +253,7 @@ test "downloadBlob progress reports only the streamed blob, not the discarded 40
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -307,11 +307,11 @@ fn serveConcConn(cs: *ConcStub, stream: net.Stream) void {
     while (true) {
         var req = srv.receiveHead() catch return;
         const target = req.head.target;
-        if (std.mem.indexOf(u8, target, "/token") != null) {
+        if (std.mem.find(u8, target, "/token") != null) {
             var body_buf: [64]u8 = undefined;
-            const body = std.fmt.bufPrint(&body_buf, "{{\"token\":\"t{d}\"}}", .{concToken(cs)}) catch return;
+            const body = std.mem.print(&body_buf, "{{\"token\":\"t{d}\"}}", .{concToken(cs)}) catch return;
             req.respond(body, .{}) catch return;
-        } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
+        } else if (std.mem.find(u8, target, "/blobs/") != null) {
             local_blob += 1;
             if (local_blob == 1) {
                 req.respond("unauthorized\n", .{ .status = .unauthorized }) catch return;
@@ -371,7 +371,7 @@ test "concurrent downloadBlob workers recover from 401 without cache corruption"
     const server_thread = try std.Thread.spawn(.{}, serveConc, .{&cs});
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner1: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http1 = client.HttpClient.initWith(&inner1, io, std.process.Environ.empty, std.testing.allocator);
@@ -422,7 +422,7 @@ test "downloadBlob presents an oversized multi-scope token in full" {
     const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);

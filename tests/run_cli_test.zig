@@ -21,10 +21,10 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "run", tag);
         defer allocator.free(base);
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
+        const path = try allocator.printSentinel("{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const cache_api = try std.fmt.allocPrint(allocator, "{s}/cache/api", .{path});
+        const cache_api = try allocator.print("{s}/cache/api", .{path});
         defer allocator.free(cache_api);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -130,8 +130,7 @@ test "execute on a cached-404 formula returns Aborted before exec" {
     var s = try Scratch.init(testing.allocator, "cached_404");
     defer s.deinit(testing.allocator);
 
-    const marker_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const marker_path = try testing.allocator.print(
         "{s}/cache/api/formula_ghost-pkg.404",
         .{s.path},
     );
@@ -156,7 +155,7 @@ test "execute honours MALT_CACHE for the API cache" {
     var s = try Scratch.init(testing.allocator, "malt_cache");
     defer s.deinit(testing.allocator);
 
-    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{s.path}, 0);
+    const alt = try testing.allocator.printSentinel("{s}/altcache", .{s.path}, 0);
     defer testing.allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
@@ -164,10 +163,10 @@ test "execute honours MALT_CACHE for the API cache" {
     // Empty bottle map: a hit progresses past the fetch to "No bottle
     // available" and aborts before exec; an offline miss aborts earlier
     // with "not found". Both are Aborted, so the message is the witness.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    const cache_api = try testing.allocator.print("{s}/api", .{alt});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const doc = try std.fmt.allocPrint(testing.allocator, "{s}/formula_regfoo.json", .{cache_api});
+    const doc = try testing.allocator.print("{s}/formula_regfoo.json", .{cache_api});
     defer testing.allocator.free(doc);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, doc, .{ .truncate = true });
@@ -188,5 +187,5 @@ test "execute honours MALT_CACHE for the API cache" {
         error.Aborted,
         run.execute(&ctx, testing.allocator, &.{"regfoo"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for regfoo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "No bottle available for regfoo") != null);
 }

@@ -29,7 +29,7 @@ const TempDb = struct {
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -411,7 +411,7 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     // Empty-but-valid Brewfile: parser yields an empty manifest, so the
     // dispatcher is never called and the only observable side-effect is
     // the `recordBundle` insert — which dry-run must suppress.
-    const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
+    const bf_path = try testing.allocator.print("{s}/Brewfile", .{dir_z});
     defer testing.allocator.free(bf_path);
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, bf_path, .{});
@@ -429,7 +429,7 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
 
     // Unwired, the real run would create db/ for that insert and var/ for its lock.
     for ([_][]const u8{ "db", "var" }) |sub| {
-        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir_z, sub });
+        const path = try testing.allocator.print("{s}/{s}", .{ dir_z, sub });
         defer testing.allocator.free(path);
         try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, path, .{}));
     }
@@ -512,7 +512,7 @@ test "capture-sink dispatcher: member failure carries its reason via Report with
     defer t.deinit();
 
     // installAll resolves its prefix from MALT_PREFIX; pin it to the temp dir.
-    const prefix_z = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{t.dir}, 0);
+    const prefix_z = try testing.allocator.printSentinel("{s}", .{t.dir}, 0);
     defer testing.allocator.free(prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -561,7 +561,7 @@ test "capture-sink dispatcher: member failure carries its reason via Report with
     try testing.expectEqual(runner.DispatchError.MemberFailed, report.failures[0].err);
     try testing.expectEqualStrings("zz_nonexistent_formula_xyz", report.failures[0].name);
     // ...and names the cause the pipeline would have printed...
-    try testing.expect(std.mem.indexOf(u8, report.failures[0].reason.slice(), "not cached") != null);
+    try testing.expect(std.mem.find(u8, report.failures[0].reason.slice(), "not cached") != null);
     // ...while the per-keg lines never reach the global stderr channel.
     try testing.expectEqual(@as(usize, 0), out_buf.items.len);
 }

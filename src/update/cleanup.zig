@@ -25,22 +25,22 @@ pub const Cleaned = struct {
 pub fn cleanUpdateArtefacts(io: std.Io, target_path: []const u8) !Cleaned {
     var cleaned = Cleaned{};
 
-    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const old_path = try std.fmt.bufPrint(&old_buf, "{s}.old", .{target_path});
+    var old_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old_path = try std.mem.print(&old_buf, "{s}.old", .{target_path});
     if (std.Io.Dir.deleteFileAbsolute(io, old_path)) |_| {
         cleaned.old += 1;
     } else |_| {}
 
-    const target_dir = std.fs.path.dirname(target_path) orelse return cleaned;
+    const target_dir = std.Io.Dir.path.dirname(target_path) orelse return cleaned;
 
     // A legacy dual-regular-file update swaps both binaries before the
     // twin becomes a symlink, so the twin's .old must be swept too.
-    const base = std.fs.path.basename(target_path);
+    const base = std.Io.Dir.path.basename(target_path);
     const twin_base: ?[]const u8 =
         if (std.mem.eql(u8, base, "malt")) "mt" else if (std.mem.eql(u8, base, "mt")) "malt" else null;
     if (twin_base) |tb| {
-        var twin_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const twin_old = try std.fmt.bufPrint(&twin_buf, "{s}/{s}.old", .{ target_dir, tb });
+        var twin_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const twin_old = try std.mem.print(&twin_buf, "{s}/{s}.old", .{ target_dir, tb });
         if (std.Io.Dir.deleteFileAbsolute(io, twin_old)) |_| {
             cleaned.old += 1;
         } else |_| {}

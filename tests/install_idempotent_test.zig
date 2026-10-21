@@ -20,7 +20,7 @@ fn pathExists(path: []const u8) bool {
 }
 
 fn seedCellarKeg(prefix: []const u8, name: []const u8, version: []const u8) !void {
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const dir = try testing.allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 }
@@ -29,11 +29,11 @@ fn seedCellarKeg(prefix: []const u8, name: []const u8, version: []const u8) !voi
 /// it. The cask and tap-form probes read that DB, so their fixtures need a
 /// genuine one rather than a hand-rolled table.
 fn seedDb(prefix: []const u8, sql: [:0]const u8) !void {
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 
-    const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(path);
     var db = try malt.sqlite.Database.open(path);
     defer db.close();
@@ -61,9 +61,9 @@ test "execute short-circuits without opening the DB when the keg already exists"
 
     try seedCellarKeg(prefix, "seedpkg", "1.0");
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_file = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -86,7 +86,7 @@ test "execute short-circuits without opening the DB when the keg already exists"
     // No SQLite open ⇒ no malt.db file. No lock acquire ⇒ no malt.lock.
     try testing.expect(!pathExists(db_file));
     try testing.expect(!pathExists(lock_file));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "seedpkg is already installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "seedpkg is already installed") != null);
 }
 
 test "execute --force falls through to the existing path even when the keg exists" {
@@ -99,7 +99,7 @@ test "execute --force falls through to the existing path even when the keg exist
 
     try seedCellarKeg(prefix, "seedpkg", "1.0");
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_file = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -127,7 +127,7 @@ test "execute falls through when one of several args is missing from the Cellar"
     // cask, so the prior fixture downloaded Alpha.app and crashed.
     try seedCellarKeg(prefix, "ALPHA_FIXTURE", "1.0");
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_file = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -150,7 +150,7 @@ test "execute never claims a dot-entry name is already installed" {
 
     // `Cellar/.` and `Cellar/..` always resolve, so an unguarded probe
     // reports success for a name that can never have been installed.
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{prefix});
+    const cellar = try testing.allocator.print("{s}/Cellar", .{prefix});
     defer testing.allocator.free(cellar);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
 
@@ -171,7 +171,7 @@ test "execute never claims a dot-entry name is already installed" {
         const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
         install.execute(&ctx, arena.allocator(), &.{name}) catch {};
 
-        try testing.expect(std.mem.indexOf(u8, captured.items, "is already installed") == null);
+        try testing.expect(std.mem.find(u8, captured.items, "is already installed") == null);
     }
 }
 
@@ -188,7 +188,7 @@ test "execute --cask short-circuits when the cask is recorded in the DB" {
         \\  VALUES('seedcask','SeedCask','1.0','https://example.invalid/a.dmg','x','/Applications/Seed.app');
     );
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -211,7 +211,7 @@ test "execute --cask short-circuits when the cask is recorded in the DB" {
     // The DB file is part of the fixture, so the lock is what pins that the
     // heavy setup never ran.
     try testing.expect(!pathExists(lock_file));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "seedcask is already installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "seedcask is already installed") != null);
 }
 
 test "execute --cask falls through when no cask row backs the token" {
@@ -227,7 +227,7 @@ test "execute --cask falls through when no cask row backs the token" {
     try seedCellarKeg(prefix, "SEEDCASK_FIXTURE", "1.0");
     try seedDb(prefix, "SELECT 1;");
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -256,7 +256,7 @@ test "execute short-circuits on the tap form when the keg is recorded against th
         \\  VALUES('tapleaf','owner/repo/tapleaf','1.0','owner/repo','x','/Cellar/tapleaf/1.0');
     );
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -277,7 +277,7 @@ test "execute short-circuits on the tap form when the keg is recorded against th
     try install.execute(&ctx, arena.allocator(), &.{"owner/repo/tapleaf"});
 
     try testing.expect(!pathExists(lock_file));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "owner/repo/tapleaf is already installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "owner/repo/tapleaf is already installed") != null);
 }
 
 test "execute falls through when the tap form names a keg owned by another tap" {
@@ -296,7 +296,7 @@ test "execute falls through when the tap form names a keg owned by another tap" 
         \\  VALUES('tapleaf','tapleaf','1.0','homebrew/core','x','/Cellar/tapleaf/1.0');
     );
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -326,7 +326,7 @@ test "execute short-circuits on the tap form when a cask row backs the token" {
         \\  VALUES('deckclip','Deck','1.4.5','https://example.invalid/d.dmg','x','/Applications/Deck.app','owner/repo');
     );
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -347,7 +347,7 @@ test "execute short-circuits on the tap form when a cask row backs the token" {
     try install.execute(&ctx, arena.allocator(), &.{"owner/repo/deckclip"});
 
     try testing.expect(!pathExists(lock_file));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "owner/repo/deckclip is already installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "owner/repo/deckclip is already installed") != null);
 }
 
 test "execute falls through when the tap form names a cask owned by another tap" {
@@ -363,7 +363,7 @@ test "execute falls through when the tap form names a cask owned by another tap"
         \\  VALUES('deckclip','Deck','1.4.5','https://example.invalid/d.dmg','x','/Applications/Deck.app','homebrew/cask');
     );
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -388,7 +388,7 @@ test "execute --download-only still warms the store for an installed formula" {
     // is in the store, so warming it is never a no-op worth skipping.
     try seedCellarKeg(prefix, "ALPHA_FIXTURE", "1.0");
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_file = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -415,7 +415,7 @@ test "execute --download-only on the tap form still refreshes the cached artefac
         \\  VALUES('tapleaf','owner/repo/tapleaf','1.0','owner/repo','x','/Cellar/tapleaf/1.0');
     );
 
-    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_file = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -454,7 +454,7 @@ test "installTapFormula returns before any fetch when the keg is recorded agains
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -482,8 +482,8 @@ test "installTapFormula returns before any fetch when the keg is recorded agains
         malt.install_sink.terminal,
     );
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "tapleaf is already installed") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Resolving tap") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "tapleaf is already installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Resolving tap") == null);
 }
 
 test "execute --dry-run skips the fast path so the plan still reaches the user" {
@@ -513,8 +513,8 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
 
     // Offline, the slow path reports the uncached formula; the fast path
     // would have answered "already installed" without planning anything.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "already installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "not cached") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "already installed") == null);
 }
 
 test "execute --dry-run on a prefix that does not exist yet creates nothing" {
@@ -524,7 +524,7 @@ test "execute --dry-run on a prefix that does not exist yet creates nothing" {
         testing.allocator.free(parent);
         _ = c.unsetenv("MALT_PREFIX");
     }
-    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/p", .{parent}, 0);
+    const prefix = try testing.allocator.printSentinel("{s}/p", .{parent}, 0);
     defer testing.allocator.free(prefix);
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
 
@@ -552,11 +552,11 @@ test "execute --dry-run on a prefix that does not exist yet creates nothing" {
     install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "freshpkg" }) catch {};
 
     // The preview still plans against the empty install a real run would start from.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not cached") != null);
     try testing.expect(!pathExists(prefix));
     // No lock was taken, so neither half of the lock bracket may appear alone.
-    const opened = std.mem.indexOf(u8, events.items, "\"event\":\"lock_acquired\"") != null;
-    const closed = std.mem.indexOf(u8, events.items, "\"event\":\"install_complete\"") != null;
+    const opened = std.mem.find(u8, events.items, "\"event\":\"lock_acquired\"") != null;
+    const closed = std.mem.find(u8, events.items, "\"event\":\"install_complete\"") != null;
     try testing.expectEqual(opened, closed);
 }
 
@@ -570,7 +570,7 @@ test "execute --cask refuses an unreadable casks table before fetching the cask"
     try seedDb(prefix,
         \\INSERT INTO casks(token,name,version,url) VALUES('seedcask','SeedCask','1.0','https://example.invalid/a.dmg');
     );
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     try test_io.corruptTable(db_path, "casks");
 
@@ -591,7 +591,7 @@ test "execute --cask refuses an unreadable casks table before fetching the cask"
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     // A per-package failure; the message is what tells the DB apart from the fetch.
     try testing.expectError(error.PartialFailure, install.execute(&ctx, arena.allocator(), &.{ "--cask", "seedcask" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database") != null);
 }
 
 test "execute --cask --download-only never consults an unreadable casks table" {
@@ -604,7 +604,7 @@ test "execute --cask --download-only never consults an unreadable casks table" {
     try seedDb(prefix,
         \\INSERT INTO casks(token,name,version,url) VALUES('seedcask','SeedCask','1.0','https://example.invalid/a.dmg');
     );
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     try test_io.corruptTable(db_path, "casks");
 
@@ -624,7 +624,7 @@ test "execute --cask --download-only never consults an unreadable casks table" {
     // with nothing cached, it stops at the fetch, not at the table.
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     if (install.execute(&ctx, arena.allocator(), &.{ "--cask", "--download-only", "seedcask" })) |_| return error.TestUnexpectedResult else |_| {}
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database") == null);
 }
 
 test "execute --dry-run reads the database only once it holds the lock" {
@@ -642,9 +642,9 @@ test "execute --dry-run reads the database only once it holds the lock" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    const lock_path = try testing.allocator.print("{s}/db/malt.lock", .{prefix});
     defer testing.allocator.free(lock_path);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
 
     const Writer = struct {
@@ -675,5 +675,5 @@ test "execute --dry-run reads the database only once it holds the lock" {
     install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "foo" }) catch {};
     writer.join();
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "schema v999") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "schema v999") != null);
 }

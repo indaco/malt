@@ -64,8 +64,8 @@ const read_cap: u64 = 1 << 20;
 /// Read `{cache_dir}/outdated.json` and parse it, or null if absent, unreadable,
 /// or malformed — the caller then just lets the live audit populate the tab.
 pub fn read(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) ?outdated_json.Parsed {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/outdated.json", .{cache_dir}) catch return null;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = std.mem.print(&path_buf, "{s}/outdated.json", .{cache_dir}) catch return null;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
     const st = file.stat(io) catch return null;
@@ -96,8 +96,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -106,7 +105,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -116,8 +115,7 @@ const Scratch = struct {
 
     /// Absolute path to `sub` (leading slash included); valid until deinit.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,

@@ -178,7 +178,7 @@ test "findReleaseBinary locates malt nested under GoReleaser's versioned dir" {
     try touch(sub, "README.md", "# malt");
     try touch(sub, "malt", "binary-bytes");
 
-    var out_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const found = release.findReleaseBinary(std.Options.debug_io, testing.allocator, fx.base, &out_buf) orelse
         return error.ExpectedMatch;
 
@@ -197,7 +197,7 @@ test "findReleaseBinary accepts a flat layout with the binary at the root" {
 
     try touch(fx.dir, "malt", "binary-bytes");
 
-    var out_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const found = release.findReleaseBinary(std.Options.debug_io, testing.allocator, fx.base, &out_buf) orelse
         return error.ExpectedMatch;
     try testing.expect(std.mem.endsWith(u8, found, "/malt"));
@@ -213,7 +213,7 @@ test "findReleaseBinary accepts the `mt` alias when `malt` is absent" {
     defer sub.close(std.Options.debug_io);
     try touch(sub, "mt", "binary-bytes");
 
-    var out_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const found = release.findReleaseBinary(std.Options.debug_io, testing.allocator, fx.base, &out_buf) orelse
         return error.ExpectedMatch;
     try testing.expect(std.mem.endsWith(u8, found, "/wrap/mt"));
@@ -227,12 +227,12 @@ test "findReleaseBinary returns null when the archive has no matching binary" {
     try touch(fx.dir, "LICENSE", "MIT");
     try touch(fx.dir, "README.md", "# malt");
 
-    var out_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(release.findReleaseBinary(std.Options.debug_io, testing.allocator, fx.base, &out_buf) == null);
 }
 
 test "findReleaseBinary returns null when the prefix does not exist" {
-    var out_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(
         release.findReleaseBinary(std.Options.debug_io, testing.allocator, "/tmp/malt_findbin_absent_xyz_99", &out_buf) == null,
     );

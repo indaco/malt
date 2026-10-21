@@ -22,7 +22,7 @@ const TempDb = struct {
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         return .{ .arena = arena, .dir = dir, .db = db };
@@ -37,7 +37,7 @@ const TempDb = struct {
 
 fn tableExists(db: *sqlite.Database, name: [:0]const u8) !bool {
     var buf: [256]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{s}';",
         .{name},

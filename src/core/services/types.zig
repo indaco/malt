@@ -56,7 +56,7 @@ pub const max_calendar_entries: usize = 60;
 pub fn scheduleLabel(allocator: std.mem.Allocator, sched: Schedule) std.mem.Allocator.Error![]u8 {
     return switch (sched) {
         .immediate => allocator.dupe(u8, ""),
-        .interval => |secs| std.fmt.allocPrint(allocator, "interval {d}s", .{secs}),
+        .interval => |secs| allocator.print("interval {d}s", .{secs}),
         .calendar => |entries| calendarLabel(allocator, entries),
     };
 }

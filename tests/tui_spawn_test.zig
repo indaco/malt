@@ -39,7 +39,7 @@ test "readJson captures stdout and errors on empty or non-zero output" {
     defer t.deinit();
     const out = try spawn.readJson(t.io(), testing.allocator, &.{ "/bin/echo", "{\"ok\":true}" });
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "\"ok\":true") != null);
+    try testing.expect(std.mem.find(u8, out, "\"ok\":true") != null);
 
     try testing.expectError(error.EmptyOutput, spawn.readJson(t.io(), testing.allocator, &.{"/usr/bin/true"}));
     try testing.expectError(error.ChildFailed, spawn.readJson(t.io(), testing.allocator, &.{"/usr/bin/false"}));

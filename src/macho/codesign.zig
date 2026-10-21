@@ -15,7 +15,7 @@ pub const CodesignError = error{
 
 /// Returns true if the current build target is arm64 (aarch64).
 pub fn isArm64() bool {
-    return builtin.cpu.arch == .aarch64;
+    return builtin.target.cpu.arch == .aarch64;
 }
 
 /// Ad-hoc codesign a single binary. Thin wrapper around `adHocSignAll`
@@ -158,15 +158,15 @@ test "adHocSignAll does not execute a prefix-resident codesign shim" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const root = try std.fmt.allocPrintSentinel(a, "/tmp/malt_codesign_shim_{d}", .{std.c.getpid()}, 0);
+    const root = try a.printSentinel("/tmp/malt_codesign_shim_{d}", .{std.c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(io, root) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{root});
-    const shim = try std.fmt.allocPrint(a, "{s}/codesign", .{bin});
+    const bin = try a.print("{s}/bin", .{root});
+    const shim = try a.print("{s}/codesign", .{bin});
     try std.Io.Dir.cwd().createDirPath(io, bin);
     try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/true", shim, .{});
 
-    const path_entry = try std.fmt.allocPrintSentinel(a, "PATH={s}:/usr/bin:/bin", .{bin}, 0);
+    const path_entry = try a.printSentinel("PATH={s}:/usr/bin:/bin", .{bin}, 0);
     const entries = [_:null]?[*:0]const u8{path_entry.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });

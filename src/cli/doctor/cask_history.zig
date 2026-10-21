@@ -47,7 +47,7 @@ pub fn collectCensus(
     const empty: Census = .{ .entries = &.{}, .total_bytes = 0 };
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return empty;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return empty;
     var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return empty;
     defer db.close();
 
@@ -113,12 +113,12 @@ fn perVersionFootprint(
     var total: u64 = 0;
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
-    if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
+    if (std.mem.print(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         total += pathSize(io, allocator, caskroom_path);
     } else |_| {}
 
     for (cask_mod.cache_extensions ++ cask_mod.sidecar_extensions) |ext| {
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
+        const cache_path = std.mem.print(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;
         } else |_| {}
@@ -214,8 +214,7 @@ var scratch_seq: std.atomic.Value(u32) = .init(0);
 /// millisecond clock: two runs starting in the same millisecond collided
 /// and wiped each other's fixtures. Caller frees the slice.
 fn uniquePrefix(allocator: std.mem.Allocator, tag: []const u8) ![:0]u8 {
-    const prefix = try std.fmt.allocPrintSentinel(
-        allocator,
+    const prefix = try allocator.printSentinel(
         "/tmp/malt_doctor_cask_history_{s}_{d}_{d}",
         .{ tag, std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
         0,
@@ -231,7 +230,7 @@ fn seedScratch(allocator: std.mem.Allocator, tag: []const u8) ![:0]u8 {
     errdefer allocator.free(prefix);
     inline for ([_][]const u8{ "/db", "/cache/Cask", "/Caskroom" }) |sub| {
         var sub_buf: [600]u8 = undefined;
-        const sub_path = try std.fmt.bufPrint(&sub_buf, "{s}{s}", .{ prefix, sub });
+        const sub_path = try std.mem.print(&sub_buf, "{s}{s}", .{ prefix, sub });
         try std.Io.Dir.cwd().createDirPath(fs_test_io, sub_path);
     }
     return prefix;
@@ -260,7 +259,7 @@ test "collectCensus reports retained versions plus on-disk bytes" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -276,16 +275,16 @@ test "collectCensus reports retained versions plus on-disk bytes" {
         );
     }
 
-    const cask_1_0 = try std.fmt.allocPrint(allocator, "{s}/Caskroom/alpha/1.0", .{prefix});
+    const cask_1_0 = try allocator.print("{s}/Caskroom/alpha/1.0", .{prefix});
     defer allocator.free(cask_1_0);
     try std.Io.Dir.cwd().createDirPath(fs_test_io, cask_1_0);
-    const app_1_0 = try std.fmt.allocPrint(allocator, "{s}/Caskroom/alpha/1.0/Alpha.app", .{prefix});
+    const app_1_0 = try allocator.print("{s}/Caskroom/alpha/1.0/Alpha.app", .{prefix});
     defer allocator.free(app_1_0);
     try writeFile(app_1_0, &@as([64]u8, @splat('x')));
 
-    const cache_dir = try std.fs.path.join(allocator, &.{ prefix, "cache" });
+    const cache_dir = try std.Io.Dir.path.join(allocator, &.{ prefix, "cache" });
     defer allocator.free(cache_dir);
-    const cache_1_5 = try std.fmt.allocPrint(allocator, "{s}/Cask/alpha-1.5.dmg", .{cache_dir});
+    const cache_1_5 = try allocator.print("{s}/Cask/alpha-1.5.dmg", .{cache_dir});
     defer allocator.free(cache_1_5);
     try writeFile(cache_1_5, &@as([128]u8, @splat('y')));
 
@@ -406,7 +405,7 @@ test "collectCensus ignores orphan history rows that have no live casks entry" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -438,7 +437,7 @@ test "collectCensus omits the token whose history matches the live version exact
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -480,16 +479,16 @@ test "collectCensus on a fresh prefix returns an empty census" {
 test "perVersionFootprint counts a cached artefact whose path exceeds 512 bytes" {
     const io = std.Options.debug_io;
     const a = std.testing.allocator;
-    const root = try std.fmt.allocPrint(a, "/tmp/malt_doctor_long_{d}", .{std.c.getpid()});
+    const root = try a.print("/tmp/malt_doctor_long_{d}", .{std.c.getpid()});
     defer a.free(root);
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
     const seg = &@as([200]u8, @splat('d'));
-    const cache = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
+    const cache = try a.print("{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
     defer a.free(cache);
-    const cask_dir = try std.fmt.allocPrint(a, "{s}/Cask", .{cache});
+    const cask_dir = try a.print("{s}/Cask", .{cache});
     defer a.free(cask_dir);
     try std.Io.Dir.cwd().createDirPath(io, cask_dir);
-    const art = try std.fmt.allocPrint(a, "{s}/tok-1.0.dmg", .{cask_dir});
+    const art = try a.print("{s}/tok-1.0.dmg", .{cask_dir});
     defer a.free(art);
     try std.testing.expect(art.len > 512);
     const f = try std.Io.Dir.createFileAbsolute(io, art, .{});

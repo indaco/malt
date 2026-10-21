@@ -26,13 +26,13 @@ pub fn isValidSha256(sha: []const u8) bool {
 /// `{prefix}/store/{sha}` - the committed entry.
 pub fn entry(buf: []u8, prefix: []const u8, sha: []const u8) Error![]u8 {
     if (!isValidSha256(sha)) return Error.InvalidSha256;
-    return std.fmt.bufPrint(buf, "{s}/store/{s}", .{ prefix, sha }) catch Error.PathTooLong;
+    return std.mem.print(buf, "{s}/store/{s}", .{ prefix, sha }) catch Error.PathTooLong;
 }
 
 /// `{prefix}/tmp/{sha}` - the staging path a commit renames from.
 pub fn tmpEntry(buf: []u8, prefix: []const u8, sha: []const u8) Error![]u8 {
     if (!isValidSha256(sha)) return Error.InvalidSha256;
-    return std.fmt.bufPrint(buf, "{s}/tmp/{s}", .{ prefix, sha }) catch Error.PathTooLong;
+    return std.mem.print(buf, "{s}/tmp/{s}", .{ prefix, sha }) catch Error.PathTooLong;
 }
 
 const valid_sha = &@as([64]u8, @splat('a'));

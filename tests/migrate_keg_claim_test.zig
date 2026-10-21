@@ -27,14 +27,14 @@ const Fixture = struct {
         test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
         inline for (.{ "store", "Cellar", "opt", "bin", "lib", "cache/api" }) |sub| {
-            const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, sub });
+            const dir = try testing.allocator.print("{s}/{s}", .{ prefix, sub });
             defer testing.allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
 
-        const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{prefix});
+        const cache_dir = try testing.allocator.print("{s}/cache", .{prefix});
         errdefer testing.allocator.free(cache_dir);
-        const brew_prefix = try std.fmt.allocPrint(testing.allocator, "{s}/brew", .{prefix});
+        const brew_prefix = try testing.allocator.print("{s}/brew", .{prefix});
         errdefer testing.allocator.free(brew_prefix);
 
         return .{ .prefix = prefix, .cache_dir = cache_dir, .brew_prefix = brew_prefix };
@@ -50,8 +50,7 @@ const Fixture = struct {
     /// Warm store + cached formula: `migrateKeg` then reaches materialise
     /// without touching the network.
     fn seed(self: *const Fixture, name: []const u8, keg_only: bool) !void {
-        const inner = try std.fmt.allocPrint(
-            testing.allocator,
+        const inner = try testing.allocator.print(
             "{s}/store/{s}/{s}/1.0",
             .{ self.prefix, sha, name },
         );
@@ -59,7 +58,7 @@ const Fixture = struct {
         try test_io.cwd().createDirPath(std.Options.debug_io, inner);
         try self.writeFile(inner, "README", "warm store probe\n");
 
-        const json = try std.fmt.allocPrint(testing.allocator,
+        const json = try testing.allocator.print(
             \\{{"name":"{s}","full_name":"{s}","tap":"homebrew/core","desc":"","homepage":"",
             \\ "versions":{{"stable":"1.0"}},"revision":0,"dependencies":[],"keg_only":{},
             \\ "post_install_defined":false,"oldnames":[],
@@ -68,15 +67,15 @@ const Fixture = struct {
         , .{ name, name, keg_only, name, sha, sha });
         defer testing.allocator.free(json);
 
-        const api_dir = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{self.cache_dir});
+        const api_dir = try testing.allocator.print("{s}/api", .{self.cache_dir});
         defer testing.allocator.free(api_dir);
-        const filename = try std.fmt.allocPrint(testing.allocator, "formula_{s}.json", .{name});
+        const filename = try testing.allocator.print("formula_{s}.json", .{name});
         defer testing.allocator.free(filename);
         try self.writeFile(api_dir, filename, json);
     }
 
     fn writeFile(_: *const Fixture, dir: []const u8, name: []const u8, body: []const u8) !void {
-        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, name });
+        const path = try testing.allocator.print("{s}/{s}", .{ dir, name });
         defer testing.allocator.free(path);
         const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
         defer f.close(std.Options.debug_io);
@@ -86,10 +85,10 @@ const Fixture = struct {
 
 /// A symlinked package dir is the cheapest deterministic materialise refusal.
 fn plantSymlinkedPackageDir(io: std.Io, prefix: []const u8, name: []const u8) !void {
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{prefix});
+    const victim = try testing.allocator.print("{s}/victim", .{prefix});
     defer testing.allocator.free(victim);
     try test_io.cwd().createDirPath(io, victim);
-    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}", .{ prefix, name });
+    const pkg_dir = try testing.allocator.print("{s}/Cellar/{s}", .{ prefix, name });
     defer testing.allocator.free(pkg_dir);
     try test_io.symLinkAbsolute(io, victim, pkg_dir, .{ .is_directory = true });
 }

@@ -206,9 +206,9 @@ test "sandbox: validateWriteDir is lenient when the whole prefix subtree is abse
     defer s.deinit();
     const base = s.path;
 
-    const absent_prefix = try std.fs.path.join(testing.allocator, &.{ base, "no_such_prefix" });
+    const absent_prefix = try std.Io.Dir.path.join(testing.allocator, &.{ base, "no_such_prefix" });
     defer testing.allocator.free(absent_prefix);
-    const target = try std.fs.path.join(testing.allocator, &.{ absent_prefix, "bin", "mybin" });
+    const target = try std.Io.Dir.path.join(testing.allocator, &.{ absent_prefix, "bin", "mybin" });
     defer testing.allocator.free(target);
 
     try sandbox.validateWriteDir(io, target, absent_prefix, absent_prefix);
@@ -227,12 +227,12 @@ test "sandbox: validateWriteDir catches an intermediate-directory symlink escape
     try std.Io.Dir.createDirPath(s.dir, io, "cellar/pkg/1.0/bin");
 
     // bin/escape is a directory symlink pointing out of the keg.
-    const link_dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0", "bin", "escape" });
+    const link_dir = try std.Io.Dir.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0", "bin", "escape" });
     defer testing.allocator.free(link_dir);
-    const cellar_dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0" });
+    const cellar_dir = try std.Io.Dir.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0" });
     defer testing.allocator.free(cellar_dir);
     // A would-be write target *under* the symlinked directory.
-    const target = try std.fs.path.join(testing.allocator, &.{ link_dir, "x" });
+    const target = try std.Io.Dir.path.join(testing.allocator, &.{ link_dir, "x" });
     defer testing.allocator.free(target);
 
     test_io.cwd().symLink(io, "/tmp", link_dir, .{}) catch return; // skip if symlinks unavailable

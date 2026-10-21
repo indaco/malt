@@ -67,13 +67,13 @@ pub fn parseArgs(args: []const []const u8) ?ParsedArgs {
 /// Format `{cache_dir}/run/<sha256>` into `buf`. PathTooLong distinguishes
 /// overflow from allocation failure for callers that surface the cause.
 pub fn buildKeepCachePath(buf: []u8, cache_dir: []const u8, sha256: []const u8) error{PathTooLong}![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/run/{s}", .{ cache_dir, sha256 }) catch error.PathTooLong;
+    return std.mem.print(buf, "{s}/run/{s}", .{ cache_dir, sha256 }) catch error.PathTooLong;
 }
 
 /// Sibling lock file for the cache slot. Lives next to (not inside) the
 /// slot so wiping the slot on a re-extract leaves the lock file intact.
 pub fn buildKeepLockPath(buf: []u8, cache_dir: []const u8, sha256: []const u8) error{PathTooLong}![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/run/{s}.lock", .{ cache_dir, sha256 }) catch error.PathTooLong;
+    return std.mem.print(buf, "{s}/run/{s}.lock", .{ cache_dir, sha256 }) catch error.PathTooLong;
 }
 
 /// Probe `{cache_dir}/run/<sha>/<pkg>/<ver>/bin/<pkg>`. Returns the path
@@ -86,7 +86,7 @@ pub fn findCachedBinary(
     pkg_name: []const u8,
     version: []const u8,
 ) error{PathTooLong}!?[]const u8 {
-    const bin_path = std.fmt.bufPrint(buf, "{s}/run/{s}/{s}/{s}/bin/{s}", .{
+    const bin_path = std.mem.print(buf, "{s}/run/{s}/{s}/{s}/bin/{s}", .{
         cache_dir, sha256, pkg_name, version, pkg_name,
     }) catch return error.PathTooLong;
     std.Io.Dir.accessAbsolute(ctx.io, bin_path, .{}) catch return null;
@@ -105,7 +105,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
 
     var bin_buf: [512]u8 = undefined;
-    const installed_bin = std.fmt.bufPrint(&bin_buf, "{s}/bin/{s}", .{ prefix, parsed.pkg_name }) catch {
+    const installed_bin = std.mem.print(&bin_buf, "{s}/bin/{s}", .{ prefix, parsed.pkg_name }) catch {
         output.err("Installed binary path too long for {s}", .{parsed.pkg_name});
         return error.Aborted;
     };
@@ -168,7 +168,7 @@ fn ephemeralRun(
 
     if (keep) {
         var run_root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const run_root = std.fmt.bufPrint(&run_root_buf, "{s}/run", .{cache_dir}) catch {
+        const run_root = std.mem.print(&run_root_buf, "{s}/run", .{cache_dir}) catch {
             output.err("Cache root path too long for {s}", .{pkg_name});
             return error.Aborted;
         };
@@ -249,12 +249,12 @@ fn ephemeralRun(
 
     if (std.mem.startsWith(u8, bottle.url, ghcr_prefix)) {
         const path = bottle.url[ghcr_prefix.len..];
-        if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
-            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch {
+        if (std.mem.find(u8, path, "/blobs/")) |blobs_pos| {
+            repo = std.mem.print(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch {
                 output.err("Bottle repo path too long for {s}", .{pkg_name});
                 return error.Aborted;
             };
-            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch {
+            digest = std.mem.print(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch {
                 output.err("Bottle digest too long for {s}", .{pkg_name});
                 return error.Aborted;
             };
@@ -278,7 +278,7 @@ fn ephemeralRun(
     };
 
     var bin_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const bin_path = std.fmt.bufPrint(&bin_path_buf, "{s}/{s}/{s}/bin/{s}", .{
+    const bin_path = std.mem.print(&bin_path_buf, "{s}/{s}/{s}/bin/{s}", .{
         dest_dir,
         pkg_name,
         formula.version,

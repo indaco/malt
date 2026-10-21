@@ -25,17 +25,17 @@ const Scratch = struct {
         const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         // An initialized (empty) DB mirrors production: doctor's SQLite
         // check creates the schema before the tap report runs.
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        const cache_dir = try allocator.print("{s}/cache", .{path});
         return .{ .path = path, .cache_dir = cache_dir };
     }
 
@@ -49,7 +49,7 @@ const Scratch = struct {
     /// each forge to surface.
     fn seedTwoForges(self: *Scratch) !void {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -80,9 +80,9 @@ test "emitTapForgeReport: human mode lists each tap with its host on stderr" {
 
     doctor.emitTapForgeReport(allocator, std.Options.debug_io, s.path);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "  > Registered taps:") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        user/repo [github.com]") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        grp/tap [gitlab.com]") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "  > Registered taps:") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "        user/repo [github.com]") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "        grp/tap [gitlab.com]") != null);
 }
 
 test "emitTapForgeReport: human mode stays silent when no taps are registered" {
@@ -121,8 +121,8 @@ test "emitDoctorJson: the merged --json carries the taps payload on stdout" {
     // The taps data is now one member of the single merged document.
     doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, s.cache_dir, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schema_version\":1") != null);
-    try testing.expect(std.mem.indexOf(
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"schema_version\":1") != null);
+    try testing.expect(std.mem.find(
         u8,
         stdout_buf.items,
         "\"taps\":[{\"name\":\"user/repo\",\"host\":\"github.com\"}," ++
@@ -146,5 +146,5 @@ test "emitDoctorJson: the merged --json keeps an empty taps array when no taps e
 
     doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, s.cache_dir, &.{});
 
-    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"taps\":[]") != null);
+    try testing.expect(std.mem.find(u8, stdout_buf.items, "\"taps\":[]") != null);
 }

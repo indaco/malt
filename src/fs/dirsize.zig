@@ -14,7 +14,7 @@ const testing = std.testing;
 /// a partial/absent keg dir must not crash the row writer.
 pub fn dirSizeBytes(io: std.Io, path: []const u8) u64 {
     // A relative path (damaged record) names no keg dir; the absolute open would abort.
-    if (!std.fs.path.isAbsolute(path)) return 0;
+    if (!std.Io.Dir.path.isAbsolute(path)) return 0;
     var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return 0;
     defer dir.close(io);
     return sumDir(io, &dir);
@@ -61,8 +61,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -74,8 +73,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,

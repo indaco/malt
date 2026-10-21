@@ -74,8 +74,8 @@ pub const Value = union(enum) {
             .string => |s| s,
             .pathname => |p| p,
             .symbol => |s| s,
-            .int => |i| std.fmt.allocPrint(allocator, "{d}", .{i}),
-            .float => |f| std.fmt.allocPrint(allocator, "{d}", .{f}),
+            .int => |i| allocator.print("{d}", .{i}),
+            .float => |f| allocator.print("{d}", .{f}),
             .bool => |b| if (b) "true" else "false",
             .nil => "",
             .array => "[Array]",
@@ -142,7 +142,7 @@ test "asString returns raw bytes for string/pathname/symbol" {
     try testing.expectEqualStrings(":s", try (Value{ .symbol = ":s" }).asString(testing.allocator));
 }
 
-test "asString formats ints and floats via allocPrint" {
+test "asString formats ints and floats via Allocator.print" {
     const testing = std.testing;
     const s_int = try (Value{ .int = 42 }).asString(testing.allocator);
     defer testing.allocator.free(s_int);

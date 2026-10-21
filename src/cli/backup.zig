@@ -84,7 +84,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // ── Open the database ────────────────────────────────────────────────
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return Error.DatabaseError;
 
     var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
@@ -238,7 +238,7 @@ pub fn warnLocal(name: []const u8, path: []const u8) void {
 fn qualify(buf: []u8, tap: []const u8, name: []const u8) RowsError![]const u8 {
     const owner = install_args.thirdPartyTap(tap);
     if (owner.len == 0) return name;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ owner, name }) catch {
+    return std.mem.print(buf, "{s}/{s}", .{ owner, name }) catch {
         // No legitimate slug overflows this; a bare name here would be a
         // line restore cannot use.
         output.err("Tap label too long for {s} ({s})", .{ name, tap });
@@ -379,7 +379,7 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: u
     path_write.writeFile(ctx.io, path, bytes) catch |e| switch (e) {
         // On a parent-dir failure the offending path is its dirname.
         error.MakeParentDirFailed => {
-            output.err("Failed to create {s}", .{std.fs.path.dirname(path) orelse path});
+            output.err("Failed to create {s}", .{std.Io.Dir.path.dirname(path) orelse path});
             return error.Aborted;
         },
         error.OpenFileFailed => {
@@ -645,8 +645,7 @@ pub fn defaultBackupPath(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8
     const month_day = year_day.calculateMonthDay();
 
     const day_of_month: u16 = @as(u16, month_day.day_index) + 1;
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         "malt-backup-{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}-{d:0>2}-{d:0>2}.txt",
         .{
             year_day.year,
@@ -681,8 +680,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -694,8 +692,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -974,14 +971,14 @@ test "writeRows drops a local note that would print a terminal control byte" {
 
     try std.testing.expectEqual(@as(usize, 0), count);
     try std.testing.expectEqualStrings("", aw.written());
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\xc2\x80") == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\xc2\x9b") == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\xc2\x80") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\xc2\x9b") == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
     // Name and recipe path, escaped: after `purge --wipe` this line is the
     // only record of where the recipe was.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "l\\x1bc (/w/lc.rb) is a local formula whose name or recipe path holds a control character") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ld\\xc2\\x80 (/w/ld.rb) is a local formula") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lb (/w/x\\xc2\\x9b2Jy/lb.rb) is a local formula") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "l\\x1bc (/w/lc.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "ld\\xc2\\x80 (/w/ld.rb) is a local formula") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "lb (/w/x\\xc2\\x9b2Jy/lb.rb) is a local formula") != null);
 }
 
 test "writeRows keeps a local note whose path is clean or plain UTF-8" {
@@ -1023,9 +1020,9 @@ test "writeRows still names a dropped local keg under --quiet" {
 
     _ = try writeRows(&aw.writer, &db, true, false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lx (/w/x\\ry/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "lx (/w/x\\ry/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
     // A hint built from the scrubbed path would name a file that does not exist.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "mt install --local") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "mt install --local") == null);
 }
 
 test "writeRows aborts on an unreadable table instead of truncating" {

@@ -54,18 +54,18 @@ test "a run step executes the command with its templates expanded" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prefix = path_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &path_buf)];
 
-    const keg = try std.fmt.allocPrint(a, "{s}/Cellar/probe/1.0", .{prefix});
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{keg});
+    const keg = try a.print("{s}/Cellar/probe/1.0", .{prefix});
+    const libexec = try a.print("{s}/libexec", .{keg});
     try std.Io.Dir.cwd().createDirPath(io, libexec);
-    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/etc", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/etc", .{prefix}));
 
     // Echoes its first argument into a file the harness reads back, so the
     // assertion covers argument expansion and not just the exit code.
-    const receipt = try std.fmt.allocPrint(a, "{s}/etc/receipt", .{prefix});
-    const script = try std.fmt.allocPrint(a, "{s}/post-install", .{libexec});
+    const receipt = try a.print("{s}/etc/receipt", .{prefix});
+    const script = try a.print("{s}/post-install", .{libexec});
     {
         const f = try std.Io.Dir.createFileAbsolute(io, script, .{});
         defer f.close(io);
@@ -104,7 +104,7 @@ test "a run step executes the command with its templates expanded" {
     defer f.close(io);
     var r = f.reader(io, &.{});
     const n = try r.interface.readSliceShort(&got);
-    const want = try std.fmt.allocPrint(a, "--ensure={s}/var/lib/machine-id", .{prefix});
+    const want = try a.print("--ensure={s}/var/lib/machine-id", .{prefix});
     if (!std.mem.eql(u8, want, got[0..n])) {
         std.debug.print("want '{s}', got '{s}'\n", .{ want, got[0..n] });
         return error.VarTemplateNotExpanded;

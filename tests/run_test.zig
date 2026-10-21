@@ -27,8 +27,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -50,11 +49,11 @@ test "findCachedBinary returns the path when the cached binary exists" {
     const pkg = "jq";
     const ver = "1.7.1";
 
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/{s}/bin", .{ base, sha, pkg, ver });
+    const bin_dir = try testing.allocator.print("{s}/run/{s}/{s}/{s}/bin", .{ base, sha, pkg, ver });
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
 
-    const expected_bin = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
+    const expected_bin = try testing.allocator.print("{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(expected_bin);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, expected_bin, .{});
     f.close(std.Options.debug_io);
@@ -96,10 +95,10 @@ test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
     const pkg = "jq";
     const ver = "1.7.1";
 
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/{s}/bin", .{ base, sha_a, pkg, ver });
+    const bin_dir = try testing.allocator.print("{s}/run/{s}/{s}/{s}/bin", .{ base, sha_a, pkg, ver });
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
-    const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
+    const bin_path = try testing.allocator.print("{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(bin_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
     f.close(std.Options.debug_io);
@@ -124,10 +123,10 @@ test "findCachedBinary requires the version directory to match" {
     const sha = "abc";
     const pkg = "jq";
 
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/1.7.1/bin", .{ base, sha, pkg });
+    const bin_dir = try testing.allocator.print("{s}/run/{s}/{s}/1.7.1/bin", .{ base, sha, pkg });
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
-    const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
+    const bin_path = try testing.allocator.print("{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(bin_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
     f.close(std.Options.debug_io);

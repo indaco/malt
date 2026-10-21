@@ -395,7 +395,7 @@ fn renderBasket(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     // A dim title orients a fresh toggle-in and carries the count, so the row it
     // costs isn't pure decoration.
     var tb: [48]u8 = undefined;
-    tab.renderHint(f, rect, std.fmt.bufPrint(&tb, "Basket - {d} selected", .{s.basket.len}) catch "Basket");
+    tab.renderHint(f, rect, std.mem.print(&tb, "Basket - {d} selected", .{s.basket.len}) catch "Basket");
     const head: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
     if (head.height == 0) return; // the title took the only row
     tab.renderHeading(f, head, 0, &.{
@@ -1055,9 +1055,9 @@ test "render draws a multi-select checkbox per result row" {
     const s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
-    try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
-    try testing.expect(std.mem.indexOf(u8, out, "[-]") != null); // firefox installed → blocked
+    try testing.expect(std.mem.find(u8, out, "✓") != null); // wget checked
+    try testing.expect(std.mem.find(u8, out, "[ ]") != null); // an unchecked box
+    try testing.expect(std.mem.find(u8, out, "[-]") != null); // firefox installed → blocked
 }
 
 test "render docks the info pane when one is open" {
@@ -1067,9 +1067,9 @@ test "render docks the info pane when one is open" {
     const s: State = .{ .items = &sample, .phase = .loaded, .detail = info };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // version field
-    try testing.expect(std.mem.indexOf(u8, out, "openssl@3") != null); // a dependency
-    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still shows
+    try testing.expect(std.mem.find(u8, out, "1.25.0") != null); // version field
+    try testing.expect(std.mem.find(u8, out, "openssl@3") != null); // a dependency
+    try testing.expect(std.mem.find(u8, out, "wget") != null); // the list still shows
 }
 
 test "render shows guidance in the idle phase before any query is committed" {
@@ -1077,7 +1077,7 @@ test "render shows guidance in the idle phase before any query is committed" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .phase = .idle };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "type a query") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "type a query") != null);
 }
 
 test "render shows the searching status during the remote read" {
@@ -1085,7 +1085,7 @@ test "render shows the searching status during the remote read" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .phase = .searching };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "searching") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "searching") != null);
 }
 
 test "render shows no-matches when a committed query returned zero results" {
@@ -1093,7 +1093,7 @@ test "render shows no-matches when a committed query returned zero results" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{}, .phase = .loaded };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "No matches") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "No matches") != null);
 }
 
 test "render heads the result columns in bold, indented past the checkbox" {
@@ -1102,10 +1102,10 @@ test "render heads the result columns in bold, indented past the checkbox" {
     const s: State = .{ .items = &sample, .phase = .loaded };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    try testing.expect(std.mem.find(u8, out, color.Style.bold.code()) != null);
     // 4-col checkbox indent plus exact padding aligns NAME / KIND over their values.
-    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ &@as([25]u8, @splat(' ')) ++ "KIND") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still renders below
+    try testing.expect(std.mem.find(u8, out, "    NAME" ++ &@as([25]u8, @splat(' ')) ++ "KIND") != null);
+    try testing.expect(std.mem.find(u8, out, "wget") != null); // the list still renders below
 }
 
 test "render lists hits with the kind label and an installed marker" {
@@ -1114,12 +1114,12 @@ test "render lists hits with the kind label and an installed marker" {
     const s: State = .{ .items = &sample, .phase = .loaded };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "formula") != null); // kind as plain text, no glyph
-    try testing.expect(std.mem.indexOf(u8, out, "cask") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "◆") == null); // the glyph is gone
-    try testing.expect(std.mem.indexOf(u8, out, "installed") != null); // firefox marker
+    try testing.expect(std.mem.find(u8, out, "wget") != null);
+    try testing.expect(std.mem.find(u8, out, "firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "formula") != null); // kind as plain text, no glyph
+    try testing.expect(std.mem.find(u8, out, "cask") != null);
+    try testing.expect(std.mem.find(u8, out, "◆") == null); // the glyph is gone
+    try testing.expect(std.mem.find(u8, out, "installed") != null); // firefox marker
 }
 
 test "render highlights the selected hit" {
@@ -1128,12 +1128,12 @@ test "render highlights the selected hit" {
     var s: State = .{ .items = &sample, .phase = .loaded };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "footerHint exposes the tab's action keys for the shared footer" {
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "select") != null);
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "install") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "select") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "install") != null);
 }
 
 test "l flips the body between the results and basket views" {
@@ -1176,10 +1176,10 @@ test "the basket view lists every pick, including ones off the current results" 
     const s: State = .{ .items = &sample, .phase = .loaded, .view = .basket, .basket = &basket_sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "bat") != null); // an off-results pick is visible
-    try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "formula") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "cask") != null);
+    try testing.expect(std.mem.find(u8, out, "bat") != null); // an off-results pick is visible
+    try testing.expect(std.mem.find(u8, out, "firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "formula") != null);
+    try testing.expect(std.mem.find(u8, out, "cask") != null);
 }
 
 test "the basket view heads the list with a dim selected-count title" {
@@ -1188,10 +1188,10 @@ test "the basket view heads the list with a dim selected-count title" {
     const s: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample }; // 2 picks
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Basket") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "2 selected") != null); // the live count
-    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.muted)) != null); // dim
-    try testing.expect(std.mem.indexOf(u8, out, "bat") != null); // the list still renders below
+    try testing.expect(std.mem.find(u8, out, "Basket") != null);
+    try testing.expect(std.mem.find(u8, out, "2 selected") != null); // the live count
+    try testing.expect(std.mem.find(u8, out, color.roleCode(.muted)) != null); // dim
+    try testing.expect(std.mem.find(u8, out, "bat") != null); // the list still renders below
 }
 
 test "the basket view shows a placeholder when nothing is selected, not a blank pane" {
@@ -1199,7 +1199,7 @@ test "the basket view shows a placeholder when nothing is selected, not a blank 
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample, .phase = .loaded, .view = .basket, .basket = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Nothing selected") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "Nothing selected") != null);
 }
 
 test "a hostile basket name cannot inject a control sequence into the frame" {
@@ -1209,8 +1209,8 @@ test "a hostile basket name cannot inject a control sequence into the frame" {
     const s: State = .{ .phase = .loaded, .view = .basket, .basket = &evil };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
-    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+    try testing.expect(std.mem.find(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
+    try testing.expect(std.mem.findScalar(u8, out, 0x07) == null); // BEL dropped
 }
 
 test "the basket view on a zero-height rect is a clean no-op" {
@@ -1297,12 +1297,12 @@ test "n on an empty basket is inert" {
 
 test "the footer hint reflects the active view" {
     // Results view: the select/install keys plus the basket toggle.
-    try testing.expect(std.mem.indexOf(u8, footerHintFor(.results), "l: basket") != null);
-    try testing.expect(std.mem.indexOf(u8, footerHintFor(.results), "install") != null);
+    try testing.expect(std.mem.find(u8, footerHintFor(.results), "l: basket") != null);
+    try testing.expect(std.mem.find(u8, footerHintFor(.results), "install") != null);
     // Basket view: remove + the toggle back to results.
-    try testing.expect(std.mem.indexOf(u8, footerHintFor(.basket), "remove") != null);
-    try testing.expect(std.mem.indexOf(u8, footerHintFor(.basket), "l: results") != null);
-    try testing.expect(std.mem.indexOf(u8, footerHintFor(.basket), "install") != null);
+    try testing.expect(std.mem.find(u8, footerHintFor(.basket), "remove") != null);
+    try testing.expect(std.mem.find(u8, footerHintFor(.basket), "l: results") != null);
+    try testing.expect(std.mem.find(u8, footerHintFor(.basket), "install") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -1325,8 +1325,8 @@ test "a hostile hit name cannot inject a control sequence into the frame" {
     const out = f.slice();
     // The glyph legitimately emits its own SGR via `put`; the row *content* is
     // funnelled through `putContent`, so the name's OSC title-set and BEL die there.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
-    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+    try testing.expect(std.mem.find(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
+    try testing.expect(std.mem.findScalar(u8, out, 0x07) == null); // BEL dropped
 }
 
 test "render clamps to a height of one (action line only) without crashing" {
@@ -1746,7 +1746,7 @@ test "removing a pick then installing builds an argv without the removed name" {
     defer alloc.free(argv);
     try testing.expectEqual(@as(usize, 4), argv.len); // mt, install, --formula, name
     try testing.expectEqualStrings("redis", argv[3]);
-    try testing.expect(std.mem.indexOf(u8, argv[3], "bat") == null);
+    try testing.expect(std.mem.find(u8, argv[3], "bat") == null);
 }
 
 test "projectChecked leaves every row unchecked for an empty selection" {

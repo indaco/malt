@@ -33,8 +33,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -535,7 +534,7 @@ fn tempFilePath(tag: []const u8, buf: []u8) ![]const u8 {
     // Process-unique: a bare timestamp collides between overlapping runs.
     const p = try test_io.uniqueTempPath(testing.allocator, "cask_verify", tag);
     defer testing.allocator.free(p);
-    return std.fmt.bufPrint(buf, "{s}", .{p});
+    return std.mem.print(buf, "{s}", .{p});
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
@@ -755,7 +754,7 @@ fn scratchDir(tag: []const u8, buf: []u8) ![]const u8 {
     // Process-unique: a bare timestamp collides between overlapping runs.
     const raw = try test_io.uniqueTempPath(testing.allocator, "cask_findapp", tag);
     defer testing.allocator.free(raw);
-    const p = try std.fmt.bufPrint(buf, "{s}", .{raw});
+    const p = try std.mem.print(buf, "{s}", .{raw});
     try malt_fs.makeDirAbsolute(std.Options.debug_io, p);
     return p;
 }
@@ -770,7 +769,7 @@ test "findAppInDir returns the .app name copied into the caller buffer" {
     defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var app_path_buf: [256]u8 = undefined;
-    const app_path = try std.fmt.bufPrint(&app_path_buf, "{s}/Foo.app", .{dir_path});
+    const app_path = try std.mem.print(&app_path_buf, "{s}/Foo.app", .{dir_path});
     try malt_fs.makeDirAbsolute(std.Options.debug_io, app_path);
 
     var out: [128]u8 = undefined;
@@ -786,7 +785,7 @@ test "findAppInDir returns null when no .app bundle is present" {
     defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var readme_buf: [256]u8 = undefined;
-    const readme = try std.fmt.bufPrint(&readme_buf, "{s}/README", .{dir_path});
+    const readme = try std.mem.print(&readme_buf, "{s}/README", .{dir_path});
     const f = try malt_fs.createFileAbsolute(std.Options.debug_io, readme, .{});
     f.close(std.Options.debug_io);
 
@@ -802,7 +801,7 @@ test "findFileInTree returns absolute path for a file at the root" {
     defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var file_buf: [256]u8 = undefined;
-    const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{dir_path});
+    const file_path = try std.mem.print(&file_buf, "{s}/tool", .{dir_path});
     const f = try malt_fs.createFileAbsolute(std.Options.debug_io, file_path, .{});
     f.close(std.Options.debug_io);
 
@@ -821,11 +820,11 @@ test "findFileInTree finds a binary nested one level deep" {
     defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var sub_buf: [256]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/tool-darwin-arm64", .{dir_path});
+    const sub = try std.mem.print(&sub_buf, "{s}/tool-darwin-arm64", .{dir_path});
     try malt_fs.makeDirAbsolute(std.Options.debug_io, sub);
 
     var file_buf: [384]u8 = undefined;
-    const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{sub});
+    const file_path = try std.mem.print(&file_buf, "{s}/tool", .{sub});
     const f = try malt_fs.createFileAbsolute(std.Options.debug_io, file_path, .{});
     f.close(std.Options.debug_io);
 
@@ -850,7 +849,7 @@ test "findFileInTree ignores directories sharing the basename" {
     defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var sub_buf: [256]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/tool", .{dir_path});
+    const sub = try std.mem.print(&sub_buf, "{s}/tool", .{dir_path});
     try malt_fs.makeDirAbsolute(std.Options.debug_io, sub);
 
     try testing.expect((try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) == null);
@@ -862,7 +861,7 @@ test "findAppInDir returns null when the .app name exceeds the out-buffer" {
     defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var app_path_buf: [256]u8 = undefined;
-    const app_path = try std.fmt.bufPrint(
+    const app_path = try std.mem.print(
         &app_path_buf,
         "{s}/AReallyLongApplicationBundleName.app",
         .{dir_path},
@@ -1471,7 +1470,7 @@ test "uninstall removes per-version cache files and drops every cask_versions ro
 fn seedCaskCache(fx: *Fixture, token: []const u8, json: []const u8) !void {
     const api_dir = fx.p("cache/api");
     try test_io.cwd().createDirPath(testIo(), api_dir);
-    const path = try std.fmt.allocPrint(fx.arena.allocator(), "{s}/cask_{s}.json", .{ api_dir, token });
+    const path = try fx.arena.allocator().print("{s}/cask_{s}.json", .{ api_dir, token });
     const f = try test_io.createFileAbsolute(testIo(), path, .{ .truncate = true });
     defer f.close(testIo());
     try f.writeStreamingAll(testIo(), json);
@@ -1479,7 +1478,7 @@ fn seedCaskCache(fx: *Fixture, token: []const u8, json: []const u8) !void {
 
 fn insertInstalledCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.invalid');",
         .{ token, token, version },
@@ -1535,9 +1534,9 @@ test "install refuses a cask whose depends_on is unmet" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     try testing.expectError(error.PartialFailure, malt.install.execute(&ctx, testing.allocator, &.{ "--cask", "toonew" }));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "toonew requires macOS >= 99") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "download") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "offline") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "toonew requires macOS >= 99") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "download") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "offline") == null);
     // Nothing recorded, nothing staged in the cask cache.
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(testIo(), fx.p("cache/Cask"), .{}));
 }
@@ -1574,9 +1573,9 @@ test "upgrade skips an incompatible cask and upgrades the rest" {
     // The batch must not abort on the skipped cask.
     try malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "toonew requires macOS >= 99") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask toonew") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "toonew requires macOS >= 99") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask toonew") == null);
 }
 
 test "upgrade --dry-run names the artifact type of a cask" {
@@ -1609,7 +1608,7 @@ test "upgrade --dry-run names the artifact type of a cask" {
     try malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "plain" });
 
     // Same plan line as install: the type is what the sudo gate keys on.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0 (dmg)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0 (dmg)") != null);
 }
 
 // A loopback download endpoint. HEAD gets a bare 200 page. With `artifact`
@@ -1651,7 +1650,7 @@ const Origin = struct {
         if (req.head.method == .HEAD) return req.respond("", .{ .status = .ok });
         if (!std.mem.startsWith(u8, req.head.target, "/download")) return req.respond("", .{ .status = .not_found });
         var loc_buf: [64]u8 = undefined;
-        const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/{s}", .{ self.listener.socket.address.getPort(), artifact });
+        const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/{s}", .{ self.listener.socket.address.getPort(), artifact });
         try req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = loc }} });
     }
 };
@@ -1659,7 +1658,7 @@ const Origin = struct {
 // Seeds an installed 1.0 of `bare` whose 2.0 lives at a suffix-less URL on
 // the loopback origin.
 fn seedSuffixlessUpgrade(fx: *Fixture, io: std.Io, port: u16) !void {
-    const json = try std.fmt.allocPrint(fx.arena.allocator(),
+    const json = try fx.arena.allocator().print(
         \\{{"token":"bare","version":"2.0","url":"http://127.0.0.1:{d}/download?package=dmg","sha256":"no_check",
         \\ "artifacts":[{{"app":["Bare.app"]}}]}}
     , .{port});
@@ -1736,8 +1735,8 @@ test "upgrade --dry-run refuses a suffix-less cask offline instead of guessing a
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "bare" }));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve the download URL for bare: OfflineRequired") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask bare") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve the download URL for bare: OfflineRequired") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask bare") == null);
 }
 
 test "upgrade --dry-run reports a suffix-less cask URL neither walk can classify" {
@@ -1758,8 +1757,8 @@ test "upgrade --dry-run reports a suffix-less cask URL neither walk can classify
     try upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "--dry-run", "bare" }, &captured);
 
     // As on install: the plan names the type it found and refuses nothing.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask bare 1.0 -> 2.0 (unknown)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask bare 1.0 -> 2.0 (unknown)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unsupported") == null);
 }
 
 test "upgrade refuses a suffix-less cask neither walk can classify before touching the installed version" {
@@ -1780,10 +1779,10 @@ test "upgrade refuses a suffix-less cask neither walk can classify before touchi
     try testing.expectError(error.Aborted, upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "bare" }, &captured));
 
     // Install's refusal, word for word, plus where that leaves the user.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported cask format for 'bare'") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "installed version left in place") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "brew install --cask bare") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unsupported cask format for 'bare'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "installed version left in place") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "brew install --cask bare") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to download") == null);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
     try testing.expect(try malt.cask.isInstalled(&db, "bare"));
@@ -1820,9 +1819,9 @@ test "upgrade hands a walk-resolved pkg to the sudo gate before touching the ins
 
     try testing.expectError(error.Aborted, upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "bare" }, &captured));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "bare is a PKG cask and requires sudo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported cask format") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "bare is a PKG cask and requires sudo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unsupported cask format") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to download") == null);
     // HEAD, the GET that was redirected, the GET on the artifact: no download.
     try testing.expectEqual(@as(usize, 3), origin.requests);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -1850,9 +1849,9 @@ test "upgrade prefetches a walk-resolved dmg instead of refusing it as unsupport
 
     try testing.expectError(error.Aborted, upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "bare" }, &captured));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download new version of bare: DownloadFailed") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "InstallFailed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported cask format") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to download new version of bare: DownloadFailed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "InstallFailed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unsupported cask format") == null);
     // The two walks, then the download's own hop to the artifact.
     try testing.expectEqual(@as(usize, 5), origin.requests);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -1889,5 +1888,5 @@ test "install --dry-run names the resolved download for a cask" {
     try malt.install.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "plain" });
 
     // The URL is what a per-OS variation changes, so the plan must show it.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would install cask plain 2.0 (dmg) from https://example.invalid/plain.dmg") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would install cask plain 2.0 (dmg) from https://example.invalid/plain.dmg") != null);
 }

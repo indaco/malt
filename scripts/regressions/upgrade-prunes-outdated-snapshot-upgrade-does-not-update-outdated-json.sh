@@ -61,7 +61,7 @@ test "a real upgrade prunes the upgraded packages out of the cached snapshot" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_dir = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
 
     var db = try sqlite.Database.open(":memory:");

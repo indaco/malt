@@ -24,13 +24,13 @@ const ScratchPrefix = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !ScratchPrefix {
         const base = try test_io.uniqueTempPath(allocator, "purge_scopes", tag);
         defer allocator.free(base);
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
+        const path = try allocator.printSentinel("{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        const cache_dir = try allocator.print("{s}/cache", .{path});
         defer allocator.free(cache_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -70,7 +70,7 @@ const OutputState = struct {
 fn writeFileAt(allocator: std.mem.Allocator, parts: []const []const u8, content: []const u8) !void {
     const path = try std.mem.join(allocator, "/", parts);
     defer allocator.free(path);
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         test_io.cwd().createDirPath(std.Options.debug_io, dir) catch {};
     }
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
@@ -112,7 +112,7 @@ test "--downloads --dry-run iterates files in cache/downloads" {
     try purge.execute(&ctx, allocator, &.{ "--downloads", "--yes" });
 
     // Dry-run: files must still exist after the iteration.
-    const alpha = try std.fmt.allocPrint(allocator, "{s}/cache/downloads/alpha.tar.gz", .{prefix.path});
+    const alpha = try allocator.print("{s}/cache/downloads/alpha.tar.gz", .{prefix.path});
     defer allocator.free(alpha);
     try test_io.accessAbsolute(std.Options.debug_io, alpha, .{});
 }
@@ -127,7 +127,7 @@ test "--stale-casks --dry-run iterates orphaned cache/Cask files and Caskroom di
     // Schema must exist — the scope opens the DB and queries `casks`.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -158,7 +158,7 @@ test "--stale-casks --yes keeps an installed cask's artefacts and removes only o
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -188,12 +188,12 @@ test "--stale-casks --yes keeps an installed cask's artefacts and removes only o
     try purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" });
 
     for (kept) |name| {
-        const path = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/{s}", .{ prefix.path, name });
+        const path = try allocator.print("{s}/cache/Cask/{s}", .{ prefix.path, name });
         defer allocator.free(path);
         try test_io.accessAbsolute(std.Options.debug_io, path, .{});
     }
     for (gone) |name| {
-        const path = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/{s}", .{ prefix.path, name });
+        const path = try allocator.print("{s}/cache/Cask/{s}", .{ prefix.path, name });
         defer allocator.free(path);
         try testing.expectError(
             error.FileNotFound,
@@ -211,7 +211,7 @@ fn expectStaleCasksKeeps(tag: []const u8, rel: []const u8) !void {
     defer prefix.deinit(allocator);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
     {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
@@ -233,7 +233,7 @@ fn expectStaleCasksKeeps(tag: []const u8, rel: []const u8) !void {
     const ctx = malt.app_ctx.debug_ctx;
     try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" }));
 
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix.path, rel });
+    const path = try allocator.print("{s}/{s}", .{ prefix.path, rel });
     defer allocator.free(path);
     try test_io.accessAbsolute(std.Options.debug_io, path, .{});
 }
@@ -274,7 +274,7 @@ const store_orphans_yes: []const []const u8 = &.{ "--store-orphans", "--yes" };
 const old_versions_yes: []const []const u8 = &.{ "--old-versions", "--yes" };
 
 fn hasSuccessFooter(out: []const u8) bool {
-    return std.mem.indexOf(u8, out, "✓ removed") != null or std.mem.indexOf(u8, out, "* removed") != null;
+    return std.mem.find(u8, out, "✓ removed") != null or std.mem.find(u8, out, "* removed") != null;
 }
 
 test "an unreadable database fails purge while a missing one is just nothing to do" {
@@ -295,7 +295,7 @@ test "a failed purge never ends on a success footer" {
     var bad: std.ArrayList(u8) = .empty;
     defer bad.deinit(allocator);
     try testing.expectError(error.Aborted, runPurge(allocator, "footer_corrupt", "not a sqlite file\n", store_orphans_yes, false, &bad));
-    try testing.expect(std.mem.indexOf(u8, bad.items, "removed 0 items") != null);
+    try testing.expect(std.mem.find(u8, bad.items, "removed 0 items") != null);
     try testing.expect(!hasSuccessFooter(bad.items));
 
     var fresh: std.ArrayList(u8) = .empty;
@@ -311,7 +311,7 @@ test "--old-versions --quiet still says why it failed over an unreadable databas
     defer out.deinit(allocator);
 
     try testing.expectError(error.Aborted, runPurge(allocator, "old_quiet_corrupt", "not a sqlite file\n", old_versions_yes, true, &out));
-    try testing.expect(std.mem.indexOf(u8, out.items, "old-versions: cannot open database") != null);
+    try testing.expect(std.mem.find(u8, out.items, "old-versions: cannot open database") != null);
 }
 
 test "--old-versions over an unreadable database never reports nothing to remove" {
@@ -321,7 +321,7 @@ test "--old-versions over an unreadable database never reports nothing to remove
     defer out.deinit(allocator);
 
     try testing.expectError(error.Aborted, runPurge(allocator, "old_empty_corrupt", "not a sqlite file\n", old_versions_yes, false, &out));
-    try testing.expect(std.mem.indexOf(u8, out.items, "nothing to remove") == null);
+    try testing.expect(std.mem.find(u8, out.items, "nothing to remove") == null);
 }
 
 test "--housekeeping over an unreadable database still runs the scopes that need no database" {
@@ -332,7 +332,7 @@ test "--housekeeping over an unreadable database still runs the scopes that need
 
     try writeFileAt(allocator, &.{ prefix.path, "db", "malt.db" }, "not a sqlite file\n");
     try makeDirAt(allocator, &.{ prefix.path, "bin" });
-    const link = try std.fmt.allocPrint(allocator, "{s}/bin/dangling", .{prefix.path});
+    const link = try allocator.print("{s}/bin/dangling", .{prefix.path});
     defer allocator.free(link);
     try test_io.symLinkAbsolute(std.Options.debug_io, "/nonexistent/malt-target", link, .{});
 
@@ -351,9 +351,9 @@ test "--housekeeping over an unreadable database still runs the scopes that need
     const ctx = malt.app_ctx.debug_ctx;
     try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &.{ "--housekeeping", "--yes" }));
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
-    try testing.expect(std.mem.indexOf(u8, out.items, "removed 1 item,") != null);
+    try testing.expect(std.mem.find(u8, out.items, "removed 1 item,") != null);
     try testing.expect(!hasSuccessFooter(out.items));
 }
 
@@ -370,7 +370,7 @@ test "--old-versions --yes sweeps cask per-version cache + caskroom + history ro
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -409,13 +409,13 @@ test "--old-versions --yes sweeps cask per-version cache + caskroom + history ro
     try purge.execute(&ctx, allocator, &.{ "--old-versions", "--yes" });
 
     // Stale artefacts gone.
-    const stale_cache = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/flux-1.0.dmg", .{prefix.path});
+    const stale_cache = try allocator.print("{s}/cache/Cask/flux-1.0.dmg", .{prefix.path});
     defer allocator.free(stale_cache);
     try testing.expectError(
         error.FileNotFound,
         test_io.accessAbsolute(std.Options.debug_io, stale_cache, .{}),
     );
-    const stale_room = try std.fmt.allocPrint(allocator, "{s}/Caskroom/flux/1.0", .{prefix.path});
+    const stale_room = try allocator.print("{s}/Caskroom/flux/1.0", .{prefix.path});
     defer allocator.free(stale_room);
     try testing.expectError(
         error.FileNotFound,
@@ -423,13 +423,13 @@ test "--old-versions --yes sweeps cask per-version cache + caskroom + history ro
     );
 
     // Current artefacts survive.
-    const current_cache = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/flux-2.0.dmg", .{prefix.path});
+    const current_cache = try allocator.print("{s}/cache/Cask/flux-2.0.dmg", .{prefix.path});
     defer allocator.free(current_cache);
     try test_io.accessAbsolute(std.Options.debug_io, current_cache, .{});
 
     // History rows: only the current row remains.
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var count_stmt = try db.prepare("SELECT COUNT(*) FROM cask_versions WHERE token = 'flux';");
@@ -456,7 +456,7 @@ test "--old-versions --dry-run iterates Cellar dirs that hold multiple versions"
     try purge.execute(&ctx, allocator, &.{ "--old-versions", "--yes" });
 
     // Dry-run leaves the tree intact.
-    const alpha_old = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/marker", .{prefix.path});
+    const alpha_old = try allocator.print("{s}/Cellar/alpha/1.0/marker", .{prefix.path});
     defer allocator.free(alpha_old);
     try test_io.accessAbsolute(std.Options.debug_io, alpha_old, .{});
 }
@@ -470,7 +470,7 @@ test "--store-orphans --dry-run iterates store entries no keg holds" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -507,7 +507,7 @@ test "--store-orphans skips a store_refs row whose key is not a store key" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -560,7 +560,7 @@ test "--unused-deps --dry-run iterates kegs whose install_reason is dep" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -602,7 +602,7 @@ test "--cache=0 --dry-run sweeps every cache file regardless of mtime" {
     try purge.execute(&ctx, allocator, &.{"--cache=0"});
 
     // Dry-run: file still on disk.
-    const stale = try std.fmt.allocPrint(allocator, "{s}/cache/stale.tar.gz", .{prefix.path});
+    const stale = try allocator.print("{s}/cache/stale.tar.gz", .{prefix.path});
     defer allocator.free(stale);
     try test_io.accessAbsolute(std.Options.debug_io, stale, .{});
 }
@@ -629,7 +629,7 @@ test "--downloads --yes (non-dry-run) actually deletes the cache files" {
     const ctx = malt.app_ctx.debug_ctx;
     try purge.execute(&ctx, allocator, &.{ "--downloads", "--yes" });
 
-    const alpha = try std.fmt.allocPrint(allocator, "{s}/cache/downloads/alpha.tar.gz", .{prefix.path});
+    const alpha = try allocator.print("{s}/cache/downloads/alpha.tar.gz", .{prefix.path});
     defer allocator.free(alpha);
     try testing.expectError(
         error.FileNotFound,
@@ -700,12 +700,12 @@ test "--wipe --yes against a populated scratch prefix actually removes targets" 
     try purge.execute(&ctx, allocator, &.{ "--wipe", "--yes", "--keep-cache" });
 
     // Cellar must be gone but cache must survive --keep-cache.
-    const cellar = try std.fmt.allocPrint(allocator, "{s}/Cellar", .{prefix.path});
+    const cellar = try allocator.print("{s}/Cellar", .{prefix.path});
     defer allocator.free(cellar);
     try testing.expect(test_io.accessAbsolute(std.Options.debug_io, cellar, .{}) ==
         error.FileNotFound or true); // tolerate variant error names
 
-    const cache_marker = try std.fmt.allocPrint(allocator, "{s}/cache/marker", .{prefix.path});
+    const cache_marker = try allocator.print("{s}/cache/marker", .{prefix.path});
     defer allocator.free(cache_marker);
     try test_io.accessAbsolute(std.Options.debug_io, cache_marker, .{});
 }
@@ -723,7 +723,7 @@ test "--wipe --yes --backup writes the manifest before the delete pass" {
     // Backup lives outside the wipe target so the assertion can read it.
     const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "backup");
     defer allocator.free(backup_base);
-    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    const backup_path = try allocator.print("{s}.txt", .{backup_base});
     defer allocator.free(backup_path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
 
@@ -754,7 +754,7 @@ test "--wipe --yes --backup creates a nested absolute manifest path" {
     const root = try test_io.uniqueTempPath(allocator, "wipe", "nested");
     defer allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
-    const backup_path = try std.fmt.allocPrint(allocator, "{s}/mani/a/backup.txt", .{root});
+    const backup_path = try allocator.print("{s}/mani/a/backup.txt", .{root});
     defer allocator.free(backup_path);
 
     const prior = OutputState.save();
@@ -779,7 +779,7 @@ test "multi-scope dry-run renders the summary table when more than one scope ran
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -804,7 +804,7 @@ test "--wipe --backup refuses an unreadable database and leaves the prefix intac
 
     const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "corrupt");
     defer allocator.free(backup_base);
-    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    const backup_path = try allocator.print("{s}.txt", .{backup_base});
     defer allocator.free(backup_path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
 
@@ -828,7 +828,7 @@ test "--wipe --backup refuses an unreadable database and leaves the prefix intac
         test_io.accessAbsolute(std.Options.debug_io, backup_path, .{}),
     );
 
-    const marker = try std.fmt.allocPrint(allocator, "{s}/Cellar/marker", .{prefix.path});
+    const marker = try allocator.print("{s}/Cellar/marker", .{prefix.path});
     defer allocator.free(marker);
     try test_io.accessAbsolute(std.Options.debug_io, marker, .{});
 }
@@ -843,7 +843,7 @@ test "--cache --backup refuses an unreadable database before any scope runs" {
 
     const backup_base = try test_io.uniqueTempPath(allocator, "cache", "corrupt");
     defer allocator.free(backup_base);
-    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    const backup_path = try allocator.print("{s}.txt", .{backup_base});
     defer allocator.free(backup_path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
 
@@ -875,7 +875,7 @@ test "--wipe --backup refuses a database whose kegs table is unreadable" {
     try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var st = try db.prepare("CREATE TABLE kegs(x);");
@@ -885,7 +885,7 @@ test "--wipe --backup refuses a database whose kegs table is unreadable" {
 
     const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "badtable");
     defer allocator.free(backup_base);
-    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    const backup_path = try allocator.print("{s}.txt", .{backup_base});
     defer allocator.free(backup_path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
 
@@ -902,7 +902,7 @@ test "--wipe --backup refuses a database whose kegs table is unreadable" {
         purge.execute(&ctx, allocator, &.{ "--wipe", "--yes", "--backup", backup_path }),
     );
 
-    const marker = try std.fmt.allocPrint(allocator, "{s}/Cellar/marker", .{prefix.path});
+    const marker = try allocator.print("{s}/Cellar/marker", .{prefix.path});
     defer allocator.free(marker);
     try test_io.accessAbsolute(std.Options.debug_io, marker, .{});
 }
@@ -915,7 +915,7 @@ test "--wipe --backup writes an empty manifest when the prefix never had a datab
     var prefix = try ScratchPrefix.init(allocator, "wipe_backup_nodb");
     defer prefix.deinit(allocator);
 
-    const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix.path});
+    const db_dir = try allocator.print("{s}/db", .{prefix.path});
     defer allocator.free(db_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
 
@@ -923,7 +923,7 @@ test "--wipe --backup writes an empty manifest when the prefix never had a datab
 
     const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "nodb");
     defer allocator.free(backup_base);
-    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    const backup_path = try allocator.print("{s}.txt", .{backup_base});
     defer allocator.free(backup_path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
 
@@ -949,14 +949,14 @@ test "--stale-casks sweeps the cask cache under MALT_CACHE and adopts a legacy o
     var prefix = try ScratchPrefix.init(allocator, "stale_casks_malt_cache");
     defer prefix.deinit(allocator);
 
-    const alt = try std.fmt.allocPrintSentinel(allocator, "{s}/alt", .{prefix.path}, 0);
+    const alt = try allocator.printSentinel("{s}/alt", .{prefix.path}, 0);
     defer allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -975,13 +975,13 @@ test "--stale-casks sweeps the cask cache under MALT_CACHE and adopts a legacy o
     const ctx = malt.app_ctx.debug_ctx;
     try purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" });
 
-    const ghost = try std.fmt.allocPrint(allocator, "{s}/Cask/ghost-1.0.dmg", .{alt});
+    const ghost = try allocator.print("{s}/Cask/ghost-1.0.dmg", .{alt});
     defer allocator.free(ghost);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, ghost, .{}));
-    const legacy = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/legacy-1.0.dmg", .{prefix.path});
+    const legacy = try allocator.print("{s}/cache/Cask/legacy-1.0.dmg", .{prefix.path});
     defer allocator.free(legacy);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, legacy, .{}));
-    const adopted = try std.fmt.allocPrint(allocator, "{s}/Cask/legacy-1.0.dmg", .{alt});
+    const adopted = try allocator.print("{s}/Cask/legacy-1.0.dmg", .{alt});
     defer allocator.free(adopted);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, adopted, .{}));
 }
@@ -994,14 +994,14 @@ test "--old-versions sweeps the stale per-version artefact under MALT_CACHE" {
     var prefix = try ScratchPrefix.init(allocator, "old_versions_malt_cache");
     defer prefix.deinit(allocator);
 
-    const alt = try std.fmt.allocPrintSentinel(allocator, "{s}/alt", .{prefix.path}, 0);
+    const alt = try allocator.printSentinel("{s}/alt", .{prefix.path}, 0);
     defer allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -1029,10 +1029,10 @@ test "--old-versions sweeps the stale per-version artefact under MALT_CACHE" {
     const ctx = malt.app_ctx.debug_ctx;
     try purge.execute(&ctx, allocator, &.{ "--old-versions", "--yes" });
 
-    const stale = try std.fmt.allocPrint(allocator, "{s}/Cask/flux-1.0.dmg", .{alt});
+    const stale = try allocator.print("{s}/Cask/flux-1.0.dmg", .{alt});
     defer allocator.free(stale);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, stale, .{}));
-    const current = try std.fmt.allocPrint(allocator, "{s}/Cask/flux-2.0.dmg", .{alt});
+    const current = try allocator.print("{s}/Cask/flux-2.0.dmg", .{alt});
     defer allocator.free(current);
     try test_io.accessAbsolute(std.Options.debug_io, current, .{});
 }

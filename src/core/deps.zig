@@ -246,7 +246,7 @@ pub fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
     const cellar_path = std.mem.sliceTo(cp_raw, 0);
     // A relative path is a damaged record that names no keg; the absolute
     // probe would abort on it.
-    if (!std.fs.path.isAbsolute(cellar_path)) return false;
+    if (!std.Io.Dir.path.isAbsolute(cellar_path)) return false;
     std.Io.Dir.accessAbsolute(io, cellar_path, .{}) catch return false;
 
     // …and the opt/<name> symlink resolves. Bottles bake the opt path
@@ -254,8 +254,8 @@ pub fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
     // even when the Cellar entry is intact — and we'd skip queueing a
     // re-link if we treated this state as "installed".
     const prefix = atomic.maltPrefixOrAbort();
-    var opt_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return false;
+    var opt_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const opt_path = std.mem.print(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return false;
     std.Io.Dir.accessAbsolute(io, opt_path, .{}) catch return false;
 
     return true;
@@ -272,16 +272,16 @@ pub fn ensureOptLink(io: std.Io, db: *sqlite.Database, prefix: []const u8, name:
     const cellar_path = std.mem.sliceTo(cp_raw, 0);
 
     var opt_buf: [512]u8 = undefined;
-    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
+    const opt_path = std.mem.print(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
 
     // Fast path: symlink already resolves to the DB's cellar_path.
-    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.Io.Dir.readLinkAbsolute(io, opt_path, &target_buf)) |target_len| {
         if (std.mem.eql(u8, target_buf[0..target_len], cellar_path)) return;
     } else |_| {}
 
     var opt_parent_buf: [512]u8 = undefined;
-    const opt_parent = std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{prefix}) catch return;
+    const opt_parent = std.mem.print(&opt_parent_buf, "{s}/opt", .{prefix}) catch return;
     std.Io.Dir.createDirAbsolute(io, opt_parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return,
@@ -385,8 +385,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -398,8 +397,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -472,11 +470,11 @@ test "FormulaCache.entryCount tracks the live entry count" {
 // --- isInstalled filesystem-presence guard --------------------------------
 
 fn seedKegOnDisk(io: std.Io, prefix: []const u8, name: []const u8, db: *sqlite.Database) ![]const u8 {
-    const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0", .{ prefix, name });
+    const cellar_path = try testing.allocator.print("{s}/Cellar/{s}/1.0", .{ prefix, name });
     try std.Io.Dir.cwd().createDirPath(io, cellar_path);
 
     var sql_buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &sql_buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '1.0', 'sha', '{s}');",
         .{ name, name, cellar_path },
@@ -532,7 +530,7 @@ test "isInstalled returns true when both cellar and opt link resolve" {
 
     // Plant the opt/<name> symlink so the on-disk shape matches a
     // healthy install.
-    const opt_parent = try std.fmt.allocPrint(testing.allocator, "{s}/opt", .{prefix});
+    const opt_parent = try testing.allocator.print("{s}/opt", .{prefix});
     defer testing.allocator.free(opt_parent);
     try std.Io.Dir.cwd().createDirPath(io, opt_parent);
     var parent_dir = try std.Io.Dir.openDirAbsolute(io, opt_parent, .{});
@@ -827,7 +825,7 @@ fn resolveWideFanOut(
     try testing.expectEqualStrings("x", deps[0].name);
     for (deps[1..], 0..) |d, i| {
         var buf: [4]u8 = undefined;
-        try testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "y{d}", .{i}), d.name);
+        try testing.expectEqualStrings(try std.mem.print(&buf, "y{d}", .{i}), d.name);
     }
 }
 

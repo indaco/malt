@@ -115,7 +115,7 @@ fn renderContent(buf: []u8, state: State, content: Rect) []const u8 {
 /// length == column width. The single source of the message; callers add their
 /// own icon/colour and wrapping.
 pub fn tooSmallMessage(buf: []u8) []const u8 {
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buf,
         "terminal too small (need >= {d}x{d})",
         .{ min_cols, min_rows },

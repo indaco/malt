@@ -53,8 +53,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -111,7 +110,7 @@ test "placeExtracted routes a font cask: places files and returns the Caskroom m
     try expectFileBody(io, hack, "HACK");
 
     // Manifest lists every placed absolute path, newline-joined.
-    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ fira, hack });
+    const manifest_body = try testing.allocator.print("{s}\n{s}", .{ fira, hack });
     defer testing.allocator.free(manifest_body);
     try expectFileBody(io, app_path, manifest_body);
 }

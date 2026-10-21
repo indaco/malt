@@ -13,7 +13,7 @@ fn testArena() std.heap.ArenaAllocator {
 }
 
 fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(alloc,
+    return alloc.print(
         \\{{
         \\  "name": "testpkg",
         \\  "full_name": "testpkg",
@@ -61,7 +61,7 @@ const Scratch = struct {
 };
 
 fn setupCellar(prefix_dir: []const u8) !void {
-    const cellar_path = try std.fs.path.join(testing.allocator, &.{ prefix_dir, "Cellar", "testpkg", "1.0" });
+    const cellar_path = try std.Io.Dir.path.join(testing.allocator, &.{ prefix_dir, "Cellar", "testpkg", "1.0" });
     defer testing.allocator.free(cellar_path);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_path);
 }

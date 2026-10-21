@@ -23,7 +23,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     inline for (.{ "store", "Cellar" }) |sub| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ path, sub });
+        const dir = try testing.allocator.print("{s}/{s}", .{ path, sub });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
@@ -36,14 +36,13 @@ fn seedWarmStore(
     name: []const u8,
     version: []const u8,
 ) !void {
-    const inner = try std.fmt.allocPrint(
-        testing.allocator,
+    const inner = try testing.allocator.print(
         "{s}/store/{s}/{s}/{s}",
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, inner);
-    const readme = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{inner});
+    const readme = try testing.allocator.print("{s}/README", .{inner});
     defer testing.allocator.free(readme);
     const f = try test_io.cwd().createFile(std.Options.debug_io, readme, .{});
     defer f.close(std.Options.debug_io);
@@ -56,7 +55,7 @@ fn anyPlatformFormulaJson(
     version: []const u8,
     sha: []const u8,
 ) ![]const u8 {
-    return std.fmt.allocPrint(arena,
+    return arena.print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",
@@ -170,16 +169,16 @@ test "installPoolWorker drains every job against a warm store and stamps each re
 
     // Keg paths match the canonical Cellar/<name>/<version> shape so the
     // serial link phase downstream has a valid path to hand to the linker.
-    const path_a = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alpha/1.0", .{prefix});
+    const path_a = try testing.allocator.print("{s}/Cellar/alpha/1.0", .{prefix});
     defer testing.allocator.free(path_a);
-    const path_b = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/beta/2.0", .{prefix});
+    const path_b = try testing.allocator.print("{s}/Cellar/beta/2.0", .{prefix});
     defer testing.allocator.free(path_b);
     try testing.expectEqualStrings(path_a, results[0].kegPath());
     try testing.expectEqualStrings(path_b, results[1].kegPath());
 
     // Cellar/<name>/<version>/README — cellar materialise actually wrote
     // the keg, not just stamped the result struct.
-    const readme_a = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{path_a});
+    const readme_a = try testing.allocator.print("{s}/README", .{path_a});
     defer testing.allocator.free(readme_a);
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, readme_a, .{});
 }
@@ -286,7 +285,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     // pool worker must forward it into `result.err` instead of falling
     // back to the historical CloneFailed catch-all.
     const sha = std.mem.asBytes(&@as([16][4]u8, @splat("f00d".*)));
-    const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    const store_inner = try testing.allocator.print("{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
 
@@ -295,8 +294,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const formula_json = try std.fmt.allocPrint(
-        arena.allocator(),
+    const formula_json = try arena.allocator().print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",

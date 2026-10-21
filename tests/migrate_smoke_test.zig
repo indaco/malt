@@ -44,11 +44,11 @@ fn setenvZ(key: [*:0]const u8, value: []const u8) !void {
 // Seed `prefix/Cellar/<name>/1.0` for each keg name. Empty directories are
 // enough — migrate's cellar iterator only looks at `entry.kind == .directory`.
 fn seedFakeBrew(prefix: []const u8, kegs: []const []const u8) !void {
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{prefix});
+    const cellar = try testing.allocator.print("{s}/Cellar", .{prefix});
     defer testing.allocator.free(cellar);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
     for (kegs) |name| {
-        const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/1.0", .{ cellar, name });
+        const keg_dir = try testing.allocator.print("{s}/{s}/1.0", .{ cellar, name });
         defer testing.allocator.free(keg_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
     }
@@ -134,19 +134,19 @@ test "an unknown flag is refused before the Homebrew scan starts" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron(), .offline = true };
     try testing.expectError(error.Aborted, migrate.execute(&ctx, arena.allocator(), &.{"--bogus"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Found Homebrew") == null);
 
     // migrate takes no names, so a stray word is refused too, `--` or not.
     for ([_][]const []const u8{ &.{"alpha"}, &.{ "--", "--bogus" } }) |argv| {
         try testing.expectError(error.Aborted, migrate.execute(&ctx, arena.allocator(), argv));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown argument for migrate: 'alpha'") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown argument for migrate: 'alpha'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Found Homebrew") == null);
 
     // A bare `--` only ends options; the dry-run scan proceeds.
     try migrate.execute(&ctx, arena.allocator(), &.{"--"});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Found Homebrew") != null);
 }
 
 // ── detectBrewPrefix env override ───────────────────────────────────────
@@ -251,7 +251,7 @@ test "long-but-valid MALT_PREFIX reaches the real db failure instead of exiting 
     const prefix = try buildLongPrefix(testing.allocator, base, malt.prefix_path.max_prefix_len);
     defer testing.allocator.free(prefix);
     try malt.prefix_path.validatePrefix(prefix); // precondition: this prefix is valid
-    const db_as_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    const db_as_dir = try testing.allocator.print("{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_as_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_as_dir);
 
@@ -302,7 +302,7 @@ test "empty Cellar exits cleanly with no malt state created" {
 
     // Empty-Cellar branch returns before ensureDirs runs, so the malt
     // prefix must not have been seeded with store/db/Cellar subtrees.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt});
     defer testing.allocator.free(db_dir);
     try testing.expect(!pathExists(db_dir));
 }
@@ -337,7 +337,7 @@ test "dry-run with kegs lists them and never initializes malt state" {
 
     // Dry-run returns before ensureDirs — no DB, no lock, no Cellar
     // in the malt prefix.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt});
     defer testing.allocator.free(db_dir);
     try testing.expect(!pathExists(db_dir));
 }
@@ -369,7 +369,7 @@ test "dry-run is idempotent: back-to-back runs both succeed with no state change
     try migrate.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet" });
     try migrate.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet" });
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt});
     defer testing.allocator.free(db_dir);
     try testing.expect(!pathExists(db_dir));
 }
@@ -468,10 +468,10 @@ test "already-installed kegs are skipped without touching the network" {
 
     // Pre-seed the malt DB with a keg named "seeded" so migrate's
     // `isInstalled` returns true and the API call is bypassed.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);
@@ -484,7 +484,7 @@ test "already-installed kegs are skipped without touching the network" {
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    const seeded_cellar = try testing.allocator.print("{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
@@ -832,10 +832,10 @@ test "--json on an already-installed keg records it under skipped_installed" {
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);
@@ -848,7 +848,7 @@ test "--json on an already-installed keg records it under skipped_installed" {
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    const seeded_cellar = try testing.allocator.print("{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
@@ -882,7 +882,7 @@ test "--json on an already-installed keg records it under skipped_installed" {
 // ── Human summary: stderr capture pins specific lines ───────────────────
 
 fn containsLine(haystack: []const u8, needle: []const u8) bool {
-    return std.mem.indexOf(u8, haystack, needle) != null;
+    return std.mem.find(u8, haystack, needle) != null;
 }
 
 test "dry-run stderr pins the 'Found N packages' and 'Would migrate N' lines" {
@@ -990,11 +990,11 @@ test "cellar scan ignores stray files and symlinks alongside keg directories" {
     try seedFakeBrew(brew, &.{"tree"});
 
     // Plant a stray regular file + a dangling symlink in the Cellar root.
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{brew});
+    const cellar = try testing.allocator.print("{s}/Cellar", .{brew});
     defer testing.allocator.free(cellar);
-    const stray_file = try std.fmt.allocPrint(testing.allocator, "{s}/.DS_Store", .{cellar});
+    const stray_file = try testing.allocator.print("{s}/.DS_Store", .{cellar});
     defer testing.allocator.free(stray_file);
-    const stray_link = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/dangling", .{cellar}, 0);
+    const stray_link = try testing.allocator.printSentinel("{s}/dangling", .{cellar}, 0);
     defer testing.allocator.free(stray_link);
 
     const f = try test_io.cwd().createFile(std.Options.debug_io, stray_file, .{});
@@ -1055,8 +1055,7 @@ test "cellar scan picks up a symlink whose target is a real keg directory" {
 
     // One real keg in the Cellar plus a real keg dir outside it.
     try seedFakeBrew(brew, &.{"tree"});
-    const linked_target = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const linked_target = try testing.allocator.printSentinel(
         "{s}/jq/1.0",
         .{target_root},
         0,
@@ -1065,11 +1064,11 @@ test "cellar scan picks up a symlink whose target is a real keg directory" {
     try test_io.cwd().createDirPath(std.Options.debug_io, linked_target);
 
     // Plant `Cellar/jq -> <target_root>/jq` (a symlink-to-directory).
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{brew});
+    const cellar = try testing.allocator.print("{s}/Cellar", .{brew});
     defer testing.allocator.free(cellar);
-    const link_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/jq", .{cellar}, 0);
+    const link_path = try testing.allocator.printSentinel("{s}/jq", .{cellar}, 0);
     defer testing.allocator.free(link_path);
-    const link_target = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/jq", .{target_root}, 0);
+    const link_target = try testing.allocator.printSentinel("{s}/jq", .{target_root}, 0);
     defer testing.allocator.free(link_target);
     try testing.expectEqual(@as(c_int, 0), std.c.symlink(link_target.ptr, link_path.ptr));
 
@@ -1135,10 +1134,10 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Seed malt DB: one keg already "installed" to exercise the skip path.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     try malt.schema.initSchema(&db);
@@ -1150,7 +1149,7 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    const seeded_cellar = try testing.allocator.print("{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
@@ -1158,10 +1157,10 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
     db.close();
 
     // Pre-seed a 404 marker so fetchFormula fails offline (audit-documented pattern).
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_unknownpkg.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_unknownpkg.404", .{cache_api});
     defer testing.allocator.free(marker);
     const mf = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     mf.close(std.Options.debug_io);
@@ -1223,10 +1222,10 @@ test "lock contention returns error.Aborted when db/malt.lock is already held" {
     defer _ = c.unsetenv("MALT_LOCK_TIMEOUT_MS");
 
     // Pre-acquire the lock externally so migrate's acquire hits timeout.
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.lock", .{db_dir});
+    const lock_path = try testing.allocator.print("{s}/malt.lock", .{db_dir});
     defer testing.allocator.free(lock_path);
     var holder = try malt.lock.LockFile.acquire(std.Options.debug_io, lock_path, 1000);
     defer holder.release(std.Options.debug_io);
@@ -1266,10 +1265,10 @@ test "already-installed stderr pins the 'Migration completed.' + 'Skipped (insta
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);
@@ -1282,7 +1281,7 @@ test "already-installed stderr pins the 'Migration completed.' + 'Skipped (insta
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    const seeded_cellar = try testing.allocator.print("{s}/Cellar/seeded/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
@@ -1339,10 +1338,10 @@ test "skipped_no_bottle: cached formula with no platform bottle is categorized c
     // Seed a formula-cache hit with an intentionally minimal payload — no
     // bottle_files, no dependencies, no oldnames. `resolveBottle` returns
     // NoBottleAvailable immediately and the branch's cleanup path runs.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_noplatform.json", .{cache_api});
+    const cache_path = try testing.allocator.print("{s}/formula_noplatform.json", .{cache_api});
     defer testing.allocator.free(cache_path);
     const cache_file = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
     defer cache_file.close(std.Options.debug_io);
@@ -1398,17 +1397,17 @@ test "migrate honours MALT_CACHE for the API cache" {
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{mt_z}, 0);
+    const alt = try testing.allocator.printSentinel("{s}/altcache", .{mt_z}, 0);
     defer testing.allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
 
     // Offline + the bottle-less formula cached under $MALT_CACHE only: a hit
     // lands in skipped_no_bottle, a miss at {prefix}/cache/api in failed.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    const cache_api = try testing.allocator.print("{s}/api", .{alt});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_noplatform.json", .{cache_api});
+    const cache_path = try testing.allocator.print("{s}/formula_noplatform.json", .{cache_api});
     defer testing.allocator.free(cache_path);
     const cache_file = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
     defer cache_file.close(std.Options.debug_io);
@@ -1740,10 +1739,10 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
     // Pre-seed a 404 marker for the *other* keg so it fails offline. If the
     // manifest filter ever regresses, "alreadydone" would also try the API
     // and fail differently (FormulaNotFound → failed_api), pinning the bug.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_unknownpkg.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_unknownpkg.404", .{cache_api});
     defer testing.allocator.free(marker);
     const mf = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     mf.close(std.Options.debug_io);
@@ -1752,7 +1751,7 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
     // breaks, the test still terminates offline (failed_api) instead of
     // hitting the network. The assertion still pins resume because we
     // expect skipped_installed, not failed_api.
-    const marker2 = try std.fmt.allocPrint(testing.allocator, "{s}/formula_alreadydone.404", .{cache_api});
+    const marker2 = try testing.allocator.print("{s}/formula_alreadydone.404", .{cache_api});
     defer testing.allocator.free(marker2);
     const mf2 = try test_io.cwd().createFile(std.Options.debug_io, marker2, .{});
     mf2.close(std.Options.debug_io);
@@ -1760,24 +1759,23 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
     // Pre-seed the resume manifest with "alreadydone" *and* a matching
     // DB row — the resume short-circuit requires both to agree so a
     // stale manifest after `mt uninstall` doesn't silently skip a keg.
-    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    const cache_dir = try testing.allocator.print("{s}/cache", .{mt_z});
     defer testing.allocator.free(cache_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
     var manifest = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
     defer manifest.deinit();
     try manifest.add("alreadydone");
-    const manifest_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const manifest_path = try testing.allocator.print(
         "{s}/migrate.progress.json",
         .{cache_dir},
     );
     defer testing.allocator.free(manifest_path);
     try manifest.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     var db_seed = try malt.sqlite.Database.open(db_path);
     try malt.schema.initSchema(&db_seed);
@@ -1789,7 +1787,7 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
     try seed_stmt.bindText(2, "alreadydone");
     try seed_stmt.bindText(3, "1.0");
     try seed_stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alreadydone/1.0", .{mt_z});
+    const seeded_cellar = try testing.allocator.print("{s}/Cellar/alreadydone/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try seed_stmt.bindText(5, seeded_cellar);
     _ = try seed_stmt.step();
@@ -1901,13 +1899,13 @@ test "--parallel sets the dispatch flag before falling through to skip-only path
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Seed manifest so the only keg short-circuits, keeping the test offline.
-    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    const cache_dir = try testing.allocator.print("{s}/cache", .{mt_z});
     defer testing.allocator.free(cache_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
     var manifest = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
     defer manifest.deinit();
     try manifest.add("k");
-    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
+    const manifest_path = try testing.allocator.print("{s}/migrate.progress.json", .{cache_dir});
     defer testing.allocator.free(manifest_path);
     try manifest.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
@@ -1977,11 +1975,11 @@ test "--parallel honours the resume manifest the same way serial does" {
 
     // Seed 404 markers for every keg so any reach-the-API behaviour
     // terminates offline as failed_api rather than hanging the test.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     inline for (.{ "k1", "k2", "k3" }) |name| {
-        const m = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, name });
+        const m = try testing.allocator.print("{s}/formula_{s}.404", .{ cache_api, name });
         defer testing.allocator.free(m);
         const f = try test_io.cwd().createFile(std.Options.debug_io, m, .{});
         f.close(std.Options.debug_io);
@@ -1990,7 +1988,7 @@ test "--parallel honours the resume manifest the same way serial does" {
     // Pre-seed all three kegs as completed in the resume manifest *and*
     // in the DB — the skip path requires both to agree (see
     // `cli/migrate.zig` stale-manifest note).
-    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    const cache_dir = try testing.allocator.print("{s}/cache", .{mt_z});
     defer testing.allocator.free(cache_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
     var manifest = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
@@ -1998,18 +1996,17 @@ test "--parallel honours the resume manifest the same way serial does" {
     try manifest.add("k1");
     try manifest.add("k2");
     try manifest.add("k3");
-    const manifest_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const manifest_path = try testing.allocator.print(
         "{s}/migrate.progress.json",
         .{cache_dir},
     );
     defer testing.allocator.free(manifest_path);
     try manifest.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     var db_seed = try malt.sqlite.Database.open(db_path);
     try malt.schema.initSchema(&db_seed);
@@ -2022,7 +2019,7 @@ test "--parallel honours the resume manifest the same way serial does" {
         try s.bindText(2, name);
         try s.bindText(3, "1.0");
         try s.bindText(4, &@as([64]u8, @splat('0')));
-        const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/" ++ name ++ "/1.0", .{mt_z});
+        const cellar_path = try testing.allocator.print("{s}/Cellar/" ++ name ++ "/1.0", .{mt_z});
         defer testing.allocator.free(cellar_path);
         try s.bindText(5, cellar_path);
         _ = try s.step();
@@ -2079,10 +2076,10 @@ fn migrateOffline(args: []const []const u8, seed_stale: bool, errbuf: *std.Array
     defer _ = c.unsetenv("MALT_PREFIX");
 
     if (seed_stale) {
-        const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+        const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
         defer testing.allocator.free(cache_api);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-        const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_noplatform.json", .{cache_api});
+        const cache_path = try testing.allocator.print("{s}/formula_noplatform.json", .{cache_api});
         defer testing.allocator.free(cache_path);
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
         defer f.close(std.Options.debug_io);
@@ -2146,8 +2143,8 @@ test "--parallel offline reports an uncached keg as offline like serial does" {
         const parsed = try migrateOffline(args, false, &errbuf);
         defer parsed.deinit();
         try testing.expectEqual(@as(usize, 1), parsed.value.object.get("failed").?.array.items.len);
-        try testing.expect(std.mem.indexOf(u8, errbuf.items, "(OfflineRequired)") != null);
-        try testing.expect(std.mem.indexOf(u8, errbuf.items, "ApiUnreachable") == null);
+        try testing.expect(std.mem.find(u8, errbuf.items, "(OfflineRequired)") != null);
+        try testing.expect(std.mem.find(u8, errbuf.items, "ApiUnreachable") == null);
         if (args.len > 0) try testing.expect(migrate.last_run_parallel);
     }
 }
@@ -2180,10 +2177,10 @@ test "failed migrate does not write the keg into the resume manifest" {
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_failkeg.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_failkeg.404", .{cache_api});
     defer testing.allocator.free(marker);
     const mf = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     mf.close(std.Options.debug_io);
@@ -2197,8 +2194,7 @@ test "failed migrate does not write the keg into the resume manifest" {
 
     // Manifest must either not exist or contain zero entries — the 404
     // path returned `.failed_api`, never `.migrated`.
-    const manifest_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const manifest_path = try testing.allocator.print(
         "{s}/cache/migrate.progress.json",
         .{mt_z},
     );
@@ -2236,18 +2232,18 @@ test "manifest preserves pre-existing entries across a run with new failures" {
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_newfail.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_newfail.404", .{cache_api});
     defer testing.allocator.free(marker);
     const mf = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     mf.close(std.Options.debug_io);
 
-    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    const cache_dir = try testing.allocator.print("{s}/cache", .{mt_z});
     defer testing.allocator.free(cache_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
-    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
+    const manifest_path = try testing.allocator.print("{s}/migrate.progress.json", .{cache_dir});
     defer testing.allocator.free(manifest_path);
 
     var seed = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
@@ -2294,10 +2290,10 @@ test "serial: a migrated keg is persisted even when a later keg fails" {
     // "widget": core keg with a receipt → migrates via the local-Cellar
     // fallback once its API lookup 404s. "ghostfail": no receipt, so the
     // same 404 leaves nothing to fall back to → `.failed_api`.
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/widget/2.0", .{brew});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/widget/2.0", .{brew});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     defer testing.allocator.free(receipt_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
@@ -2308,11 +2304,11 @@ test "serial: a migrated keg is persisted even when a later keg fails" {
     }
     try seedFakeBrew(brew, &.{"ghostfail"});
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     for ([_][]const u8{ "widget", "ghostfail" }) |name| {
-        const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, name });
+        const marker = try testing.allocator.print("{s}/formula_{s}.404", .{ cache_api, name });
         defer testing.allocator.free(marker);
         (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
     }
@@ -2324,7 +2320,7 @@ test "serial: a migrated keg is persisted even when a later keg fails" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
 
-    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/cache/migrate.progress.json", .{mt_z});
+    const manifest_path = try testing.allocator.print("{s}/cache/migrate.progress.json", .{mt_z});
     defer testing.allocator.free(manifest_path);
     var loaded = try malt.cli_migrate_manifest.loadFromPath(&malt.app_ctx.debug_ctx, testing.allocator, manifest_path);
     defer loaded.deinit();
@@ -2363,22 +2359,22 @@ test "stale manifest after uninstall falls through to a real migrate" {
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_ghost.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_ghost.404", .{cache_api});
     defer testing.allocator.free(marker);
     const mf = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
     mf.close(std.Options.debug_io);
 
     // Manifest claims "ghost" was migrated; DB is empty (simulating uninstall).
-    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    const cache_dir = try testing.allocator.print("{s}/cache", .{mt_z});
     defer testing.allocator.free(cache_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
     var stale = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
     defer stale.deinit();
     try stale.add("ghost");
-    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
+    const manifest_path = try testing.allocator.print("{s}/migrate.progress.json", .{cache_dir});
     defer testing.allocator.free(manifest_path);
     try stale.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
@@ -2438,10 +2434,10 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
     // Simulate the post-crash state: DB has the keg (previous run
     // committed it) but the manifest file does not exist (previous
     // run died before writeAtomic).
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     try malt.schema.initSchema(&db);
@@ -2453,7 +2449,7 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
     try stmt.bindText(2, "recovered");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/recovered/1.0", .{mt_z});
+    const seeded_cellar = try testing.allocator.print("{s}/Cellar/recovered/1.0", .{mt_z});
     defer testing.allocator.free(seeded_cellar);
     try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
@@ -2470,8 +2466,7 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
     // Manifest now exists on disk and contains the keg the DB had —
     // future runs hit the cheap manifest short-circuit instead of the
     // DB lookup. Pin both: file load works, and the entry is there.
-    const manifest_path = try std.fmt.allocPrint(
-        testing.allocator,
+    const manifest_path = try testing.allocator.print(
         "{s}/cache/migrate.progress.json",
         .{mt_z},
     );
@@ -2684,13 +2679,12 @@ test "tap fallback runs the DSL post_install body and reports completion" {
     // accepts the local copy and source.path so we exercise the receipt
     // branch in findTapFormulaRb. Body is a no-op so the DSL run lands
     // cleanly on the "completed" branch.
-    const tap_rb = try std.fmt.allocPrint(
-        testing.allocator,
+    const tap_rb = try testing.allocator.print(
         "{s}/Library/Taps/owner/homebrew-tap/Formula/g/glow.rb",
         .{brew},
     );
     defer testing.allocator.free(tap_rb);
-    const tap_dir = std.fs.path.dirname(tap_rb).?;
+    const tap_dir = std.Io.Dir.path.dirname(tap_rb).?;
     try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
@@ -2706,16 +2700,15 @@ test "tap fallback runs the DSL post_install body and reports completion" {
         );
     }
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/glow/0.2.2", .{brew});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/glow/0.2.2", .{brew});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     defer testing.allocator.free(receipt_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
-        const body = try std.fmt.allocPrint(
-            testing.allocator,
+        const body = try testing.allocator.print(
             "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"0.2.2\"}}}}}}",
             .{tap_rb},
         );
@@ -2725,10 +2718,10 @@ test "tap fallback runs the DSL post_install body and reports completion" {
 
     // 404 marker forces fetchFormula → error.NotFound, routing the keg
     // into the local-Cellar fallback offline.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_glow.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_glow.404", .{cache_api});
     defer testing.allocator.free(marker);
     (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
 
@@ -2754,12 +2747,11 @@ test "tap fallback runs the DSL post_install body and reports completion" {
 // verbatim (empty = key absent, as very old brew receipts have it).
 fn seedBrewReceipt(brew: []const u8, name: []const u8, reason: []const u8) !void {
     try seedFakeBrew(brew, &.{name});
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0/INSTALL_RECEIPT.json", .{ brew, name });
+    const path = try testing.allocator.print("{s}/Cellar/{s}/1.0/INSTALL_RECEIPT.json", .{ brew, name });
     defer testing.allocator.free(path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
-    const body = try std.fmt.allocPrint(
-        testing.allocator,
+    const body = try testing.allocator.print(
         "{{{s}\"source\":{{\"tap\":\"homebrew/core\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
         .{reason},
     );
@@ -2768,16 +2760,16 @@ fn seedBrewReceipt(brew: []const u8, name: []const u8, reason: []const u8) !void
 }
 
 fn seed404(mt: []const u8, name: []const u8) !void {
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, name });
+    const marker = try testing.allocator.print("{s}/formula_{s}.404", .{ cache_api, name });
     defer testing.allocator.free(marker);
     (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
 }
 
 fn expectKegReason(mt: []const u8, name: []const u8, reason: []const u8) !void {
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{mt}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{mt}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -2791,14 +2783,14 @@ fn expectKegReason(mt: []const u8, name: []const u8, reason: []const u8) !void {
     // The row and the malt-side receipt are written by different call
     // sites; both must carry the brew reason or Homebrew-compatible
     // tooling and malt disagree about the same keg.
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0/INSTALL_RECEIPT.json", .{ mt, name });
+    const receipt_path = try testing.allocator.print("{s}/Cellar/{s}/1.0/INSTALL_RECEIPT.json", .{ mt, name });
     defer testing.allocator.free(receipt_path);
     const raw = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, receipt_path, 64 * 1024);
     defer testing.allocator.free(raw);
     const on_request = if (std.mem.eql(u8, reason, "direct")) "true" else "false";
-    const needle = try std.fmt.allocPrint(testing.allocator, "\"installed_on_request\": {s}", .{on_request});
+    const needle = try testing.allocator.print("\"installed_on_request\": {s}", .{on_request});
     defer testing.allocator.free(needle);
-    try testing.expect(std.mem.indexOf(u8, raw, needle) != null);
+    try testing.expect(std.mem.find(u8, raw, needle) != null);
 }
 
 test "migrate records a brew dependency as a dependency and an absent reason as direct" {
@@ -2872,13 +2864,12 @@ test "tap fallback partial-DSL emits the --use-system-ruby hint same as install"
 
     // Body calls a helper the DSL doesn't speak — FallbackLog records
     // unknown_method, router downgrades to "partially skipped".
-    const tap_rb = try std.fmt.allocPrint(
-        testing.allocator,
+    const tap_rb = try testing.allocator.print(
         "{s}/Library/Taps/owner/homebrew-tap/Formula/g/gizmo.rb",
         .{brew},
     );
     defer testing.allocator.free(tap_rb);
-    const tap_dir = std.fs.path.dirname(tap_rb).?;
+    const tap_dir = std.Io.Dir.path.dirname(tap_rb).?;
     try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
@@ -2894,16 +2885,15 @@ test "tap fallback partial-DSL emits the --use-system-ruby hint same as install"
         );
     }
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/gizmo/1.0", .{brew});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/gizmo/1.0", .{brew});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     defer testing.allocator.free(receipt_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
-        const body = try std.fmt.allocPrint(
-            testing.allocator,
+        const body = try testing.allocator.print(
             "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
             .{tap_rb},
         );
@@ -2911,10 +2901,10 @@ test "tap fallback partial-DSL emits the --use-system-ruby hint same as install"
         try f.writeStreamingAll(std.Options.debug_io, body);
     }
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_gizmo.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_gizmo.404", .{cache_api});
     defer testing.allocator.free(marker);
     (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
 
@@ -2956,13 +2946,12 @@ test "tap fallback stays silent when the tap formula has no post_install" {
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const tap_rb = try std.fmt.allocPrint(
-        testing.allocator,
+    const tap_rb = try testing.allocator.print(
         "{s}/Library/Taps/owner/homebrew-tap/Formula/q/quiet.rb",
         .{brew},
     );
     defer testing.allocator.free(tap_rb);
-    const tap_dir = std.fs.path.dirname(tap_rb).?;
+    const tap_dir = std.Io.Dir.path.dirname(tap_rb).?;
     try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
@@ -2975,16 +2964,15 @@ test "tap fallback stays silent when the tap formula has no post_install" {
         );
     }
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/quiet/1.0", .{brew});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/quiet/1.0", .{brew});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     defer testing.allocator.free(receipt_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
-        const body = try std.fmt.allocPrint(
-            testing.allocator,
+        const body = try testing.allocator.print(
             "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
             .{tap_rb},
         );
@@ -2992,10 +2980,10 @@ test "tap fallback stays silent when the tap formula has no post_install" {
         try f.writeStreamingAll(std.Options.debug_io, body);
     }
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_quiet.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_quiet.404", .{cache_api});
     defer testing.allocator.free(marker);
     (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
 
@@ -3044,10 +3032,10 @@ test "renamed homebrew/core keg migrates from the local Cellar copy" {
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Core keg present locally with a receipt; no tap .rb (core kegs carry none).
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/widget/2.0", .{brew});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/widget/2.0", .{brew});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     defer testing.allocator.free(receipt_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
@@ -3058,10 +3046,10 @@ test "renamed homebrew/core keg migrates from the local Cellar copy" {
     }
 
     // 404 marker → fetchFormula returns NotFound offline, routing to the fallback.
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_widget.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_widget.404", .{cache_api});
     defer testing.allocator.free(marker);
     (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
 
@@ -3107,10 +3095,10 @@ test "core keg with a malformed receipt still fails after the core guard is gone
     _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/widget/2.0", .{brew});
+    const keg_dir = try testing.allocator.print("{s}/Cellar/widget/2.0", .{brew});
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     defer testing.allocator.free(receipt_path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
@@ -3118,10 +3106,10 @@ test "core keg with a malformed receipt still fails after the core guard is gone
         try f.writeStreamingAll(std.Options.debug_io, "{ not json");
     }
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_widget.404", .{cache_api});
+    const marker = try testing.allocator.print("{s}/formula_widget.404", .{cache_api});
     defer testing.allocator.free(marker);
     (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
 
@@ -3186,20 +3174,19 @@ test "post_install drain fires after every keg's linkOpt has run" {
     };
 
     for (formulas) |f| {
-        const tap_rb = try std.fmt.allocPrint(
-            testing.allocator,
+        const tap_rb = try testing.allocator.print(
             "{s}/Library/Taps/owner/homebrew-tap/Formula/{c}/{s}.rb",
             .{ brew, f.name[0], f.name },
         );
         defer testing.allocator.free(tap_rb);
-        const tap_dir = std.fs.path.dirname(tap_rb).?;
+        const tap_dir = std.Io.Dir.path.dirname(tap_rb).?;
         try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
         {
             // Marker lands inside `prefix/` (the keg's own Cellar dir),
             // which sandbox.validatePath always allows. Conditional on
             // the peer's opt/ symlink so its presence proves drain
             // observed both linkOpts before firing the hook.
-            const body = try std.fmt.allocPrint(testing.allocator,
+            const body = try testing.allocator.print(
                 \\class {c}{s} < Formula
                 \\  url "x"
                 \\  def post_install
@@ -3220,14 +3207,13 @@ test "post_install drain fires after every keg's linkOpt has run" {
             try file.writeStreamingAll(std.Options.debug_io, body);
         }
 
-        const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0", .{ brew, f.name });
+        const keg_dir = try testing.allocator.print("{s}/Cellar/{s}/1.0", .{ brew, f.name });
         defer testing.allocator.free(keg_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
-        const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+        const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
         defer testing.allocator.free(receipt_path);
         {
-            const receipt = try std.fmt.allocPrint(
-                testing.allocator,
+            const receipt = try testing.allocator.print(
                 "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
                 .{tap_rb},
             );
@@ -3237,10 +3223,10 @@ test "post_install drain fires after every keg's linkOpt has run" {
             try file.writeStreamingAll(std.Options.debug_io, receipt);
         }
 
-        const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+        const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
         defer testing.allocator.free(cache_api);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-        const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, f.name });
+        const marker = try testing.allocator.print("{s}/formula_{s}.404", .{ cache_api, f.name });
         defer testing.allocator.free(marker);
         (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
     }
@@ -3261,8 +3247,7 @@ test "post_install drain fires after every keg's linkOpt has run" {
     try migrate.execute(&ctx, arena.allocator(), &.{"--parallel"});
 
     for (formulas) |f| {
-        const marker_path = try std.fmt.allocPrint(
-            testing.allocator,
+        const marker_path = try testing.allocator.print(
             "{s}/Cellar/{s}/1.0/saw_peer.marker",
             .{ mt_z, f.name },
         );

@@ -94,7 +94,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
     var db = schema_report.openPreviewable(ctx.io, db_path, dry_run) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
@@ -106,7 +106,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // one left open would pin this connection's read snapshot across the
     // lock wait, so the re-check below could never see a concurrent commit.
     var current_ver_buf: [128]u8 = undefined;
-    var current_cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var current_cellar_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const current_row = if (parsed.force_cask) null else readCurrentKeg(&db, name, &current_ver_buf, &current_cellar_buf) catch |e| return abortRowRead(&db, name, e);
     const current = current_row orelse {
         // Cask path: not a keg, but the same token may name an
@@ -183,7 +183,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Acquire lock
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
     var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
         // The DB is already open here, so db/ exists — DirMissing can't occur.
         error.DirMissing => return error.Aborted,
@@ -459,7 +459,7 @@ fn dispatchCask(
     // keg path — acquired only after the read-only early returns so --list and
     // --dry-run stay lock-free.
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
     var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
         // The DB is already open here, so db/ exists — DirMissing can't occur.
         error.DirMissing => return error.Aborted,
@@ -617,9 +617,9 @@ fn readCurrentKeg(db: *sqlite.Database, name: []const u8, ver_buf: []u8, cellar_
     const cellar_path = if (stmt.columnText(4)) |c| std.mem.sliceTo(c, 0) else "";
     return .{
         .id = stmt.columnInt(0),
-        .version = try std.fmt.bufPrint(ver_buf, "{s}", .{ver}),
+        .version = try std.mem.print(ver_buf, "{s}", .{ver}),
         .revision = stmt.columnInt(2),
-        .cellar_path = try std.fmt.bufPrint(cellar_buf, "{s}", .{cellar_path}),
+        .cellar_path = try std.mem.print(cellar_buf, "{s}", .{cellar_path}),
         .bin_isolated = stmt.columnInt(5) != 0,
         // The row keeps its reason across the swap, so the receipt must too.
         .on_request = if (stmt.columnText(6)) |r| !std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else true,
@@ -642,7 +642,7 @@ fn abortRowRead(db: *sqlite.Database, name: []const u8, e: anyerror) error{Abort
 /// so one read is enough to catch a writer that beat us to the lock.
 pub fn kegRowStillCurrent(db: *sqlite.Database, name: []const u8, seen: CurrentKeg) !bool {
     var ver_buf: [128]u8 = undefined;
-    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cellar_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const now = (try readCurrentKeg(db, name, &ver_buf, &cellar_buf)) orelse return false;
     return now.eql(seen);
 }
@@ -714,7 +714,7 @@ pub fn collectEntries(
     skip_pkg_version: ?[]const u8,
 ) CollectError!std.ArrayList(Entry) {
     var store_buf: [512]u8 = undefined;
-    const store_dir_path = std.fmt.bufPrint(&store_buf, "{s}/store", .{prefix}) catch
+    const store_dir_path = std.mem.print(&store_buf, "{s}/store", .{prefix}) catch
         return CollectError.StoreUnreadable;
 
     var store_dir = std.Io.Dir.openDirAbsolute(io, store_dir_path, .{ .iterate = true }) catch
@@ -731,7 +731,7 @@ pub fn collectEntries(
         // Each <sha> may carry a <sha>/<name>/<pkg_version>/ pair; skip when the
         // package isn't represented here.
         var name_buf: [512]u8 = undefined;
-        const name_path = std.fmt.bufPrint(&name_buf, "{s}/{s}/{s}", .{ store_dir_path, sha_entry.name, name }) catch continue;
+        const name_path = std.mem.print(&name_buf, "{s}/{s}/{s}", .{ store_dir_path, sha_entry.name, name }) catch continue;
 
         var name_dir = std.Io.Dir.openDirAbsolute(io, name_path, .{ .iterate = true }) catch continue;
         defer name_dir.close(io);
@@ -859,7 +859,7 @@ fn formatIso8601(buf: []u8, mtime_ns: i128) ![]const u8 {
     const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const day_of_month: u16 = @as(u16, month_day.day_index) + 1;
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buf,
         "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
         .{
@@ -897,7 +897,7 @@ pub fn writeEntriesJsonArray(w: *std.Io.Writer, entries: []const Entry) !void {
         try output.jsonStr(w, e.pkg_version);
         const secs: i64 = @intCast(@divTrunc(e.mtime_ns, std.time.ns_per_s));
         var buf: [32]u8 = undefined;
-        const s = try std.fmt.bufPrint(&buf, ",\"mtime\":{d}", .{secs});
+        const s = try std.mem.print(&buf, ",\"mtime\":{d}", .{secs});
         try w.writeAll(s);
         try w.writeAll("}");
     }
@@ -922,8 +922,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -935,8 +934,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1109,8 +1107,8 @@ fn storeKegPlaceholder(
     name: []const u8,
     pkg_version: []const u8,
 ) ?formula_mod.Placeholder {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keg_path = std.fmt.bufPrint(
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const keg_path = std.mem.print(
         &path_buf,
         "{s}/store/{s}/{s}/{s}",
         .{ prefix, sha256, name, pkg_version },
@@ -1134,8 +1132,8 @@ fn storeKegOnly(
     name: []const u8,
     pkg_version: []const u8,
 ) bool {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keg_path = std.fmt.bufPrint(
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const keg_path = std.mem.print(
         &path_buf,
         "{s}/store/{s}/{s}/{s}",
         .{ prefix, sha256, name, pkg_version },
@@ -1158,11 +1156,11 @@ fn seedStoreEntry(
     delay_ms_after: u64,
 ) !void {
     var buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
+    const dir = try std.mem.print(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
     try std.Io.Dir.cwd().createDirPath(io, dir);
 
     var f_buf: [600]u8 = undefined;
-    const file_path = try std.fmt.bufPrint(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
+    const file_path = try std.mem.print(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
     const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, "{}");
@@ -1406,20 +1404,20 @@ test "writeListHuman prints a header and one row per entry with ISO timestamps" 
     try writeListHuman(&aw.writer, "wget", &entries, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "aaa111") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.24") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "2023-11-14T22:13:20Z") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "bbb222") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.23") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "2023-11-03T08:26:40Z") != null);
+    try testing.expect(std.mem.find(u8, out, "wget") != null);
+    try testing.expect(std.mem.find(u8, out, "aaa111") != null);
+    try testing.expect(std.mem.find(u8, out, "1.24") != null);
+    try testing.expect(std.mem.find(u8, out, "2023-11-14T22:13:20Z") != null);
+    try testing.expect(std.mem.find(u8, out, "bbb222") != null);
+    try testing.expect(std.mem.find(u8, out, "1.23") != null);
+    try testing.expect(std.mem.find(u8, out, "2023-11-03T08:26:40Z") != null);
     // Each row carries the bullet prefix used by `mt list --versions`.
-    try testing.expect(std.mem.indexOf(u8, out, "  ▸ ") != null);
+    try testing.expect(std.mem.find(u8, out, "  ▸ ") != null);
 
     // The newest row (aaa111) appears before the older row (bbb222) — caller is
     // expected to pass entries already sorted newest-first.
-    const aaa_idx = std.mem.indexOf(u8, out, "aaa111").?;
-    const bbb_idx = std.mem.indexOf(u8, out, "bbb222").?;
+    const aaa_idx = std.mem.find(u8, out, "aaa111").?;
+    const bbb_idx = std.mem.find(u8, out, "bbb222").?;
     try testing.expect(aaa_idx < bbb_idx);
 }
 
@@ -1428,7 +1426,7 @@ test "writeListHuman with no entries still prints a header so users know the lis
     defer aw.deinit();
 
     try writeListHuman(&aw.writer, "wget", &.{}, false);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "wget") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "wget") != null);
 }
 
 test "writeListHuman with colorize=true wraps the package name in bold ANSI codes" {
@@ -1437,8 +1435,8 @@ test "writeListHuman with colorize=true wraps the package name in bold ANSI code
 
     try writeListHuman(&aw.writer, "wget", &.{}, true);
     // Bold opens the package name; reset closes it. Both must appear.
-    try testing.expect(std.mem.indexOf(u8, aw.written(), color.Style.bold.code()) != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), color.Style.reset.code()) != null);
+    try testing.expect(std.mem.find(u8, aw.written(), color.Style.bold.code()) != null);
+    try testing.expect(std.mem.find(u8, aw.written(), color.Style.reset.code()) != null);
 }
 
 test "writeListJson escapes embedded quotes in the package name" {
@@ -1689,7 +1687,7 @@ test "swapKeg keeps the links of a keg-only formula the user linked by hand" {
 
     var buf: [512]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
-    try testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/foo/1.0/") != null);
+    try testing.expect(std.mem.find(u8, buf[0..n], "/Cellar/foo/1.0/") != null);
 }
 
 test "Undo does not take a keg-only slot back from a successor" {
@@ -1725,7 +1723,7 @@ test "Undo does not take a keg-only slot back from a successor" {
 
     var buf: [512]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
-    try testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/succ/") != null);
+    try testing.expect(std.mem.find(u8, buf[0..n], "/Cellar/succ/") != null);
 }
 
 test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
@@ -1780,7 +1778,7 @@ test "removeCurrentCellarDir wipes a plain version dir when revision is zero" {
 /// Source text of the function introduced by `marker`, up to its closing
 /// brace, for tests that pin call ordering inside a body.
 fn fnBody(src: []const u8, marker: []const u8) ![]const u8 {
-    const start = std.mem.indexOf(u8, src, marker) orelse return error.FnNotFound;
+    const start = std.mem.find(u8, src, marker) orelse return error.FnNotFound;
     var depth: usize = 0;
     var seen_open = false;
     var i: usize = start + marker.len;
@@ -1808,15 +1806,15 @@ test "dispatchCask acquires malt.lock before the reinstall mutation" {
     // must precede `reinstallFromHistory` inside the function body.
     const body = try fnBody(@embedFile("rollback.zig"), "fn dispatchCask(");
 
-    const acquire_pos = std.mem.indexOf(u8, body, "LockFile.acquire") orelse
+    const acquire_pos = std.mem.find(u8, body, "LockFile.acquire") orelse
         return error.LockAcquireMissing;
-    const mutate_pos = std.mem.indexOf(u8, body, "reinstallFromHistory") orelse
+    const mutate_pos = std.mem.find(u8, body, "reinstallFromHistory") orelse
         return error.ReinstallCallMissing;
     try testing.expect(acquire_pos < mutate_pos);
 
     // Acquire failures must surface accurate per-error diagnostics via the
     // shared reporter, not a blanket "another process" message.
-    try testing.expect(std.mem.indexOf(u8, body, "reportAcquireFailure") != null);
+    try testing.expect(std.mem.find(u8, body, "reportAcquireFailure") != null);
 }
 
 // --- kegRowStillCurrent ------------------------------------------------
@@ -1849,7 +1847,7 @@ test "kegRowStillCurrent is true while the captured row is untouched" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var vb: [128]u8 = undefined;
-    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const seen = try seedAndCapture(&db, &vb, &cb);
 
     try testing.expect(try kegRowStillCurrent(&db, "tree", seen));
@@ -1859,7 +1857,7 @@ test "kegRowStillCurrent is false once the row was replaced by a newer keg of th
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var vb: [128]u8 = undefined;
-    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const seen = try seedAndCapture(&db, &vb, &cb);
 
     // An upgrade inserts the new row and deletes the old one: the id moves.
@@ -1874,7 +1872,7 @@ test "kegRowStillCurrent is false once the version or revision moved in place" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var vb: [128]u8 = undefined;
-    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const seen = try seedAndCapture(&db, &vb, &cb);
 
     try db.exec("UPDATE kegs SET revision = 1 WHERE name = 'tree';");
@@ -1891,7 +1889,7 @@ test "kegRowStillCurrent is false once link or a re-install rewrote the row in p
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var vb: [128]u8 = undefined;
-    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const seen = try seedAndCapture(&db, &vb, &cb);
 
     try db.exec("UPDATE kegs SET bin_isolated = 1 WHERE name = 'tree';");
@@ -1907,7 +1905,7 @@ test "kegRowStillCurrent surfaces a failed re-read instead of calling it a chang
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var vb: [128]u8 = undefined;
-    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const seen = try seedAndCapture(&db, &vb, &cb);
 
     try db.exec("DROP TABLE kegs;");
@@ -1923,15 +1921,15 @@ test "abortRowRead names an over-long version instead of quoting an idle SQLite"
     defer output.endStderrCapture();
 
     try testing.expectEqual(error.Aborted, abortRowRead(&db, "tree", error.NoSpaceLeft));
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "tree: version is too long to roll back") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "not an error") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "tree: version is too long to roll back") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "not an error") == null);
 }
 
 test "kegRowStillCurrent is false once the row is gone" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var vb: [128]u8 = undefined;
-    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const seen = try seedAndCapture(&db, &vb, &cb);
 
     try db.exec("DELETE FROM kegs WHERE name = 'tree';");
@@ -1945,15 +1943,15 @@ test "execute re-validates the keg row between the lock and the first mutation" 
     // sit between `LockFile.acquire` and `materializeWithCellar`.
     const body = try fnBody(@embedFile("rollback.zig"), "pub fn execute(");
 
-    const acquire_pos = std.mem.indexOf(u8, body, "LockFile.acquire") orelse
+    const acquire_pos = std.mem.find(u8, body, "LockFile.acquire") orelse
         return error.LockAcquireMissing;
-    const materialize_pos = std.mem.indexOf(u8, body, "materializeWithCellar(") orelse
+    const materialize_pos = std.mem.find(u8, body, "materializeWithCellar(") orelse
         return error.MaterializeCallMissing;
-    const recheck_pos = std.mem.indexOf(u8, body, "kegRowStillCurrent(") orelse
+    const recheck_pos = std.mem.find(u8, body, "kegRowStillCurrent(") orelse
         return error.RecheckMissing;
     try testing.expect(acquire_pos < recheck_pos and recheck_pos < materialize_pos);
 
-    try testing.expect(std.mem.indexOf(u8, body[0..acquire_pos], ".finalize()") == null);
+    try testing.expect(std.mem.find(u8, body[0..acquire_pos], ".finalize()") == null);
 }
 
 test "rollback re-validates the keg row under the lock after a concurrent commit" {
@@ -1969,7 +1967,7 @@ test "rollback re-validates the keg row under the lock after a concurrent commit
 
     // Connection A reads the row the way `execute` does before the lock.
     var ver_buf: [128]u8 = undefined;
-    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cellar_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cur = (try readCurrentKeg(&a, "tree", &ver_buf, &cellar_buf)).?;
     try testing.expectEqual(id, cur.id);
 
@@ -2001,7 +1999,7 @@ test "a read statement left open across a concurrent commit hides it from the re
     try schema.initSchema(&a);
     _ = try seedKeg(&a, "tree", "2.1.0", 0);
     var ver_buf: [128]u8 = undefined;
-    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cellar_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cur = (try readCurrentKeg(&a, "tree", &ver_buf, &cellar_buf)).?;
 
     var open_stmt = try a.prepare("SELECT id FROM kegs WHERE name = 'tree';");

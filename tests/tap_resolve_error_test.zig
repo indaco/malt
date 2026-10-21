@@ -53,7 +53,7 @@ test "gitlab refresh over a 403 reports a forge-correct rate-limit message" {
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
 
     // The wire 403 must classify to RateLimited on the gitlab path...
     try testing.expectError(error.RateLimited, tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitlab, url, null));
@@ -61,10 +61,10 @@ test "gitlab refresh over a 403 reports a forge-correct rate-limit message" {
     // ...and the message the CLI prints names the gitlab instance + token.
     var msg_buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&msg_buf, error.RateLimited, .gitlab, "gitlab.com");
-    try testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
-    try testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
-    try testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
-    try testing.expect(std.mem.indexOf(u8, msg, "api.github.com") == null);
+    try testing.expect(std.mem.find(u8, msg, "gitlab.com") != null);
+    try testing.expect(std.mem.find(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    try testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") == null);
+    try testing.expect(std.mem.find(u8, msg, "api.github.com") == null);
 }
 
 test "gitea refresh over a 404 names the instance host and drops the github-only hint" {
@@ -84,15 +84,15 @@ test "gitea refresh over a 404 names the instance host and drops the github-only
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
     try testing.expectError(error.NotFound, tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitea, url, null));
 
     var msg_buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&msg_buf, error.NotFound, .gitea, "git.example.org");
-    try testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
+    try testing.expect(std.mem.find(u8, msg, "git.example.org") != null);
     // The homebrew-<repo>/--repo remediation is github-only; it must not leak here.
-    try testing.expect(std.mem.indexOf(u8, msg, "homebrew-") == null);
-    try testing.expect(std.mem.indexOf(u8, msg, "--repo") == null);
-    try testing.expect(std.mem.indexOf(u8, msg, "GitHub") == null);
+    try testing.expect(std.mem.find(u8, msg, "homebrew-") == null);
+    try testing.expect(std.mem.find(u8, msg, "--repo") == null);
+    try testing.expect(std.mem.find(u8, msg, "GitHub") == null);
 }

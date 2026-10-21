@@ -61,7 +61,7 @@ test "BEL smuggled inside a CSI dropped" {
     var b: Buf = .{};
     defer b.deinit();
     try run("\x1b[\x07m", &b);
-    try std.testing.expect(std.mem.indexOfScalar(u8, b.list.items, 0x07) == null);
+    try std.testing.expect(std.mem.findScalar(u8, b.list.items, 0x07) == null);
 }
 
 test "CSI 3 J (erase scrollback) dropped" {

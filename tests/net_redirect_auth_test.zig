@@ -312,7 +312,7 @@ test "auth headers stripped on redirect across a cross-domain hop" {
     // the resolve→reissue round-trip mangles it).
     const blob_target = "/blob/sha256:abc?X-Amz-Signature=9f86d081&X-Amz-Credential=AKIA%2Fus-east-1%2Fs3&token=v2%3Dfoo%2Bbar%3D%3D";
     var loc_buf: [256]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://localhost:{d}{s}", .{ p2, blob_target });
+    const loc = try std.mem.print(&loc_buf, "http://localhost:{d}{s}", .{ p2, blob_target });
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -321,7 +321,7 @@ test "auth headers stripped on redirect across a cross-domain hop" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -362,7 +362,7 @@ test "auth headers kept across a same-host redirect" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -371,7 +371,7 @@ test "auth headers kept across a same-host redirect" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -407,7 +407,7 @@ test "headResolved follows a hop and harvests the artifact headers from it" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "//127.0.0.1:{d}/artifact", .{p2});
+    const loc = try std.mem.print(&loc_buf, "//127.0.0.1:{d}/artifact", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -416,7 +416,7 @@ test "headResolved follows a hop and harvests the artifact headers from it" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -431,7 +431,7 @@ test "headResolved follows a hop and harvests the artifact headers from it" {
     defer resolved.deinit();
 
     var want_buf: [64]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "http://127.0.0.1:{d}/artifact", .{p2});
+    const want = try std.mem.print(&want_buf, "http://127.0.0.1:{d}/artifact", .{p2});
     try std.testing.expectEqualStrings(want, resolved.final_url);
     try std.testing.expectEqualStrings(cd, resolved.content_disposition.?);
     try std.testing.expectEqualStrings("/artifact", hopTarget(&hop2));
@@ -453,7 +453,7 @@ test "getResolved follows a redirect the origin only emits on GET" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -462,7 +462,7 @@ test "getResolved follows a redirect the origin only emits on GET" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -498,7 +498,7 @@ fn classifyAgainstGetOnlyOrigin(head_status: std.http.Status) !@import("malt").c
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -508,7 +508,7 @@ fn classifyAgainstGetOnlyOrigin(head_status: std.http.Status) !@import("malt").c
     const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, @as(usize, 2) });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
 
     const ctx: app_ctx.AppCtx = .{ .io = io, .environ = .empty };
     const result = install_cli.resolveCaskArtifactViaWalk(&ctx, std.testing.allocator, url);
@@ -551,7 +551,7 @@ test "a HEAD walk that fails is reported as is, without a GET walk behind it" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
 
     const ctx: app_ctx.AppCtx = .{ .io = io, .environ = .empty };
     const result = install_cli.resolveCaskArtifactViaWalk(&ctx, std.testing.allocator, url);
@@ -578,7 +578,7 @@ test "getResolved closes the terminal hop without reading its body" {
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -606,7 +606,7 @@ test "headResolved is unchanged when the origin answers HEAD with a plain 200" {
     const io = threaded.io();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{try closedPort(io)});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{try closedPort(io)});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -615,7 +615,7 @@ test "headResolved is unchanged when the origin answers HEAD with a plain 200" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -641,7 +641,7 @@ fn resolveAgainstNonRedirect(status: std.http.Status) !void {
     const io = threaded.io();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact.pkg", .{try closedPort(io)});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/artifact.pkg", .{try closedPort(io)});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -650,7 +650,7 @@ fn resolveAgainstNonRedirect(status: std.http.Status) !void {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -682,7 +682,7 @@ test "headResolved reports an unreachable origin instead of the untouched url" {
     const io = threaded.io();
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{try closedPort(io)});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/download", .{try closedPort(io)});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -702,7 +702,7 @@ test "headResolved reports a dead hop instead of a half-walked resolution" {
     const io = threaded.io();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact", .{try closedPort(io)});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/artifact", .{try closedPort(io)});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -717,7 +717,7 @@ test "headResolved reports a dead hop instead of a half-walked resolution" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -746,7 +746,7 @@ test "headResolved reports a redirect with no Location instead of the pre-hop ur
     const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 1 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -773,7 +773,7 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     // The Content-Disposition also puts the error path's cleanup under the
     // testing allocator.
     var hop1 = Hop{
@@ -785,7 +785,7 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
     };
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -831,7 +831,7 @@ fn resolvesFullChain(method: std.http.Method) !void {
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     var hop1 = Hop{
         .io = io,
         .listener = &l1,
@@ -842,7 +842,7 @@ fn resolvesFullChain(method: std.http.Method) !void {
     const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -879,7 +879,7 @@ fn refusesOverlongChain(method: std.http.Method) !void {
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     var hop1 = Hop{
         .io = io,
         .listener = &l1,
@@ -893,7 +893,7 @@ fn refusesOverlongChain(method: std.http.Method) !void {
     const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, client.HttpClient.max_redirects + 2 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -932,7 +932,7 @@ test "a download follows a chain the full length of the shared redirect budget" 
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     var hop1 = Hop{
         .io = io,
         .listener = &l1,
@@ -943,7 +943,7 @@ test "a download follows a chain the full length of the shared redirect budget" 
     const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -972,7 +972,7 @@ test "a streaming download follows a chain the full length of the shared redirec
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     var hop1 = Hop{
         .io = io,
         .listener = &l1,
@@ -983,7 +983,7 @@ test "a streaming download follows a chain the full length of the shared redirec
     const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1013,7 +1013,7 @@ test "a streaming download names an over-long chain rather than calling it malfo
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     var hop1 = Hop{
         .io = io,
         .listener = &l1,
@@ -1021,7 +1021,7 @@ test "a streaming download names an over-long chain rather than calling it malfo
         .status = .found,
     };
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1058,14 +1058,14 @@ test "a buffered download spends one walk on a chain whose budget is gone" {
     const p1 = l1.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
     var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = .found };
 
     const one_walk = client.HttpClient.max_redirects + 1;
     const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, one_walk });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1094,7 +1094,7 @@ test "a buffered download survives a hop that fails once" {
     const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, 2 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blob", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blob", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1151,7 +1151,7 @@ test "a retried walk starts over at the origin rather than resuming mid-chain" {
     const p2 = l2.socket.address.getPort();
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/artifact", .{p2});
     const cd = "attachment; filename=\"artifact.dmg\"";
     var hop1 = Hop{
         .io = io,
@@ -1166,7 +1166,7 @@ test "a retried walk starts over at the origin rather than resuming mid-chain" {
     const t2 = try std.Thread.spawn(.{}, serveCount, .{ &hop2, 2 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1211,7 +1211,7 @@ test "a hop that fails once is classified rather than reported as a network fail
     const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, 2 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1250,7 +1250,7 @@ test "a classification walk gives up on an origin that never answers" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1278,7 +1278,7 @@ test "a download gives up on an origin that never answers" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blob", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/blob", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1321,7 +1321,7 @@ test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
     defer cancel_after_served = null;
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1353,7 +1353,7 @@ test "a blob download gives up on an origin that never answers" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/bottle", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/bottle", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1385,7 +1385,7 @@ test "a bare HEAD gives up on an origin that never answers" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/probe", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/probe", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1415,7 +1415,7 @@ test "a silent peer is not re-dialled three more times" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1450,7 +1450,7 @@ test "a hop that answers refreshes the budget for the next one" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/artifact", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -1465,7 +1465,7 @@ test "a hop that answers refreshes the budget for the next one" {
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1502,7 +1502,7 @@ test "a bare HEAD gives up on a peer that never starts its TLS handshake" {
     const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/probe", .{p1});
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/probe", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1531,7 +1531,7 @@ test "a download gives up on a peer that never starts its TLS handshake" {
     const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/blob", .{p1});
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/blob", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1560,7 +1560,7 @@ test "a blob stream gives up on a peer that never starts its TLS handshake" {
     const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/bottle", .{p1});
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/bottle", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1605,7 +1605,7 @@ test "Ctrl-C during a stalled TLS handshake is the answer, not a blip to retry" 
     defer cancel_watch = null;
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/artifact", .{p1});
+    const url = try std.mem.print(&url_buf, "https://127.0.0.1:{d}/artifact", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1638,7 +1638,7 @@ test "an unframed redirect is released without draining until the peer closes" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -1647,7 +1647,7 @@ test "an unframed redirect is released without draining until the peer closes" {
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1679,7 +1679,7 @@ test "a streamed walk releases an unframed redirect without draining it" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/bottle", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/bottle", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -1688,7 +1688,7 @@ test "a streamed walk releases an unframed redirect without draining it" {
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1727,7 +1727,7 @@ test "the version probe's budget spends one attempt on a peer that keeps failing
     const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 4 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1761,7 +1761,7 @@ test "the stock client still retries a failing peer" {
     const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 4 });
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1795,7 +1795,7 @@ test "a chunked redirect whose zero-chunk never arrives is still released" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -1804,7 +1804,7 @@ test "a chunked redirect whose zero-chunk never arrives is still released" {
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1839,7 +1839,7 @@ test "a redirect that declares a body it never sends is still released" {
     const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
 
     var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+    const loc = try std.mem.print(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
 
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
@@ -1848,7 +1848,7 @@ test "a redirect that declares a body it never sends is still released" {
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1884,7 +1884,7 @@ test "a redirect the walk refuses is released on the way out, not drained" {
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);

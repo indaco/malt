@@ -20,7 +20,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     // Mandatory layout subdirs — Cellar / store live here.
     inline for (.{ "store", "Cellar" }) |sub| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ path, sub });
+        const dir = try testing.allocator.print("{s}/{s}", .{ path, sub });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
@@ -88,11 +88,11 @@ test "installKegFromBottle skips the download branch when the store already hold
     // `cellar = ":any"` so the Mach-O patcher + codesign step both skip,
     // letting a plain text file through without faking a real binary.
     const sha = std.mem.asBytes(&@as([16][4]u8, @splat("ba5e".*))); // 64 hex chars
-    const inner_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/warmpkg/1.0", .{ prefix, sha });
+    const inner_dir = try testing.allocator.print("{s}/store/{s}/warmpkg/1.0", .{ prefix, sha });
     defer testing.allocator.free(inner_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, inner_dir);
     {
-        const filename = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{inner_dir});
+        const filename = try testing.allocator.print("{s}/README", .{inner_dir});
         defer testing.allocator.free(filename);
         const f = try test_io.cwd().createFile(std.Options.debug_io, filename, .{});
         defer f.close(std.Options.debug_io);
@@ -104,8 +104,7 @@ test "installKegFromBottle skips the download branch when the store already hold
     // `"all"` platform key wins on every host arch — keeps this test
     // arch-independent and avoids encoding the current macOS codename
     // list in two places.
-    const formula_json = try std.fmt.allocPrint(
-        arena.allocator(),
+    const formula_json = try arena.allocator().print(
         \\{{
         \\  "name": "warmpkg",
         \\  "full_name": "warmpkg",
@@ -155,12 +154,12 @@ test "installKegFromBottle skips the download branch when the store already hold
     try testing.expectEqualStrings(sha, result.sha256);
 
     // Cellar/<name>/<version>/ exists on disk — materialise ran.
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/warmpkg/1.0", .{prefix});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/warmpkg/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, cellar_dir, .{});
 
     // README copied across the clonefile boundary.
-    const cellar_readme = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{cellar_dir});
+    const cellar_readme = try testing.allocator.print("{s}/README", .{cellar_dir});
     defer testing.allocator.free(cellar_readme);
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, cellar_readme, .{});
 }
@@ -173,7 +172,7 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
     // Pre-seed `store/<sha>/` so `installKegFromBottle` skips the
     // download branch and goes straight to `materializeWithCellar`.
     const sha = std.mem.asBytes(&@as([16][4]u8, @splat("feed".*)));
-    const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    const store_inner = try testing.allocator.print("{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
 
@@ -186,8 +185,7 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const formula_json = try std.fmt.allocPrint(
-        arena.allocator(),
+    const formula_json = try arena.allocator().print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",
@@ -263,9 +261,9 @@ fn serveBottle(s: *BottleStub) void {
     var srv = std.http.Server.init(&reader.interface, &writer.interface);
     while (true) {
         var req = srv.receiveHead() catch return;
-        if (std.mem.indexOf(u8, req.head.target, "/token") != null) {
+        if (std.mem.find(u8, req.head.target, "/token") != null) {
             req.respond("{\"token\":\"t1\"}", .{}) catch return;
-        } else if (std.mem.indexOf(u8, req.head.target, "/blobs/") != null) {
+        } else if (std.mem.find(u8, req.head.target, "/blobs/") != null) {
             req.respond(s.body, .{}) catch return;
         } else {
             req.respond("not found\n", .{ .status = .not_found }) catch return;
@@ -305,19 +303,19 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
 
     // Mint a real bottle: `<name>/<version>/README`, the layout the store
     // commit and the cellar clone both expect.
-    const payload = try std.fmt.allocPrint(testing.allocator, "{s}/work/coldpkg/1.0", .{prefix});
+    const payload = try testing.allocator.print("{s}/work/coldpkg/1.0", .{prefix});
     defer testing.allocator.free(payload);
     try test_io.cwd().createDirPath(io, payload);
-    const readme = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{payload});
+    const readme = try testing.allocator.print("{s}/README", .{payload});
     defer testing.allocator.free(readme);
     {
         const f = try test_io.createFileAbsolute(io, readme, .{});
         defer f.close(io);
         try f.writeStreamingAll(io, "cold bottle fixture\n");
     }
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work", .{prefix});
+    const work = try testing.allocator.print("{s}/work", .{prefix});
     defer testing.allocator.free(work);
-    const archive = try std.fmt.allocPrint(testing.allocator, "{s}/bottle.tar.gz", .{prefix});
+    const archive = try testing.allocator.print("{s}/bottle.tar.gz", .{prefix});
     defer testing.allocator.free(archive);
     try tarCzf(&.{ "tar", "czf", archive, "-C", work, "coldpkg" });
 
@@ -328,10 +326,10 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
     const sha = std.fmt.bytesToHex(raw, .lower);
 
     // A symlinked package dir is the cheapest deterministic refusal.
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{prefix});
+    const victim = try testing.allocator.print("{s}/victim", .{prefix});
     defer testing.allocator.free(victim);
     try test_io.cwd().createDirPath(io, victim);
-    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/coldpkg", .{prefix});
+    const pkg_dir = try testing.allocator.print("{s}/Cellar/coldpkg", .{prefix});
     defer testing.allocator.free(pkg_dir);
     try test_io.symLinkAbsolute(io, victim, pkg_dir, .{ .is_directory = true });
 
@@ -342,12 +340,11 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
     const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const formula_json = try std.fmt.allocPrint(
-        arena.allocator(),
+    const formula_json = try arena.allocator().print(
         \\{{
         \\  "name": "coldpkg",
         \\  "full_name": "coldpkg",

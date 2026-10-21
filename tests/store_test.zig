@@ -22,14 +22,14 @@ const sha_ref = &@as([64]u8, @splat('8'));
 
 fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, store: store_mod.Store, prefix: []const u8 } {
     // Create temp directory as prefix
-    const prefix = try std.fmt.allocPrint(allocator, "/tmp/malt_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
+    const prefix = try allocator.print("/tmp/malt_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
 
     test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
-    const store_dir = try std.fmt.allocPrint(allocator, "{s}/store", .{prefix});
+    const store_dir = try allocator.print("{s}/store", .{prefix});
     defer allocator.free(store_dir);
     test_io.makeDirAbsolute(std.Options.debug_io, store_dir) catch {};
 
-    const db_path = try std.fmt.allocPrintSentinel(allocator, "{s}/test.db", .{prefix}, 0);
+    const db_path = try allocator.printSentinel("{s}/test.db", .{prefix}, 0);
     defer allocator.free(db_path);
     var db = try sqlite.Database.open(db_path);
     try schema.initSchema(&db);
@@ -58,11 +58,11 @@ test "commit moves directory to store and exists returns true" {
     }
 
     // Create a source directory with a file
-    const src = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_src_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
+    const src = try testing.allocator.print("/tmp/malt_src_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer testing.allocator.free(src);
     test_io.makeDirAbsolute(std.Options.debug_io, src) catch {};
 
-    const test_file = try std.fmt.allocPrint(testing.allocator, "{s}/test.txt", .{src});
+    const test_file = try testing.allocator.print("{s}/test.txt", .{src});
     defer testing.allocator.free(test_file);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, test_file, .{});
     try f.writeStreamingAll(std.Options.debug_io, "hello");
@@ -82,15 +82,15 @@ test "commitFrom with null src renames from {prefix}/tmp/{sha}" {
 
     const sha = sha_default_src;
 
-    const tmp_dir = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{ctx.prefix});
+    const tmp_dir = try testing.allocator.print("{s}/tmp", .{ctx.prefix});
     defer testing.allocator.free(tmp_dir);
     test_io.makeDirAbsolute(std.Options.debug_io, tmp_dir) catch {};
 
-    const default_src = try std.fmt.allocPrint(testing.allocator, "{s}/tmp/{s}", .{ ctx.prefix, sha });
+    const default_src = try testing.allocator.print("{s}/tmp/{s}", .{ ctx.prefix, sha });
     defer testing.allocator.free(default_src);
     test_io.makeDirAbsolute(std.Options.debug_io, default_src) catch {};
 
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/marker.txt", .{default_src});
+    const marker = try testing.allocator.print("{s}/marker.txt", .{default_src});
     defer testing.allocator.free(marker);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{});
     try f.writeStreamingAll(std.Options.debug_io, "moved");
@@ -100,7 +100,7 @@ test "commitFrom with null src renames from {prefix}/tmp/{sha}" {
 
     try testing.expect(ctx.store.exists(sha));
     // The marker must have moved with the directory, not stayed behind.
-    const moved_marker = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/marker.txt", .{ ctx.prefix, sha });
+    const moved_marker = try testing.allocator.print("{s}/store/{s}/marker.txt", .{ ctx.prefix, sha });
     defer testing.allocator.free(moved_marker);
     var probe = try test_io.openFileAbsolute(std.Options.debug_io, moved_marker, .{});
     probe.close(std.Options.debug_io);
@@ -131,7 +131,7 @@ test "duplicate commit is idempotent" {
     }
 
     // Create source and commit
-    const src = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_src2_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
+    const src = try testing.allocator.print("/tmp/malt_src2_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer testing.allocator.free(src);
     test_io.makeDirAbsolute(std.Options.debug_io, src) catch {};
 
@@ -184,7 +184,7 @@ test "remove drops FS path and store_refs row in one transactional pass" {
     ctx.store.db = &ctx.db;
 
     const sha = sha_txn;
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, sha });
+    const dir = try testing.allocator.print("{s}/store/{s}", .{ ctx.prefix, sha });
     defer testing.allocator.free(dir);
     test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
     try ctx.store.claim(sha);
@@ -247,7 +247,7 @@ test "an explicit source path does not buy a caller past the key check" {
 
     // Supplying src_path skips the tmp-path formation, which is the one way
     // the destination check could plausibly be bypassed.
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/tmp/donor", .{ctx.prefix});
+    const src = try testing.allocator.print("{s}/tmp/donor", .{ctx.prefix});
     defer testing.allocator.free(src);
     try test_io.cwd().createDirPath(std.Options.debug_io, src);
 
@@ -269,7 +269,7 @@ test "remove rejects a malformed key before it can delete or transact" {
 
     // A hand-edited row: key not hex, no keg, entry present on disk.
     const bad = "not-hex";
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, bad });
+    const dir = try testing.allocator.print("{s}/store/{s}", .{ ctx.prefix, bad });
     defer testing.allocator.free(dir);
     test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
     {

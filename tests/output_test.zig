@@ -155,7 +155,7 @@ test "jsonTimeSuffix emits a non-negative integer for a past start_ts" {
     const got = try encodeTimeSuffix(start);
     defer testing.allocator.free(got);
 
-    const colon = std.mem.indexOfScalar(u8, got, ':').?;
+    const colon = std.mem.findScalar(u8, got, ':').?;
     const num_str = got[colon + 1 ..];
     const n = try std.fmt.parseInt(i64, num_str, 10);
     try testing.expect(n >= 0);
@@ -168,7 +168,7 @@ test "jsonTimeSuffix produces a large elapsed value for a far-past start_ts" {
     const got = try encodeTimeSuffix(now - 1_000_000);
     defer testing.allocator.free(got);
 
-    const colon = std.mem.indexOfScalar(u8, got, ':').?;
+    const colon = std.mem.findScalar(u8, got, ':').?;
     const n = try std.fmt.parseInt(i64, got[colon + 1 ..], 10);
     try testing.expect(n >= 1_000_000);
 }
@@ -502,8 +502,8 @@ test "emitNdjsonEvent omits status field when null" {
     defer cap.deinit();
 
     output.emitNdjsonEvent(.lock_acquired, "", null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"status\"") == null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"lock_acquired\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"status\"") == null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"event\":\"lock_acquired\"") != null);
 }
 
 test "emitNdjsonEvent escapes adversarial name and status fields" {
@@ -555,5 +555,5 @@ test "emitNdjsonEvent fires under ndjson regardless of --json mode" {
     defer cap.deinit();
 
     output.emitNdjsonEvent(.resolved, "tree", null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"resolved\"") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\"event\":\"resolved\"") != null);
 }

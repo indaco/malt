@@ -52,14 +52,14 @@ const Probe = struct {
         p.arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         p.flog = steps.FallbackLog.init(std.testing.allocator);
         p.tmp = std.testing.tmpDir(.{});
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const a = p.arena.allocator();
         p.prefix = try a.dupe(u8, path_buf[0..try std.Io.Dir.realPath(p.tmp.dir, std.Options.debug_io, &path_buf)]);
         const home = try a.allocSentinel(?[*:0]const u8, 1, null);
-        home[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{p.prefix}, 0)).ptr;
+        home[0] = (try a.printSentinel("HOME={s}", .{p.prefix}, 0)).ptr;
         p.environ = .{ .block = .{ .slice = home } };
         p.threaded = .init(std.testing.allocator, .{ .environ = p.environ });
-        p.keg = try std.fmt.allocPrint(a, "{s}/Cellar/probe/1.0", .{p.prefix});
+        p.keg = try a.print("{s}/Cellar/probe/1.0", .{p.prefix});
         try std.Io.Dir.cwd().createDirPath(p.threaded.io(), p.keg);
         return p;
     }
@@ -83,7 +83,7 @@ const Probe = struct {
     }
 
     fn path(p: *Probe, sub: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(p.arena.allocator(), "{s}/{s}", .{ p.prefix, sub });
+        return p.arena.allocator().print("{s}/{s}", .{ p.prefix, sub });
     }
 
     fn deinit(p: *Probe) void {
@@ -100,7 +100,7 @@ fn exists(io: std.Io, p: []const u8) bool {
 }
 
 fn noteContains(flog: *const steps.FallbackLog, needle: []const u8) bool {
-    for (flog.notes()) |n| if (std.mem.indexOf(u8, n, needle) != null) return true;
+    for (flog.notes()) |n| if (std.mem.find(u8, n, needle) != null) return true;
     return false;
 }
 
@@ -156,7 +156,7 @@ test "a symlink declared with uninstall is removed on uninstall only while it st
         return error.SymlinkUninstallKeyRefused;
     }
     const link = try p.path("etc/alias");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = std.Io.Dir.readLinkAbsolute(io, link, &buf) catch return error.SymlinkNotCreated;
 
     // Guarded so a tree without the uninstall mode reports it instead of
@@ -177,12 +177,12 @@ test "a run step's declared env reaches the child, expanded" {
     defer p.deinit();
     const io = p.ctx().io;
     const a = p.arena.allocator();
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{p.keg});
+    const libexec = try a.print("{s}/libexec", .{p.keg});
     try std.Io.Dir.cwd().createDirPath(io, libexec);
     try std.Io.Dir.cwd().createDirPath(io, try p.path("etc"));
     const seen = try p.path("etc/seen.txt");
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/probe", .{libexec}), .{});
+        const f = try std.Io.Dir.createFileAbsolute(io, try a.print("{s}/probe", .{libexec}), .{});
         defer f.close(io);
         var w = f.writer(io, &.{});
         try w.interface.print("#!/bin/sh\n/usr/bin/env > '{s}'\n", .{seen});
@@ -201,7 +201,7 @@ test "a run step's declared env reaches the child, expanded" {
     var buf: [64 * 1024]u8 = undefined;
     var r = f.reader(io, &.{});
     const dump = buf[0..try r.interface.readSliceShort(&buf)];
-    if (std.mem.indexOf(u8, dump, "MALT_GAP_PROBE=v1.0\n") == null) return error.DeclaredEnvDidNotReachChild;
+    if (std.mem.find(u8, dump, "MALT_GAP_PROBE=v1.0\n") == null) return error.DeclaredEnvDidNotReachChild;
 }
 
 test "network_access on a run step stays refused" {

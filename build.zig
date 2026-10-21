@@ -451,7 +451,7 @@ pub fn build(b: *std.Build) void {
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
         // has a unique install name, which `test-bin` / kcov need).
-        const test_name = comptime std.fs.path.stem(std.fs.path.basename(test_file));
+        const test_name = comptime std.Io.Dir.path.stem(std.Io.Dir.path.basename(test_file));
 
         const t = b.addTest(.{
             .name = test_name,

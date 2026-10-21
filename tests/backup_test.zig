@@ -228,13 +228,13 @@ test "parseBackup skips an entry whose name or version holds a control byte, and
     try testing.expectEqualStrings("caf\xc3\xa9", entries[0].name);
     // Restore fails on any skip, so each refused line must be counted.
     try testing.expectEqual(@as(usize, 3), parsed.skipped);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2") == null);
-    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
+    try testing.expect(std.mem.find(u8, captured.items, "\xc2") == null);
+    try testing.expect(std.mem.findScalar(u8, captured.items, 0x1b) == null);
     // Named even under --quiet: restore would otherwise install less than
     // the file lists without a trace.
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, captured.items, "holds a control character"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "formula foo 1.0\\xc2\\x9b2J") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask b\\x1baz") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "formula foo 1.0\\xc2\\x9b2J") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask b\\x1baz") != null);
 }
 
 test "parseBackup skips an entry that does not name a package, and says so" {
@@ -285,8 +285,8 @@ test "parseBackup skips an entry that does not name a package, and says so" {
     try testing.expectEqual(backup.Kind.service, entries[6].kind);
     // Named even under --quiet, once per line.
     try testing.expectEqual(@as(usize, 14), std.mem.count(u8, captured.items, "does not name a package"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "`formula a/b/../../x`") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "`service a/b/c`") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "`formula a/b/../../x`") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "`service a/b/c`") != null);
 }
 
 test "parseBackup skips an entry naming malt itself, and says so" {
@@ -326,8 +326,8 @@ test "parseBackup skips an entry naming malt itself, and says so" {
     for (kept, entries) |name, e| try testing.expectEqualStrings(name, e.name);
     // Named even under --quiet, once per line.
     try testing.expectEqual(@as(usize, 5), std.mem.count(u8, captured.items, "restore never installs malt itself"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "`formula acme/tools/mt`") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "`service mt`") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "`formula acme/tools/mt`") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "`service mt`") != null);
     // A path-shaped recipe is refused by shape first, so it is warned once.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "does not name a package"));
 }
@@ -362,8 +362,8 @@ test "parseBackup skips a flag-shaped name or a versioned service line, and says
     try testing.expectEqual(@as(usize, 5), parsed.skipped);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, captured.items, "does not name a package"));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, captured.items, "a service line takes no version"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "`formula --allow-unpinned`") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "`service redis 8.0`") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "`formula --allow-unpinned`") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "`service redis 8.0`") != null);
 }
 
 test "parseBackup handles an empty input" {

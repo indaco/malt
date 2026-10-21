@@ -105,7 +105,7 @@ pub fn searchLocalKind(
         // Names in `kegs`/`casks` are lowercase by Homebrew convention,
         // same assumption `api.findNameMatches` makes about the API
         // index. The single case-fold above is enough.
-        if (std.mem.indexOf(u8, name, qlower) == null) continue;
+        if (std.mem.find(u8, name, qlower) == null) continue;
         const owned = try allocator.dupe(u8, name);
         errdefer allocator.free(owned);
         try out.append(allocator, owned);

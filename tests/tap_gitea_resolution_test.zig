@@ -96,7 +96,7 @@ test "gitea resolve: a recorded commits array body yields the sha and its raw .r
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
     var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitea, url, null);
     defer res.deinit();
@@ -137,7 +137,7 @@ test "gitea resolve: the API request carries Authorization token when MALT_GITEA
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
     var res = try tap.resolveHeadCommit(io, envWithGiteaToken(), testing.allocator, false, .gitea, url, null);
     defer res.deinit();
@@ -158,7 +158,7 @@ test "gitea raw fetch: getRawFile carries Authorization token — raw lives on t
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/grp/tap/raw/{s}/Formula/glow.rb", .{ port, fixture_sha });
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/grp/tap/raw/{s}/Formula/glow.rb", .{ port, fixture_sha });
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, envWithGiteaToken(), testing.allocator);

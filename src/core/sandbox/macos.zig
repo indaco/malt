@@ -79,7 +79,7 @@ pub fn formulaEnvValue(
     if (std.mem.eql(u8, key, "PATH")) return sandbox_path;
     if (std.mem.eql(u8, key, "MALT_PREFIX") or std.mem.eql(u8, key, "HOMEBREW_PREFIX")) return malt_prefix;
     if (std.mem.eql(u8, key, "HOMEBREW_CELLAR"))
-        return try std.fmt.allocPrint(allocator, "{s}/Cellar", .{malt_prefix});
+        return try allocator.print("{s}/Cellar", .{malt_prefix});
     if (std.mem.eql(u8, key, "TMPDIR")) return "/tmp";
     if (inherited_env_keys.has(key)) return std.process.Environ.getPosix(environ, key);
     return null;
@@ -246,9 +246,9 @@ pub fn renderRubyProfile(
     }) |path| w.print("\n  (subpath \"{s}\")", .{path}) catch
         return SandboxError.ProfileBuildFailed;
     w.writeAll("\n  (subpath \"/Library/Fonts\")") catch return SandboxError.ProfileBuildFailed;
-    var cellar_real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var prefix_real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var home_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cellar_real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var prefix_real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var home_real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     writeCellarRule(w, cellar_path) catch return SandboxError.ProfileBuildFailed;
     if (resolvedForProfile(cellar_path, &cellar_real_buf)) |real|
         writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
@@ -262,13 +262,13 @@ pub fn renderRubyProfile(
     }
     for (opts.read_files) |path| {
         w.print("\n  (literal \"{s}\")", .{path}) catch return SandboxError.ProfileBuildFailed;
-        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (resolvedForProfile(path, &real_buf)) |real|
             w.print("\n  (literal \"{s}\")", .{real}) catch return SandboxError.ProfileBuildFailed;
     }
     for (opts.read_dirs) |path| {
         writeCellarRule(w, path) catch return SandboxError.ProfileBuildFailed;
-        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (resolvedForProfile(path, &real_buf)) |real|
             writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
     }
@@ -314,7 +314,7 @@ pub fn renderRubyProfile(
 fn writeDirRules(w: *std.Io.Writer, dirs: []const []const u8) !void {
     for (dirs) |path| {
         try writeCellarRule(w, path);
-        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (resolvedForProfile(path, &real_buf)) |real| try writeCellarRule(w, real);
     }
 }
@@ -346,8 +346,8 @@ extern "c" fn realpath(noalias file_name: [*:0]const u8, noalias resolved_name: 
 /// when it resolves to itself, is not on disk yet, or the resolved form
 /// fails profile validation — the caller keeps the literal rule either
 /// way, so a failed resolve degrades to today's behaviour.
-fn resolvedForProfile(p: []const u8, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
-    var z: [std.fs.max_path_bytes]u8 = undefined;
+fn resolvedForProfile(p: []const u8, buf: *[std.Io.Dir.max_path_bytes]u8) ?[]const u8 {
+    var z: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (p.len >= z.len) return null;
     @memcpy(z[0..p.len], p);
     z[p.len] = 0;
@@ -398,7 +398,7 @@ pub fn buildEnvp(
         .{ .k = "TMPDIR", .v = env.tmpdir },
     };
     for (entries) |e| {
-        const s = std.fmt.allocPrintSentinel(allocator, "{s}={s}", .{ e.k, e.v }, 0) catch
+        const s = allocator.printSentinel("{s}={s}", .{ e.k, e.v }, 0) catch
             return SandboxError.EnvBuildFailed;
         list.append(allocator, s) catch {
             allocator.free(s);
@@ -456,18 +456,18 @@ pub fn runRubySandboxed(
     limits: Limits,
     stdio: Stdio,
 ) SandboxError!u8 {
-    if (builtin.os.tag != .macos) return SandboxError.SandboxUnsupported;
+    if (builtin.target.os.tag != .macos) return SandboxError.SandboxUnsupported;
 
     // A package-manager Ruby links its dylibs through `<prefix>/opt/*`
     // into `<prefix>/Cellar/*`; grant those two trees and nothing else
     // there (no `etc`/`var`).
-    var cellar_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var opt_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cellar_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var opt_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var dirs: [2][]const u8 = undefined;
     const read_dirs: []const []const u8 = if (interpreterPrefix(ruby_path)) |prefix| blk: {
         dirs = .{
-            std.fmt.bufPrint(&cellar_dir_buf, "{s}/Cellar", .{prefix}) catch return SandboxError.ProfileBuildFailed,
-            std.fmt.bufPrint(&opt_dir_buf, "{s}/opt", .{prefix}) catch return SandboxError.ProfileBuildFailed,
+            std.mem.print(&cellar_dir_buf, "{s}/Cellar", .{prefix}) catch return SandboxError.ProfileBuildFailed,
+            std.mem.print(&opt_dir_buf, "{s}/opt", .{prefix}) catch return SandboxError.ProfileBuildFailed,
         };
         break :blk &dirs;
     } else &.{};
@@ -794,8 +794,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -807,8 +806,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -882,19 +880,19 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
         .{},
     );
     defer std.testing.allocator.free(profile);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(deny default)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(deny network*)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/Cellar/foo/1.0\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(deny default)") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(deny network*)") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/Cellar/foo/1.0\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/var\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
     // Cache-regen steps write only two lib subtrees; the whole `lib` farm
     // must NOT be granted (cross-formula dylib overwrite surface).
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gdk-pixbuf-2.0\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gio\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/lib/gdk-pixbuf-2.0\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/lib/gio\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
     // IPC is opt-in: the default profile must NOT grant it.
-    try std.testing.expect(std.mem.indexOf(u8, profile, "ipc-sysv-shm") == null);
+    try std.testing.expect(std.mem.find(u8, profile, "ipc-sysv-shm") == null);
 }
 
 test "renderRubyProfile grants read-only access to read_dirs, never writes" {
@@ -905,11 +903,11 @@ test "renderRubyProfile grants read-only access to read_dirs, never writes" {
         .{ .read_dirs = &.{"/opt/homebrew/Cellar"} },
     );
     defer std.testing.allocator.free(profile);
-    const read_start = std.mem.indexOf(u8, profile, "(allow file-read-data").?;
-    const write_start = std.mem.indexOf(u8, profile, "(allow file-write*").?;
-    const grant = std.mem.indexOf(u8, profile, "(subpath \"/opt/homebrew/Cellar\")").?;
+    const read_start = std.mem.find(u8, profile, "(allow file-read-data").?;
+    const write_start = std.mem.find(u8, profile, "(allow file-write*").?;
+    const grant = std.mem.find(u8, profile, "(subpath \"/opt/homebrew/Cellar\")").?;
     try std.testing.expect(grant > read_start and grant < write_start);
-    try std.testing.expect(std.mem.indexOf(u8, profile[write_start..], "/opt/homebrew/Cellar") == null);
+    try std.testing.expect(std.mem.find(u8, profile[write_start..], "/opt/homebrew/Cellar") == null);
 }
 
 test "renderRubyProfile grants write_dirs for reading and writing" {
@@ -922,10 +920,10 @@ test "renderRubyProfile grants write_dirs for reading and writing" {
     defer std.testing.allocator.free(profile);
     // Both roots sit under the read-data deny list, so a grant in only one
     // section would leave a cask step unable to open what it may write.
-    const write_start = std.mem.indexOf(u8, profile, "(allow file-write*").?;
+    const write_start = std.mem.find(u8, profile, "(allow file-write*").?;
     for ([_][]const u8{ "(subpath \"/Users/me/Library\")", "(subpath \"/Applications\")" }) |rule| {
-        try std.testing.expect(std.mem.indexOf(u8, profile[0..write_start], rule) != null);
-        try std.testing.expect(std.mem.indexOf(u8, profile[write_start..], rule) != null);
+        try std.testing.expect(std.mem.find(u8, profile[0..write_start], rule) != null);
+        try std.testing.expect(std.mem.find(u8, profile[write_start..], rule) != null);
     }
 }
 
@@ -937,8 +935,8 @@ test "renderRubyProfile denies deny_write_dirs after the write grant they sit un
         .{ .write_dirs = &.{"/Users/me/Library"}, .deny_write_dirs = &.{"/Users/me/Library/Keychains"} },
     );
     defer std.testing.allocator.free(profile);
-    const grant = std.mem.lastIndexOf(u8, profile, "(subpath \"/Users/me/Library\")").?;
-    const deny = std.mem.indexOf(u8, profile, "(deny file-write*\n  (subpath \"/Users/me/Library/Keychains\")").?;
+    const grant = std.mem.findLast(u8, profile, "(subpath \"/Users/me/Library\")").?;
+    const deny = std.mem.find(u8, profile, "(deny file-write*\n  (subpath \"/Users/me/Library/Keychains\")").?;
     try std.testing.expect(deny > grant);
 }
 
@@ -958,10 +956,10 @@ test "renderRubyProfile also grants read_dirs under their resolved form" {
 
     // /tmp resolves to /private/tmp; without the resolved grant a Ruby
     // living under a symlinked prefix is denied its own files.
-    const lit = try std.fmt.allocPrint(a, "(subpath \"{s}\")", .{s.base});
-    const res = try std.fmt.allocPrint(a, "(subpath \"/private{s}\")", .{s.base});
-    try std.testing.expect(std.mem.indexOf(u8, profile, lit) != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, res) != null);
+    const lit = try a.print("(subpath \"{s}\")", .{s.base});
+    const res = try a.print("(subpath \"/private{s}\")", .{s.base});
+    try std.testing.expect(std.mem.find(u8, profile, lit) != null);
+    try std.testing.expect(std.mem.find(u8, profile, res) != null);
 }
 
 test "renderRubyProfile rejects an unsafe read_dirs entry" {
@@ -991,12 +989,12 @@ test "renderRubyProfile denies mach-lookup by default and allowlists the platfor
     defer std.testing.allocator.free(profile);
     // A blanket grant lets a post_install reach any daemon (the pasteboard
     // server, for one); the allowlist must follow the deny so it wins.
-    const deny = std.mem.indexOf(u8, profile, "(deny mach-lookup)") orelse return error.MissingDeny;
-    const allow = std.mem.indexOf(u8, profile, "(allow mach-lookup\n") orelse return error.MissingAllowlist;
+    const deny = std.mem.find(u8, profile, "(deny mach-lookup)") orelse return error.MissingDeny;
+    const allow = std.mem.find(u8, profile, "(allow mach-lookup\n") orelse return error.MissingAllowlist;
     try std.testing.expect(allow > deny);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow mach-lookup)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(global-name \"com.apple.bsd.dirhelper\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(debug deny)") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(allow mach-lookup)") == null);
+    try std.testing.expect(std.mem.find(u8, profile, "(global-name \"com.apple.bsd.dirhelper\")") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(debug deny)") != null);
 }
 
 test "renderRubyProfile grants IPC only when allow_ipc is set" {
@@ -1008,9 +1006,9 @@ test "renderRubyProfile grants IPC only when allow_ipc is set" {
     );
     defer std.testing.allocator.free(profile);
     // The database initialisers need SysV/POSIX shm + SysV sem.
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(allow ipc-sysv-shm)") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(allow ipc-posix-shm)") != null);
+    try std.testing.expect(std.mem.find(u8, profile, "(allow ipc-sysv-sem)") != null);
 }
 
 // The kernel matches subpath filters against resolved vnode paths, so a
@@ -1034,15 +1032,15 @@ test "renderRubyProfile also grants writes under the resolved roots for symlinke
     defer std.testing.allocator.free(profile);
 
     // Literal rules stay (fail-open to today's behaviour)...
-    const lit_etc = try std.fmt.allocPrint(a, "(subpath \"{s}/etc\")", .{s.base});
-    const lit_keg = try std.fmt.allocPrint(a, "(subpath \"{s}\")", .{keg});
-    try std.testing.expect(std.mem.indexOf(u8, profile, lit_etc) != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, lit_keg) != null);
+    const lit_etc = try a.print("(subpath \"{s}/etc\")", .{s.base});
+    const lit_keg = try a.print("(subpath \"{s}\")", .{keg});
+    try std.testing.expect(std.mem.find(u8, profile, lit_etc) != null);
+    try std.testing.expect(std.mem.find(u8, profile, lit_keg) != null);
     // ...and the resolved prefix is granted too.
-    const res_etc = try std.fmt.allocPrint(a, "(subpath \"/private{s}/etc\")", .{s.base});
-    const res_var = try std.fmt.allocPrint(a, "(subpath \"/private{s}/var\")", .{s.base});
-    try std.testing.expect(std.mem.indexOf(u8, profile, res_etc) != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, res_var) != null);
+    const res_etc = try a.print("(subpath \"/private{s}/etc\")", .{s.base});
+    const res_var = try a.print("(subpath \"/private{s}/var\")", .{s.base});
+    try std.testing.expect(std.mem.find(u8, profile, res_etc) != null);
+    try std.testing.expect(std.mem.find(u8, profile, res_var) != null);
 }
 
 test "renderRubyProfile does not duplicate rules for already-resolved roots" {

@@ -27,16 +27,16 @@ pub const Resolution = struct {
 /// `MALT_PREFIX` works.
 pub fn resolveFromTarget(target: []const u8) ResolveError!Resolution {
     const cellar_marker = "/Cellar/";
-    const idx = std.mem.indexOf(u8, target, cellar_marker) orelse
+    const idx = std.mem.find(u8, target, cellar_marker) orelse
         return ResolveError.NotACellarPath;
     const after = target[idx + cellar_marker.len ..];
-    const name_end = std.mem.indexOfScalar(u8, after, '/') orelse
+    const name_end = std.mem.findScalar(u8, after, '/') orelse
         return ResolveError.MalformedCellarPath;
     const name = after[0..name_end];
     if (name.len == 0) return ResolveError.MalformedCellarPath;
 
     const ver_and_rest = after[name_end + 1 ..];
-    const ver_end = std.mem.indexOfScalar(u8, ver_and_rest, '/') orelse ver_and_rest.len;
+    const ver_end = std.mem.findScalar(u8, ver_and_rest, '/') orelse ver_and_rest.len;
     const version = ver_and_rest[0..ver_end];
     if (version.len == 0) return ResolveError.MalformedCellarPath;
 
@@ -106,7 +106,7 @@ pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u
     const link_path = if (target_arg[0] == '/')
         target_arg
     else
-        std.fmt.bufPrint(&link_buf, "{s}/bin/{s}", .{ prefix, target_arg }) catch {
+        std.mem.print(&link_buf, "{s}/bin/{s}", .{ prefix, target_arg }) catch {
             // Only triggers on a name that overflows max_path_bytes; the underlying error is OOM-ish, not informative.
             output.err("name too long: {s}", .{target_arg});
             return error.Aborted;
@@ -246,6 +246,6 @@ test "encodeHuman in colorize mode wraps name and version in bold codes" {
         .version = "1.7.1",
         .keg = "/opt/malt/Cellar/jq/1.7.1",
     }, true);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "\x1b[1m") != null);
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "Keg:") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "\x1b[1m") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "Keg:") != null);
 }

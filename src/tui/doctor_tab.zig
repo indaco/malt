@@ -378,7 +378,7 @@ fn buildCountsLegend(lb: *tab.Frame, c: Counts) void {
     lb.put("  ");
     lb.put(color.roleCode(.muted));
     var nbuf: [32]u8 = undefined;
-    lb.put(std.fmt.bufPrint(&nbuf, "({d} checks)", .{c.total()}) catch "");
+    lb.put(std.mem.print(&nbuf, "({d} checks)", .{c.total()}) catch "");
     lb.put(color.Style.reset.code());
 }
 
@@ -389,7 +389,7 @@ fn buildPlainCount(lb: *tab.Frame, sev: Severity, count: usize) void {
     lb.put(glyph(sev));
     lb.put(color.Style.reset.code());
     var nbuf: [16]u8 = undefined;
-    lb.put(std.fmt.bufPrint(&nbuf, " {d}", .{count}) catch "");
+    lb.put(std.mem.print(&nbuf, " {d}", .{count}) catch "");
 }
 
 fn buildPlainCounts(lb: *tab.Frame, c: Counts) void {
@@ -411,7 +411,7 @@ fn buildFixable(lb: *tab.Frame, c: Counts) void {
     const manual = c.attention() - c.fixable; // fixable ⊆ attention, so this can't underflow
     lb.put(color.roleCode(.muted));
     var nbuf: [48]u8 = undefined;
-    lb.put(std.fmt.bufPrint(&nbuf, "{d} auto-fixable · {d} manual", .{ c.fixable, manual }) catch "");
+    lb.put(std.mem.print(&nbuf, "{d} auto-fixable · {d} manual", .{ c.fixable, manual }) catch "");
     lb.put(color.Style.reset.code());
 }
 
@@ -485,7 +485,7 @@ fn buildReclaimHint(lb: *tab.Frame, hint: []const u8) void {
 fn buildCaskBullet(lb: *tab.Frame, rc: Reclaim) void {
     var lblbuf: [48]u8 = undefined;
     const label = if (rc.retained_versions > 0)
-        std.fmt.bufPrint(&lblbuf, "cask history ({d} old versions)", .{rc.retained_versions}) catch "cask history"
+        std.mem.print(&lblbuf, "cask history ({d} old versions)", .{rc.retained_versions}) catch "cask history"
     else
         "cask history";
     buildReclaimBullet(lb, rc.cask_bytes, label);
@@ -694,7 +694,7 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (sel) |fnd| {
         var fix_buf: [96]u8 = undefined;
         const fix_value = if (fnd.fixable)
-            std.fmt.bufPrint(&fix_buf, "f → mt doctor --fix {s}", .{doctor_json.fixClassTag(fnd.fix_class)}) catch "f: fix"
+            std.mem.print(&fix_buf, "f → mt doctor --fix {s}", .{doctor_json.fixClassTag(fnd.fix_class)}) catch "f: fix"
         else
             "not auto-fixable";
         const fields = [_]detail_pane.Field{
@@ -721,7 +721,7 @@ fn renderAllClear(f: *tab.Frame, rect: tab.Rect, counts: Counts) void {
     line.put(glyph(.ok));
     line.put(" ");
     var nbuf: [48]u8 = undefined;
-    line.put(std.fmt.bufPrint(&nbuf, "All clear - {d} checks passed, nothing to fix.", .{counts.total()}) catch "");
+    line.put(std.mem.print(&nbuf, "All clear - {d} checks passed, nothing to fix.", .{counts.total()}) catch "");
     line.put(color.Style.reset.code());
     paintBandLine(f, rect, rect.row, line.slice());
 }
@@ -895,13 +895,13 @@ test "render lists findings with a severity glyph and title" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 16 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "✗") != null); // err glyph
-    try testing.expect(std.mem.indexOf(u8, out, "⚠") != null); // warn glyph
-    try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // ok glyph
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.red.code()) != null);
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.yellow.code()) != null);
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.green.code()) != null);
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") != null);
+    try testing.expect(std.mem.find(u8, out, "✗") != null); // err glyph
+    try testing.expect(std.mem.find(u8, out, "⚠") != null); // warn glyph
+    try testing.expect(std.mem.find(u8, out, "✓") != null); // ok glyph
+    try testing.expect(std.mem.find(u8, out, color.Style.red.code()) != null);
+    try testing.expect(std.mem.find(u8, out, color.Style.yellow.code()) != null);
+    try testing.expect(std.mem.find(u8, out, color.Style.green.code()) != null);
 }
 
 test "render groups errors above ok findings for scan-ability" {
@@ -910,8 +910,8 @@ test "render groups errors above ok findings for scan-ability" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
     const out = f.slice();
-    const err_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
-    const ok_at = std.mem.indexOf(u8, out, "MALT_PREFIX").?;
+    const err_at = std.mem.find(u8, out, "SQLite integrity").?;
+    const ok_at = std.mem.find(u8, out, "MALT_PREFIX").?;
     try testing.expect(err_at < ok_at); // the err finding paints before the ok one
 }
 
@@ -921,7 +921,7 @@ test "selecting a finding shows its detail" {
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 1; // orphaned_store_entries
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "3 orphaned entries") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "3 orphaned entries") != null);
 }
 
 test "a fixable selection spells out the delegated fix in the detail pane" {
@@ -932,11 +932,11 @@ test "a fixable selection spells out the delegated fix in the detail pane" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     // The detail pane names the exact delegated command, with the class token;
     // the `f` key itself now lives in the shared footer, not the tab body.
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "mt doctor --fix orphaned_store") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "mt doctor --fix orphaned_store") != null);
 }
 
 test "footerHint exposes the fix key for the shared footer" {
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "f: fix") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "f: fix") != null);
 }
 
 test "a non-fixable selection shows guidance, not the f key" {
@@ -946,8 +946,8 @@ test "a non-fixable selection shows guidance, not the f key" {
     s.chrome.view.selected = 0; // sqlite_integrity — not fixable
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "f: fix") == null); // no fix key
-    try testing.expect(std.mem.indexOf(u8, out, "not auto-fixable") != null); // guidance
+    try testing.expect(std.mem.find(u8, out, "f: fix") == null); // no fix key
+    try testing.expect(std.mem.find(u8, out, "not auto-fixable") != null); // guidance
 }
 
 test "render highlights the selected row" {
@@ -956,7 +956,7 @@ test "render highlights the selected row" {
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "render narrows to the filter" {
@@ -966,8 +966,8 @@ test "render narrows to the filter" {
     s.chrome.filter.push("lock");
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Stale lock") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") == null); // filtered out
+    try testing.expect(std.mem.find(u8, out, "Stale lock") != null);
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") == null); // filtered out
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -988,8 +988,8 @@ test "a hostile finding title cannot inject a control sequence into the frame" {
     const s: State = .{ .items = &evil };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
-    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+    try testing.expect(std.mem.find(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
+    try testing.expect(std.mem.findScalar(u8, out, 0x07) == null); // BEL dropped
 }
 
 test "render on an empty list shows the no-findings placeholder, not a blank pane" {
@@ -998,11 +998,11 @@ test "render on an empty list shows the no-findings placeholder, not a blank pan
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 }); // must not trap
     const out = f.slice();
-    try std.testing.expect(std.mem.indexOf(u8, out, "No findings") != null);
+    try std.testing.expect(std.mem.find(u8, out, "No findings") != null);
     // No-data is not a verdict: neither the "all checks passed" banner nor the
     // all-clear line may appear — we can't vouch for checks we never received.
-    try std.testing.expect(std.mem.indexOf(u8, out, "all checks passed") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "All clear") == null);
+    try std.testing.expect(std.mem.find(u8, out, "all checks passed") == null);
+    try std.testing.expect(std.mem.find(u8, out, "All clear") == null);
 }
 
 test "render shows an all-clear summary when every check passed, not a per-check list" {
@@ -1011,11 +1011,11 @@ test "render shows an all-clear summary when every check passed, not a per-check
     const s: State = .{ .items = &all_ok }; // 1 ok, 0 err, 0 warn
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1 checks passed") != null); // names the passed count
-    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.success)) != null); // success role
-    try testing.expect(std.mem.indexOf(u8, out, "all checks passed") == null); // the band verdict is collapsed away
-    try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") == null); // and so is the fixable line
+    try testing.expect(std.mem.find(u8, out, "All clear") != null);
+    try testing.expect(std.mem.find(u8, out, "1 checks passed") != null); // names the passed count
+    try testing.expect(std.mem.find(u8, out, color.roleCode(.success)) != null); // success role
+    try testing.expect(std.mem.find(u8, out, "all checks passed") == null); // the band verdict is collapsed away
+    try testing.expect(std.mem.find(u8, out, "auto-fixable") == null); // and so is the fixable line
 }
 
 test "the all-clear collapse keeps the reclaimable section but drops the band verdict" {
@@ -1026,10 +1026,10 @@ test "the all-clear collapse keeps the reclaimable section but drops the band ve
     const s: State = .{ .items = &all_ok, .stats = .{ .cask_bytes = 2048, .retained_versions = 1 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null); // the calm summary
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null); // reclaimable kept
-    try testing.expect(std.mem.indexOf(u8, out, "all checks passed") == null); // verdict dropped
-    try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") == null); // fixable line dropped
+    try testing.expect(std.mem.find(u8, out, "All clear") != null); // the calm summary
+    try testing.expect(std.mem.find(u8, out, "Reclaimable:") != null); // reclaimable kept
+    try testing.expect(std.mem.find(u8, out, "all checks passed") == null); // verdict dropped
+    try testing.expect(std.mem.find(u8, out, "auto-fixable") == null); // fixable line dropped
 }
 
 test "an active filter matching only ok findings lists them, never the all-clear summary" {
@@ -1039,8 +1039,8 @@ test "an active filter matching only ok findings lists them, never the all-clear
     s.chrome.filter.push("malt"); // matches only MALT_PREFIX (ok)
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "All clear") == null); // "N passed" can't mean the whole run under a filter
-    try testing.expect(std.mem.indexOf(u8, out, "MALT_PREFIX") != null); // the matching ok row is still listed
+    try testing.expect(std.mem.find(u8, out, "All clear") == null); // "N passed" can't mean the whole run under a filter
+    try testing.expect(std.mem.find(u8, out, "MALT_PREFIX") != null); // the matching ok row is still listed
 }
 
 test "the all-clear summary truncates on a narrow pane" {
@@ -1049,8 +1049,8 @@ test "the all-clear summary truncates on a narrow pane" {
     const s: State = .{ .items = &all_ok };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 18, .height = 4 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null); // the verdict survives the cut
-    try testing.expect(std.mem.indexOf(u8, out, "nothing to fix.") == null); // the tail is dropped, never wrapped
+    try testing.expect(std.mem.find(u8, out, "All clear") != null); // the verdict survives the cut
+    try testing.expect(std.mem.find(u8, out, "nothing to fix.") == null); // the tail is dropped, never wrapped
 }
 
 test "an active filter with no matches still shows No matches, never the all-clear line" {
@@ -1060,8 +1060,8 @@ test "an active filter with no matches still shows No matches, never the all-cle
     s.chrome.filter.push("zzz"); // matches nothing
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "No matches.") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "All clear") == null);
+    try testing.expect(std.mem.find(u8, out, "No matches.") != null);
+    try testing.expect(std.mem.find(u8, out, "All clear") == null);
 }
 
 test "the all-clear summary renders at height 1 without crashing" {
@@ -1069,7 +1069,7 @@ test "the all-clear summary renders at height 1 without crashing" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &all_ok };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // band suppressed; the list is the floor
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "All clear") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "All clear") != null);
 }
 
 test "render clamps to a height of one without crashing" {
@@ -1094,7 +1094,7 @@ test "the band's status banner reads the worst severity present" {
         var f: tab.Frame = .{ .buf = &buf };
         const s: State = .{ .items = c.items };
         render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
-        try testing.expect(std.mem.indexOf(u8, f.slice(), c.verdict) != null);
+        try testing.expect(std.mem.find(u8, f.slice(), c.verdict) != null);
     }
 }
 
@@ -1104,8 +1104,8 @@ test "the band histogram shows a scaled bar and count per severity" {
     const s: State = .{ .items = &sample }; // 1 err, 2 warn, 1 ok
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "█") != null); // a composition bar is drawn
-    try testing.expect(std.mem.indexOf(u8, out, "2") != null); // the warn count (only the histogram carries it)
+    try testing.expect(std.mem.find(u8, out, "█") != null); // a composition bar is drawn
+    try testing.expect(std.mem.find(u8, out, "2") != null); // the warn count (only the histogram carries it)
 }
 
 // Count a composition-bar segment's cells. The banner and legend also carry these
@@ -1115,9 +1115,9 @@ test "the band histogram shows a scaled bar and count per severity" {
 fn segCells(out: []const u8, open: []const u8, close: []const u8) usize {
     var pat: [48]u8 = undefined;
     // 48 bytes always holds a role-code escape plus one `█`; overflow is a test bug.
-    const needle = std.fmt.bufPrint(&pat, "{s}█", .{open}) catch unreachable;
-    const s = (std.mem.indexOf(u8, out, needle) orelse return 0) + open.len;
-    const e = std.mem.indexOfPos(u8, out, s, close) orelse out.len;
+    const needle = std.mem.print(&pat, "{s}█", .{open}) catch unreachable;
+    const s = (std.mem.find(u8, out, needle) orelse return 0) + open.len;
+    const e = std.mem.findPos(u8, out, s, close) orelse out.len;
     return std.mem.count(u8, out[s..e], "█");
 }
 
@@ -1155,16 +1155,16 @@ test "the histogram surfaces the total checks count alongside the bar" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &skew_0_2_16 }; // 18 checks total
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "18 checks") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "18 checks") != null);
 }
 
 // The 1-based screen row of the band line that paints `needle`, read from the
 // `CUP` (`ESC [ row ; col H`) that positions it. Band text carries no capital `H`,
 // so the nearest `H` before the needle is that line's cursor move.
 fn bandRowOf(out: []const u8, needle: []const u8) u16 {
-    const at = std.mem.indexOf(u8, out, needle).?;
-    const h = std.mem.lastIndexOfScalar(u8, out[0..at], 'H').?;
-    const esc = std.mem.lastIndexOf(u8, out[0..h], "\x1b[").?;
+    const at = std.mem.find(u8, out, needle).?;
+    const h = std.mem.findScalarLast(u8, out[0..at], 'H').?;
+    const esc = std.mem.findLast(u8, out[0..h], "\x1b[").?;
     var row: u16 = 0;
     var i = esc + 2;
     while (out[i] >= '0' and out[i] <= '9') : (i += 1) row = row * 10 + (out[i] - '0');
@@ -1217,8 +1217,8 @@ test "the reclaimable bar is a contiguous two-tone stacked bar, not labelled rec
     // Cask leads in `secondary`, not `accent`, so the dominant block isn't the
     // selection-highlight colour.
     var pat: [64]u8 = undefined;
-    const seam = std.fmt.bufPrint(&pat, "█{s}█", .{color.roleCode(.accent)}) catch unreachable;
-    try testing.expect(std.mem.indexOf(u8, out, seam) != null);
+    const seam = std.mem.print(&pat, "█{s}█", .{color.roleCode(.accent)}) catch unreachable;
+    try testing.expect(std.mem.find(u8, out, seam) != null);
 }
 
 test "the band bars keep a fixed width instead of widening with the terminal" {
@@ -1241,8 +1241,8 @@ test "the counts legend spaces each glyph from its number" {
     const out = f.slice();
     // The glyph's colour resets, then a space sets the number off: `⚠<reset> 2`.
     var pat: [48]u8 = undefined;
-    const warn = std.fmt.bufPrint(&pat, "⚠{s} 2", .{color.Style.reset.code()}) catch unreachable;
-    try testing.expect(std.mem.indexOf(u8, out, warn) != null);
+    const warn = std.mem.print(&pat, "⚠{s} 2", .{color.Style.reset.code()}) catch unreachable;
+    try testing.expect(std.mem.find(u8, out, warn) != null);
 }
 
 test "the reclaimable bullets left-align their sizes, each one space from its label" {
@@ -1258,8 +1258,8 @@ test "the reclaimable bullets left-align their sizes, each one space from its la
     const out = f.slice();
     // Every size starts right after the glyph and sits exactly one space from its
     // label — no alignment padding stretching the gap on the shorter figure.
-    try testing.expect(std.mem.indexOf(u8, out, "▸ 180.7 MB cask history") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "▸ 2.0 MB tap cache") != null);
+    try testing.expect(std.mem.find(u8, out, "▸ 180.7 MB cask history") != null);
+    try testing.expect(std.mem.find(u8, out, "▸ 2.0 MB tap cache") != null);
 }
 
 test "the band histogram degrades to a plain count line on a narrow pane" {
@@ -1268,8 +1268,8 @@ test "the band histogram degrades to a plain count line on a narrow pane" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 30, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "█") == null); // bars shed at narrow width
-    try testing.expect(std.mem.indexOf(u8, out, "2") != null); // the warn count still reported
+    try testing.expect(std.mem.find(u8, out, "█") == null); // bars shed at narrow width
+    try testing.expect(std.mem.find(u8, out, "2") != null); // the warn count still reported
 }
 
 test "the band's fixable line splits auto-fixable from manual over the attention set" {
@@ -1279,8 +1279,8 @@ test "the band's fixable line splits auto-fixable from manual over the attention
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "2 auto-fixable") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1 manual") != null);
+    try testing.expect(std.mem.find(u8, out, "2 auto-fixable") != null);
+    try testing.expect(std.mem.find(u8, out, "1 manual") != null);
 }
 
 test "on a height-1 rect only the findings list renders, never the band" {
@@ -1289,8 +1289,8 @@ test "on a height-1 rect only the findings list renders, never the band" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "issues found") == null); // band suppressed
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // a list row survives
+    try testing.expect(std.mem.find(u8, out, "issues found") == null); // band suppressed
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") != null); // a list row survives
 }
 
 test "a short pane sheds the histogram but keeps the verdict, CTA, and the list" {
@@ -1299,10 +1299,10 @@ test "a short pane sheds the histogram but keeps the verdict, CTA, and the list"
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 5 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "█") == null); // histogram shed first (lowest signal)
-    try testing.expect(std.mem.indexOf(u8, out, "issues found") != null); // verdict survives (highest signal)
-    try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") != null); // actionable CTA survives
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list is the floor
+    try testing.expect(std.mem.find(u8, out, "█") == null); // histogram shed first (lowest signal)
+    try testing.expect(std.mem.find(u8, out, "issues found") != null); // verdict survives (highest signal)
+    try testing.expect(std.mem.find(u8, out, "auto-fixable") != null); // actionable CTA survives
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") != null); // the list is the floor
 }
 
 test "the band is enclosed by a dim rule above and below" {
@@ -1311,10 +1311,10 @@ test "the band is enclosed by a dim rule above and below" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    const top_rule = std.mem.indexOf(u8, out, "─") orelse return error.NoTopRule;
-    const verdict = std.mem.indexOf(u8, out, "issues found").?;
-    const bottom_rule = std.mem.indexOfPos(u8, out, verdict, "─") orelse return error.NoBottomRule;
-    const first_title = std.mem.indexOf(u8, out, "SQLite integrity").?;
+    const top_rule = std.mem.find(u8, out, "─") orelse return error.NoTopRule;
+    const verdict = std.mem.find(u8, out, "issues found").?;
+    const bottom_rule = std.mem.findPos(u8, out, verdict, "─") orelse return error.NoBottomRule;
+    const first_title = std.mem.find(u8, out, "SQLite integrity").?;
     try testing.expect(top_rule < verdict); // rule above the banner
     try testing.expect(verdict < bottom_rule); // rule below the band content
     try testing.expect(bottom_rule < first_title); // and the list follows the lower rule
@@ -1327,8 +1327,8 @@ test "the band needs room for its enclosure, else only the list renders" {
     // 3 rows can't hold the enclosed band (rule+banner+rule) plus a list row.
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 3 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "issues found") == null); // band dropped
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // list survives
+    try testing.expect(std.mem.find(u8, out, "issues found") == null); // band dropped
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") != null); // list survives
 }
 
 test "the band paints above the findings list" {
@@ -1337,9 +1337,9 @@ test "the band paints above the findings list" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "issues found") != null); // banner present
-    const verdict_at = std.mem.indexOf(u8, out, "issues found").?;
-    const first_title_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
+    try testing.expect(std.mem.find(u8, out, "issues found") != null); // banner present
+    const verdict_at = std.mem.find(u8, out, "issues found").?;
+    const first_title_at = std.mem.find(u8, out, "SQLite integrity").?;
     try testing.expect(verdict_at < first_title_at); // banner precedes the list
 }
 
@@ -1357,19 +1357,19 @@ test "reclaimable breaks into a header total plus one labelled bullet per source
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
     // Header carries the *total* only (1.2 GB + 88 MB ≈ 1.3 GB), no command hint.
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable: 1.3 GB") != null);
+    try testing.expect(std.mem.find(u8, out, "Reclaimable: 1.3 GB") != null);
     // One bullet per non-zero source, each with its own size, label, and the hint
     // that actually reclaims it.
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "▸"));
-    try testing.expect(std.mem.indexOf(u8, out, "1.2 GB") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "cask history (4 old versions)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --old-versions") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "88.0 MB") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "tap cache") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --cache") != null);
+    try testing.expect(std.mem.find(u8, out, "1.2 GB") != null);
+    try testing.expect(std.mem.find(u8, out, "cask history (4 old versions)") != null);
+    try testing.expect(std.mem.find(u8, out, "→ mt purge --old-versions") != null);
+    try testing.expect(std.mem.find(u8, out, "88.0 MB") != null);
+    try testing.expect(std.mem.find(u8, out, "tap cache") != null);
+    try testing.expect(std.mem.find(u8, out, "→ mt purge --cache") != null);
     // The advisory rides in the band, above the findings list.
-    const reclaim_at = std.mem.indexOf(u8, out, "Reclaimable:").?;
-    const first_title_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
+    const reclaim_at = std.mem.find(u8, out, "Reclaimable:").?;
+    const first_title_at = std.mem.find(u8, out, "SQLite integrity").?;
     try testing.expect(reclaim_at < first_title_at);
 }
 
@@ -1385,13 +1385,13 @@ test "the cask-inclusive total never wears the cache-only purge hint" {
     const out = f.slice();
     // The header line (everything before the first bullet) is the combined total;
     // pinning `--cache` to it would claim it reclaims cask history too. It must not.
-    const header = out[0..std.mem.indexOf(u8, out, "▸").?];
-    try testing.expect(std.mem.indexOf(u8, header, "Reclaimable:") != null);
-    try testing.expect(std.mem.indexOf(u8, header, "mt purge") == null);
+    const header = out[0..std.mem.find(u8, out, "▸").?];
+    try testing.expect(std.mem.find(u8, header, "Reclaimable:") != null);
+    try testing.expect(std.mem.find(u8, header, "mt purge") == null);
     // `--cache` appears only after the tap-cache label, never the cask one.
-    const cache_at = std.mem.indexOf(u8, out, "--cache").?;
-    const tap_at = std.mem.indexOf(u8, out, "tap cache").?;
-    const cask_at = std.mem.indexOf(u8, out, "cask history").?;
+    const cache_at = std.mem.find(u8, out, "--cache").?;
+    const tap_at = std.mem.find(u8, out, "tap cache").?;
+    const cask_at = std.mem.find(u8, out, "cask history").?;
     try testing.expect(tap_at < cache_at and cask_at < tap_at);
 }
 
@@ -1401,12 +1401,12 @@ test "a cask-only store shows a header, one cask bullet, and no bar" {
     const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable: 2.0 KB") != null);
+    try testing.expect(std.mem.find(u8, out, "Reclaimable: 2.0 KB") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "▸")); // one source, one bullet
-    try testing.expect(std.mem.indexOf(u8, out, "cask history (2 old versions)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --old-versions") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "tap cache") == null); // nothing to reclaim there
-    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.secondary)) == null); // single source → no bar
+    try testing.expect(std.mem.find(u8, out, "cask history (2 old versions)") != null);
+    try testing.expect(std.mem.find(u8, out, "→ mt purge --old-versions") != null);
+    try testing.expect(std.mem.find(u8, out, "tap cache") == null); // nothing to reclaim there
+    try testing.expect(std.mem.find(u8, out, color.roleCode(.secondary)) == null); // single source → no bar
 }
 
 test "a cache-only store shows a header, one tap bullet, and no bar" {
@@ -1415,12 +1415,12 @@ test "a cache-only store shows a header, one tap bullet, and no bar" {
     const s: State = .{ .items = &sample, .stats = .{ .tap_cache_bytes = 512 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable: 512.0 B") != null);
+    try testing.expect(std.mem.find(u8, out, "Reclaimable: 512.0 B") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "▸"));
-    try testing.expect(std.mem.indexOf(u8, out, "tap cache") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --cache") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "cask history") == null);
-    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.secondary)) == null); // single source → no bar
+    try testing.expect(std.mem.find(u8, out, "tap cache") != null);
+    try testing.expect(std.mem.find(u8, out, "→ mt purge --cache") != null);
+    try testing.expect(std.mem.find(u8, out, "cask history") == null);
+    try testing.expect(std.mem.find(u8, out, color.roleCode(.secondary)) == null); // single source → no bar
 }
 
 test "zero reclaimable bytes suppress the advisory, and the all-clear state stays clean" {
@@ -1430,8 +1430,8 @@ test "zero reclaimable bytes suppress the advisory, and the all-clear state stay
     const s: State = .{ .items = &all_ok };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") == null); // no nagging row
-    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null); // all-clear reads cleanly
+    try testing.expect(std.mem.find(u8, out, "Reclaimable:") == null); // no nagging row
+    try testing.expect(std.mem.find(u8, out, "All clear") != null); // all-clear reads cleanly
 }
 
 test "the band suppresses the advisory at height 1, leaving only the list" {
@@ -1440,8 +1440,8 @@ test "the band suppresses the advisory at height 1, leaving only the list" {
     const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") == null); // band dropped whole
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // a list row survives
+    try testing.expect(std.mem.find(u8, out, "Reclaimable:") == null); // band dropped whole
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") != null); // a list row survives
 }
 
 test "with both figures present the band shows a two-tone reclaimable ratio bar" {
@@ -1451,8 +1451,8 @@ test "with both figures present the band shows a two-tone reclaimable ratio bar"
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 });
     const out = f.slice();
     // The ratio bar is the only band element painted in the secondary role.
-    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.secondary)) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "█") != null);
+    try testing.expect(std.mem.find(u8, out, color.roleCode(.secondary)) != null);
+    try testing.expect(std.mem.find(u8, out, "█") != null);
 }
 
 test "the ratio bar survives pathologically large byte figures without overflowing" {
@@ -1465,7 +1465,7 @@ test "the ratio bar survives pathologically large byte figures without overflowi
         .tap_cache_bytes = std.math.maxInt(u64) - 1,
     } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 }); // must not trap
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.roleCode(.secondary)) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.roleCode(.secondary)) != null);
 }
 
 test "a single reclaimable figure shows no ratio bar — there is nothing to compare" {
@@ -1474,7 +1474,7 @@ test "a single reclaimable figure shows no ratio bar — there is nothing to com
     const s: State = .{ .items = &all_ok, .stats = .{ .cask_bytes = 2048, .retained_versions = 1 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     // Cask-only: no second value, so no bar → the secondary role appears nowhere.
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.roleCode(.secondary)) == null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.roleCode(.secondary)) == null);
 }
 
 test "the purge guidance is inert: f on a non-fixable selection stays a no-op with stats present" {
@@ -1491,8 +1491,8 @@ test "the reclaimable bullet glyph falls back to ASCII when emoji are off" {
     const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "▸") == null); // the emoji bullet is gone
-    try testing.expect(std.mem.indexOf(u8, out, "> 2.0 KB") != null); // its basic-tier `>` stands in
+    try testing.expect(std.mem.find(u8, out, "▸") == null); // the emoji bullet is gone
+    try testing.expect(std.mem.find(u8, out, "> 2.0 KB") != null); // its basic-tier `>` stands in
 }
 
 test "the reclaimable section renders on a narrow pane without wrapping into the list" {
@@ -1505,8 +1505,8 @@ test "the reclaimable section renders on a narrow pane without wrapping into the
     } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 48, .height = 24 }); // ≤50 cols, must not crash
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null); // header survives the cut
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list stays the floor
+    try testing.expect(std.mem.find(u8, out, "Reclaimable:") != null); // header survives the cut
+    try testing.expect(std.mem.find(u8, out, "SQLite integrity") != null); // the list stays the floor
 }
 
 test "a loaded doctor read repoints findings + reclaimable stats; a cleared read empties" {

@@ -236,8 +236,8 @@ test "banner sanitizes a child-derived op so a package name cannot inject escape
     var b: Banner = .{};
     // A hostile tap could name a package with an OSC title-set; it must be dropped.
     b.set("info for \x1b]0;pwn\x07evil failed", "BadJson");
-    try std.testing.expect(std.mem.indexOfScalar(u8, b.slice(), 0x1b) == null); // no stray ESC
-    try std.testing.expect(std.mem.indexOf(u8, b.slice(), "evil failed: BadJson") != null);
+    try std.testing.expect(std.mem.findScalar(u8, b.slice(), 0x1b) == null); // no stray ESC
+    try std.testing.expect(std.mem.find(u8, b.slice(), "evil failed: BadJson") != null);
 }
 
 test "banner truncates an over-cap op to the fixed buffer without overflow" {

@@ -167,7 +167,7 @@ const FixtureServer = struct {
             // Every other id is a real but low advisory, so filters and the
             // detail cap can be told apart from "OSV knows nothing".
             var body: [256]u8 = undefined;
-            const json = try std.fmt.bufPrint(&body, "{{\"id\":\"{s}\",\"database_specific\":{{\"severity\":\"LOW\"}}}}", .{target["/vulns/".len..]});
+            const json = try std.mem.print(&body, "{{\"id\":\"{s}\",\"database_specific\":{{\"severity\":\"LOW\"}}}}", .{target["/vulns/".len..]});
             try req.respond(json, .{});
         } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/cliamp.rb") or
             std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/cliamp2.rb"))
@@ -239,7 +239,7 @@ const Harness = struct {
         h.prefix = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(io, h.prefix) catch {};
         for ([_][]const u8{ "db", "cache" }) |sub| {
-            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ h.prefix, sub });
+            const dir = try allocator.print("{s}/{s}", .{ h.prefix, sub });
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(io, dir);
         }
@@ -248,7 +248,7 @@ const Harness = struct {
         var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
         h.listener = try addr.listen(io, .{ .reuse_address = true });
         const port = h.listener.socket.address.getPort();
-        h.base_len = (try std.fmt.bufPrint(&h.base_url, "http://127.0.0.1:{d}", .{port})).len;
+        h.base_len = (try std.mem.print(&h.base_url, "http://127.0.0.1:{d}", .{port})).len;
         h.server = .{ .io = io, .listener = &h.listener };
         h.thread = try std.Thread.spawn(.{}, FixtureServer.serve, .{&h.server});
         return h;
@@ -274,12 +274,12 @@ const Harness = struct {
     /// `sha` null seeds the row the way a pre-tracking install left it.
     fn seedTapAt(h: *Harness, tap: []const u8, sha: ?[]const u8, kegs: []const []const u8) !void {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{h.prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{h.prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
         for (kegs) |spec| {
-            const at = std.mem.indexOfScalar(u8, spec, '@').?;
+            const at = std.mem.findScalar(u8, spec, '@').?;
             const pkg = malt.formula.parsePkgVersion(spec[at + 1 ..]);
             var stmt = try db.prepare(
                 \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, tap, tap_commit_sha)
@@ -313,7 +313,7 @@ const Harness = struct {
         const io = h.threaded.io();
         h.run_seq += 1;
         var cap_buf: [512]u8 = undefined;
-        const cap_path = try std.fmt.bufPrint(&cap_buf, "{s}/stdout.{d}", .{ h.prefix, h.run_seq });
+        const cap_path = try std.mem.print(&cap_buf, "{s}/stdout.{d}", .{ h.prefix, h.run_seq });
         const cap = try test_io.cwd().createFile(io, cap_path, .{});
         defer cap.close(io);
 
@@ -371,11 +371,11 @@ test "vulns lists every open advisory for installed formulae, most severe first,
         lines.next().?,
     );
     try testing.expectEqualStrings("abcde  high      BREW-abcde-CVE-2020-36829", lines.next().?);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "curl") == null);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "abcde  -         BREW-abcde-CPANSA-Mojolicious-2021-02  Small sessions") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "curl") == null);
+    try testing.expect(std.mem.find(u8, r.stdout, "abcde  -         BREW-abcde-CPANSA-Mojolicious-2021-02  Small sessions") != null);
     const last_two = "BREW-abcde-CPANSA-Mojolicious-2021-02";
-    const last_pos = std.mem.indexOf(u8, r.stdout, last_two).?;
-    const critical_pos = std.mem.indexOf(u8, r.stdout, "BREW-abcde-CVE-2026-15747").?;
+    const last_pos = std.mem.find(u8, r.stdout, last_two).?;
+    const critical_pos = std.mem.find(u8, r.stdout, "BREW-abcde-CVE-2026-15747").?;
     try testing.expect(critical_pos < last_pos);
 }
 
@@ -401,8 +401,8 @@ test "vulns --severity=high drops medium and unlabelled advisories" {
 
     try testing.expectEqual(@as(?anyerror, error.Aborted), r.err);
     try testing.expectEqual(@as(usize, 3), countLines(r.stdout));
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "medium") == null);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "CPANSA") == null);
+    try testing.expect(std.mem.find(u8, r.stdout, "medium") == null);
+    try testing.expect(std.mem.find(u8, r.stdout, "CPANSA") == null);
 }
 
 test "vulns --json carries the schema, the installed version, and every open advisory" {
@@ -482,7 +482,7 @@ test "one failed fetch leaves the rest of the report intact and marks the scan i
     const j = try h.run(&.{}, true);
     defer testing.allocator.free(j.stdout);
     try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), j.err);
-    try testing.expect(std.mem.indexOf(u8, j.stdout, "\"unchecked\":[\"ghost\"]") != null);
+    try testing.expect(std.mem.find(u8, j.stdout, "\"unchecked\":[\"ghost\"]") != null);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, j.stdout, "\"name\":"));
 }
 
@@ -491,7 +491,7 @@ test "an unreadable database is an error, not an all-clear" {
     defer h.deinit();
     // A directory where the DB file should be cannot be opened as SQLite.
     var db_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrint(&db_buf, "{s}/db/malt.db", .{h.prefix});
+    const db_path = try std.mem.print(&db_buf, "{s}/db/malt.db", .{h.prefix});
     try test_io.cwd().createDirPath(h.threaded.io(), db_path);
 
     const r = try h.run(&.{}, false);
@@ -523,7 +523,7 @@ test "a revisioned keg reports its full installed version" {
 
     const r = try h.run(&.{}, true);
     defer testing.allocator.free(r.stdout);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"installed_version\":\"2.9.3_1\"") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"installed_version\":\"2.9.3_1\"") != null);
 }
 
 test "vulns rejects a severity outside the four labels" {
@@ -595,15 +595,15 @@ test "a tap keg whose recipe cannot be fetched is unchecked, never quietly uncov
     defer testing.allocator.free(r.stdout);
     try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), r.err);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.stdout, "\"name\":"));
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[\"ghost\"]") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"unchecked\":[\"ghost\"]") != null);
     // Only the --local keg has no recipe to resolve; machine readers get the
     // same coverage figure the human summary shows.
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"not_covered\":1") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"not_covered\":1") != null);
 
     // Naming formulae explicitly skips nothing, so nothing is reported as uncovered.
     const named = try h.run(&.{"curl"}, true);
     defer testing.allocator.free(named.stdout);
-    try testing.expect(std.mem.indexOf(u8, named.stdout, "\"not_covered\":0") != null);
+    try testing.expect(std.mem.find(u8, named.stdout, "\"not_covered\":0") != null);
 }
 
 test "a tap keg whose recipe declares sha256 :no_check is still scanned from its url" {
@@ -613,8 +613,8 @@ test "a tap keg whose recipe declares sha256 :no_check is still scanned from its
 
     const r = try h.run(&.{}, true);
     defer testing.allocator.free(r.stdout);
-    try testing.expect(std.mem.indexOf(u8, h.postBody(), "https://github.com/someone/nocheck") != null);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[]") != null);
+    try testing.expect(std.mem.find(u8, h.postBody(), "https://github.com/someone/nocheck") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"unchecked\":[]") != null);
 }
 
 test "a :latest tap keg is not covered, never reported clean nor a failed scan" {
@@ -637,7 +637,7 @@ test "a tap keg installed from Casks/ is scanned from the cask, not a same-named
     try h.seedTap("someone/tap", &.{"dual@1.0.0"});
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{h.prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{h.prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try db.exec("UPDATE kegs SET tap_rb_subtree = 'cask' WHERE name = 'dual';");
@@ -645,8 +645,8 @@ test "a tap keg installed from Casks/ is scanned from the cask, not a same-named
 
     const r = try h.run(&.{}, true);
     defer testing.allocator.free(r.stdout);
-    try testing.expect(std.mem.indexOf(u8, h.postBody(), "cask-side/dual") != null);
-    try testing.expect(std.mem.indexOf(u8, h.postBody(), "formula-side") == null);
+    try testing.expect(std.mem.find(u8, h.postBody(), "cask-side/dual") != null);
+    try testing.expect(std.mem.find(u8, h.postBody(), "formula-side") == null);
 }
 
 test "a tap keg is scanned against OSV from its recipe url" {
@@ -703,10 +703,10 @@ test "a tap keg named on the command line is scanned via OSV, not asked of the A
     try testing.expectEqual(@as(?anyerror, error.Aborted), r.err);
     // Recipe, batch query, one detail: no `/formula/cliamp.json` 404 in between.
     try testing.expectEqual(@as(u32, 3), h.requests());
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[]") != null);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"not_covered\":0") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"unchecked\":[]") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"not_covered\":0") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.stdout, "\"name\":"));
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"id\":\"GHSA-aaaa-bbbb-cccc\"") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"id\":\"GHSA-aaaa-bbbb-cccc\"") != null);
 }
 
 test "a tap keg recorded without its installed commit resolves the tap HEAD first" {
@@ -719,7 +719,7 @@ test "a tap keg recorded without its installed commit resolves the tap HEAD firs
     try testing.expectEqual(@as(?anyerror, error.Aborted), r.err);
     // HEAD lookup, recipe, batch query, one detail.
     try testing.expectEqual(@as(u32, 4), h.requests());
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"id\":\"GHSA-aaaa-bbbb-cccc\"") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"id\":\"GHSA-aaaa-bbbb-cccc\"") != null);
 }
 
 test "a named tap keg is still counted as uncovered offline rather than vanishing" {
@@ -744,7 +744,7 @@ test "an OSV outage marks every identified tap keg unchecked and leaves core row
     const r = try h.run(&.{}, true);
     defer testing.allocator.free(r.stdout);
     try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), r.err);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[\"cliamp\"]") != null);
+    try testing.expect(std.mem.find(u8, r.stdout, "\"unchecked\":[\"cliamp\"]") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.stdout, "\"name\":"));
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, r.stdout, "\"id\":"));
 }
@@ -814,7 +814,7 @@ test "--severity filters OSV rows the same way it filters API rows" {
     defer testing.allocator.free(r.stdout);
     try testing.expectEqual(@as(?anyerror, error.Aborted), r.err);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.stdout, "\"id\":"));
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "X-low") == null);
+    try testing.expect(std.mem.find(u8, r.stdout, "X-low") == null);
 }
 
 test "an interrupt during the OSV phase surfaces instead of a report that looks finished" {
@@ -880,5 +880,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, vulns.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--severty=high"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --severty=high") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --severty=high") != null);
 }

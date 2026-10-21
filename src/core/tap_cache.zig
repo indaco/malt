@@ -14,14 +14,14 @@ const artefact_cache = @import("artefact_cache.zig");
 /// access; surfaces `NoSpaceLeft` on buffer overflow so the caller
 /// can fail loud instead of stranding bytes at a truncated path.
 pub fn cachePath(buf: []u8, cache_dir: []const u8, sha256: []const u8, ext: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/Tap/{s}{s}", .{ cache_dir, sha256, ext });
+    return std.mem.print(buf, "{s}/Tap/{s}{s}", .{ cache_dir, sha256, ext });
 }
 
 /// Idempotent `mkdir -p` for `<cache>/Tap`. Recursive because nothing
 /// creates `$MALT_CACHE` itself; safe across concurrent installs.
 pub fn ensureCacheDir(io: std.Io, cache_dir: []const u8) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "{s}/Tap", .{cache_dir});
+    const dir = try std.mem.print(&buf, "{s}/Tap", .{cache_dir});
     try std.Io.Dir.cwd().createDirPath(io, dir);
 }
 
@@ -79,7 +79,7 @@ pub fn olderThan(now_secs: i64, mtime_secs: i64, max_age_days: i64) bool {
 /// parameter so tests can move the clock instead of back-dating files.
 pub fn usageUnder(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, now_secs: i64, max_age_days: i64) Usage {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&buf, "{s}/Tap", .{cache_dir}) catch return .{};
+    const dir_path = std.mem.print(&buf, "{s}/Tap", .{cache_dir}) catch return .{};
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return .{};
     defer dir.close(io);
     var walker = dir.walk(allocator) catch return .{};
@@ -115,8 +115,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -128,8 +127,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -194,7 +192,7 @@ test "exists: returns true when SHA-keyed entry is on disk" {
     try std.Io.Dir.cwd().createDirPath(io, cache_dir);
     try ensureCacheDir(io, cache_dir);
 
-    var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var entry_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const entry = try cachePath(&entry_buf, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))), ".zip");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     f.close(io);
@@ -236,10 +234,10 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
         try f.writeStreamingAll(io, "payload-bytes");
     }
 
-    var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try promoteStagingToCache(io, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("aa".*))), ".tar.gz", staging, &cache_buf);
 
-    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var want_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const want = try cachePath(&want_buf, cache_dir, std.mem.asBytes(&@as([32][2]u8, @splat("aa".*))), ".tar.gz");
     try std.testing.expectEqualStrings(want, cache_path);
 
@@ -280,7 +278,7 @@ test "usageUnder: zero usage when cache dir is absent" {
 }
 
 fn seedEntry(io: std.Io, s: *Scratch, comptime sha: []const u8, comptime size: usize) !void {
-    var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var entry_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const entry = try cachePath(&entry_buf, s.p("/cache"), sha, ".tar.gz");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     defer f.close(io);

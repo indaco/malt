@@ -97,7 +97,7 @@ const op_in_flight_note = "operation in progress — re-run after it completes";
 /// it would mask real findings until cleared. Mirrors `checkStaleLock`.
 pub fn operationInFlight(io: std.Io, prefix: []const u8) bool {
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
     const pid = lock_mod.LockFile.holderPid(io, lock_path) orelse return false;
     return pidAlive(pid);
 }
@@ -354,7 +354,7 @@ pub fn writeTapForgeJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void
 /// the whole doctor run. Free with `freeTaps`.
 fn collectTaps(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) ?[]tap_mod.TapInfo {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
     var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return null;
     defer db.close();
     schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return null;
@@ -639,7 +639,7 @@ pub fn emitFixHintIfNeeded(fix_requested: bool) void {
 /// bytes; `std.debug.print` would bypass the capture buffer.
 fn writeStyledDetail(text: []const u8) void {
     var line_buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "    - {s}\n", .{text}) catch return;
+    const line = std.mem.print(&line_buf, "    - {s}\n", .{text}) catch return;
     if (color.isColorEnabledForStderr()) {
         output.writeStderrAll(color.SemanticStyle.detail.code());
         output.writeStderrAll(line);
@@ -663,7 +663,7 @@ fn writeVerboseList(entries: []const []const u8) void {
 /// rejecting — and such a path names no real keg anyway, so it counts as
 /// absent instead of killing the check.
 fn absentOnDisk(io: std.Io, path: []const u8) bool {
-    if (!std.fs.path.isAbsolute(path)) return true;
+    if (!std.Io.Dir.path.isAbsolute(path)) return true;
     std.Io.Dir.accessAbsolute(io, path, .{}) catch return true;
     return false;
 }
@@ -678,10 +678,10 @@ fn freeOwnedStringList(allocator: std.mem.Allocator, list: *std.ArrayList([]u8))
 /// Returns null when the path has fewer than two slash-delimited
 /// segments — those are walker artefacts we ignore here.
 fn caskCellarKegKey(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const first_slash = std.mem.indexOfScalar(u8, path, '/') orelse return null;
+    const first_slash = std.mem.findScalar(u8, path, '/') orelse return null;
     const rest = path[first_slash + 1 ..];
-    const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-    return std.fmt.allocPrint(allocator, "{s} {s}", .{ path[0..first_slash], rest[0..second_slash] }) catch null;
+    const second_slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
+    return allocator.print("{s} {s}", .{ path[0..first_slash], rest[0..second_slash] }) catch null;
 }
 
 // ── individual checks ────────────────────────────────────────────────
@@ -691,7 +691,7 @@ fn caskCellarKegKey(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
 fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
     const is_default = std.mem.eql(u8, ctx.prefix, atomic.default_prefix);
     var pbuf: [600]u8 = undefined;
-    const detail = std.fmt.bufPrint(
+    const detail = std.mem.print(
         &pbuf,
         "{s} {s}",
         .{ ctx.prefix, if (is_default) "(default)" else "(from MALT_PREFIX)" },
@@ -722,13 +722,13 @@ fn checkDatabaseSchema(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .err_status, "Prefix path too long");
         return .err_status;
     };
     var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         // Nothing installed yet; the directory row flags the missing db/.
-        if (prefix_path.dirMissing(ctx.io, std.fs.path.dirname(db_path).?)) {
+        if (prefix_path.dirMissing(ctx.io, std.Io.Dir.path.dirname(db_path).?)) {
             printCheck(name, .ok, null);
             return .ok;
         }
@@ -765,10 +765,10 @@ fn checkDirectoryStructure(ctx: CheckCtx, name: []const u8) CheckResult {
     var missing: u32 = 0;
     for (dirs) |dir| {
         var buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ ctx.prefix, dir }) catch continue;
+        const p = std.mem.print(&buf, "{s}/{s}", .{ ctx.prefix, dir }) catch continue;
         std.Io.Dir.accessAbsolute(ctx.io, p, .{}) catch {
             if (first_missing_len == 0) {
-                const s = std.fmt.bufPrint(&first_missing_buf, "{s}", .{p}) catch &[_]u8{};
+                const s = std.mem.print(&first_missing_buf, "{s}", .{p}) catch &[_]u8{};
                 first_missing_len = s.len;
             }
             missing += 1;
@@ -780,16 +780,16 @@ fn checkDirectoryStructure(ctx: CheckCtx, name: []const u8) CheckResult {
     }
     var msg_buf: [640]u8 = undefined;
     const msg = if (missing == 1)
-        std.fmt.bufPrint(&msg_buf, "Missing directory: {s}", .{first_missing_buf[0..first_missing_len]}) catch "Missing directory"
+        std.mem.print(&msg_buf, "Missing directory: {s}", .{first_missing_buf[0..first_missing_len]}) catch "Missing directory"
     else
-        std.fmt.bufPrint(&msg_buf, "{d} missing directories (first: {s})", .{ missing, first_missing_buf[0..first_missing_len] }) catch "Missing directories";
+        std.mem.print(&msg_buf, "{d} missing directories (first: {s})", .{ missing, first_missing_buf[0..first_missing_len] }) catch "Missing directories";
     printCheck(name, .warn_status, msg);
     return .warn_status;
 }
 
 fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{ctx.prefix}) catch {
+    const lock_path = std.mem.print(&lock_buf, "{s}/db/malt.lock", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -802,7 +802,7 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
             return .info_status;
         }
         var pid_buf: [256]u8 = undefined;
-        const s = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
+        const s = std.mem.print(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
         printCheck(name, .warn_status, s);
         armFixHint(.stale_lock);
         return .warn_status;
@@ -817,7 +817,7 @@ fn checkExternalTool(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     }
     var et_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &et_buf,
         "`{s}` not found. Install Xcode Command Line Tools: xcode-select --install",
         .{patch.external_tool_path},
@@ -854,7 +854,7 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     }
     var pm_buf: [256]u8 = undefined;
-    const pm_msg = std.fmt.bufPrint(
+    const pm_msg = std.mem.print(
         &pm_buf,
         "{d} path(s) with weak permissions under {s} — run `ls -l` or `chmod`",
         .{ findings.len, ctx.prefix },
@@ -873,7 +873,7 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
             "group-writable"
         else
             "wrong owner";
-        const line = std.fmt.bufPrint(&line_buf, "{s} ({s})", .{ f.path, reason }) catch continue;
+        const line = std.mem.print(&line_buf, "{s} ({s})", .{ f.path, reason }) catch continue;
         writeStyledDetail(line);
     }
     return .warn_status;
@@ -884,7 +884,7 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
 /// because nothing ever added `<prefix>/bin` to the user's shell.
 fn checkPrefixPath(ctx: CheckCtx, name: []const u8) CheckResult {
     var bin_buf: [512]u8 = undefined;
-    const bin = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{ctx.prefix}) catch {
+    const bin = std.mem.print(&bin_buf, "{s}/bin", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -894,7 +894,7 @@ fn checkPrefixPath(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     }
     var msg_buf: [640]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{s} is not on PATH — installed commands won't be found. Add: export PATH=\"{s}:$PATH\"",
         .{ bin, bin },
@@ -933,7 +933,7 @@ fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
     const probe_url = mirror_mod.hostProbeUrl(ctx.mirrors.api_base);
     const status = http.head(probe_url) catch {
         var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Cannot reach {s}", .{probe_url}) catch "Cannot reach API host";
+        const msg = std.mem.print(&buf, "Cannot reach {s}", .{probe_url}) catch "Cannot reach API host";
         printCheck(name, .warn_status, msg);
         return .warn_status;
     };
@@ -966,21 +966,21 @@ fn checkMirrorOverrides(ctx: CheckCtx, name: []const u8) CheckResult {
 /// fixture.
 pub fn formatMirrorOverrideDetail(buf: []u8, mirrors: mirror_mod.Mirrors) []const u8 {
     if (mirrors.api_overridden and mirrors.bottle_overridden) {
-        return std.fmt.bufPrint(buf, "API={s}, Bottle={s}", .{ mirrors.api_base, mirrors.bottle_base }) catch
+        return std.mem.print(buf, "API={s}, Bottle={s}", .{ mirrors.api_base, mirrors.bottle_base }) catch
             "API + Bottle overrides active";
     }
     if (mirrors.api_overridden) {
-        return std.fmt.bufPrint(buf, "API={s}", .{mirrors.api_base}) catch "API override active";
+        return std.mem.print(buf, "API={s}", .{mirrors.api_base}) catch "API override active";
     }
     if (mirrors.bottle_overridden) {
-        return std.fmt.bufPrint(buf, "Bottle={s}", .{mirrors.bottle_base}) catch "Bottle override active";
+        return std.mem.print(buf, "Bottle={s}", .{mirrors.bottle_base}) catch "Bottle override active";
     }
     return "using upstream Homebrew defaults";
 }
 
 fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -991,7 +991,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
     defer db.close();
 
     var store_path_buf: [512]u8 = undefined;
-    const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{ctx.prefix}) catch {
+    const store_path = std.mem.print(&store_path_buf, "{s}/store", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1026,7 +1026,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         return .info_status;
     }
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} orphaned store entry(s). Run: mt purge --store-orphans",
         .{orphan_count},
@@ -1038,7 +1038,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1065,7 +1065,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
         if (!absentOnDisk(ctx.io, cellar_path)) continue;
         const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const k_ver = std.mem.sliceTo(stmt.columnText(1) orelse continue, 0);
-        const row = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ k_name, k_ver }) catch continue;
+        const row = ctx.allocator.print("{s} {s}", .{ k_name, k_ver }) catch continue;
         offenders.append(ctx.allocator, row) catch {
             ctx.allocator.free(row);
             continue;
@@ -1081,7 +1081,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
         return .info_status;
     }
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} keg(s) in DB but missing on disk. Reinstall affected packages",
         .{offenders.items.len},
@@ -1097,8 +1097,8 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
 /// where the user is sent after that refusal, so it has to name the link.
 /// No `--fix` hint: unlinking a package dir the user planted is their call.
 fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cellar_root = std.fmt.bufPrint(&root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cellar_root = std.mem.print(&root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1114,8 +1114,8 @@ fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
 
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cellar_root, entry.name }) catch continue;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = std.mem.print(&path_buf, "{s}/{s}", .{ cellar_root, entry.name }) catch continue;
         // The same predicate the cellar guard refuses on, so report and
         // refusal can never disagree.
         if (!symlink.isSymlinkOrUnreadable(ctx.io, path)) continue;
@@ -1135,7 +1135,7 @@ fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
         return .info_status;
     }
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} symlinked package dir(s) under Cellar; installs are refused. Replace with a real directory. First: {s}",
         .{ offenders.items.len, offenders.items[0] },
@@ -1155,7 +1155,7 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         allocator: std.mem.Allocator,
         offenders: *std.ArrayList([]u8),
         fn visit(self: @This(), _: std.Io.Dir, subdir: []const u8, entry_name: []const u8) void {
-            const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ subdir, entry_name }) catch return;
+            const path = self.allocator.print("{s}/{s}", .{ subdir, entry_name }) catch return;
             self.offenders.append(self.allocator, path) catch self.allocator.free(path);
         }
     };
@@ -1175,7 +1175,7 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         return .info_status;
     }
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} broken symlink(s). Run: mt cleanup",
         .{offenders.items.len},
@@ -1200,7 +1200,7 @@ const KegGroups = std.StringArrayHashMapUnmanaged(void);
 /// be walked — distinct from "walked, found nothing". Caller owns the keys.
 fn collectOffendingKegs(ctx: CheckCtx, predicate: KegFilePredicate) ?KegGroups {
     var cellar_root_buf: [512]u8 = undefined;
-    const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch return null;
+    const cellar_root = std.mem.print(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch return null;
 
     // No Cellar yet — nothing to scan, which is a clean result, not a failure.
     var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_root, .{ .iterate = true }) catch return .empty;
@@ -1257,7 +1257,7 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         if (output.isVerbose()) {
             // Verbose lists every package below; the (first: …) hint
             // would just duplicate the first row of that list.
-            break :blk std.fmt.bufPrint(
+            break :blk std.mem.print(
                 &msg_buf,
                 // A reinstall alone re-runs the same substitution set that let
                 // the token through, so upgrading malt has to come first.
@@ -1269,7 +1269,7 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
             var it = groups.iterator();
             break :first_key if (it.next()) |kv| kv.key_ptr.* else "";
         };
-        break :blk std.fmt.bufPrint(
+        break :blk std.mem.print(
             &msg_buf,
             "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Upgrade malt, then reinstall those packages.",
             .{ groups.count(), first_key },
@@ -1295,7 +1295,7 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
 /// build-prefix strings, so the keg's contents cannot distinguish the two.
 fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
     var cellar_root_buf: [512]u8 = undefined;
-    const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
+    const cellar_root = std.mem.print(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1323,7 +1323,7 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
             if (signals.isInterrupted()) break;
             if (ver.kind != .directory) continue;
             var keg_buf: [512]u8 = undefined;
-            const keg = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ cellar_root, pkg.name, ver.name }) catch continue;
+            const keg = std.mem.print(&keg_buf, "{s}/{s}/{s}", .{ cellar_root, pkg.name, ver.name }) catch continue;
             // An absent stamp means the keg predates stamping, not that it is
             // stale — flagging those would recommend reinstalling the whole
             // prefix on a guess. `not_applicable` never goes stale at all.
@@ -1332,7 +1332,7 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
                 .not_applicable => continue,
                 .version => |v| if (v >= relocated_store.RELOC_LOGIC_VERSION) continue,
             }
-            const key = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ pkg.name, ver.name }) catch continue;
+            const key = ctx.allocator.print("{s} {s}", .{ pkg.name, ver.name }) catch continue;
             stale.append(ctx.allocator, key) catch {
                 ctx.allocator.free(key);
                 continue;
@@ -1346,7 +1346,7 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     }
     var msg_buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} keg(s) were relocated by an older malt and may still reference the build prefix. Reinstall them to refresh: mt reinstall <name>",
         .{stale.items.len},
@@ -1408,7 +1408,7 @@ fn checkUnrelocatedPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
     }
 
     var msg_buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} package(s) still reference the build prefix — this prefix ({d} bytes) is too long for relocation to rewrite their embedded paths. Reinstall under a shorter prefix.",
         .{ groups.count(), ctx.prefix.len },
@@ -1446,7 +1446,7 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
     }
     const free_mb = free_bytes / (1024 * 1024);
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "Only {d} MB free (< 1 GB). Free up disk space",
         .{free_mb},
@@ -1460,7 +1460,7 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
 /// missing. `pub` so the render test can pin the text without a fixture.
 pub fn formatSslCertDetail(buf: []u8, present: bool, keg: []const u8) ?[]const u8 {
     if (present) return null;
-    return std.fmt.bufPrint(buf, "ca-certificates installed but {s}'s cert.pem isn't linked", .{keg}) catch null;
+    return std.mem.print(buf, "ca-certificates installed but {s}'s cert.pem isn't linked", .{keg}) catch null;
 }
 
 /// Hand-fix for the "SSL CA bundle" row. `pub` so the render test can pin a
@@ -1468,7 +1468,7 @@ pub fn formatSslCertDetail(buf: []u8, present: bool, keg: []const u8) ?[]const u
 /// assumed, and the source is the bundle `ca-certificates` builds — not the
 /// raw upstream store, which is only ever an input to it.
 pub fn formatSslCertRemedy(buf: []u8, prefix: []const u8, keg: []const u8) ?[]const u8 {
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buf,
         "mkdir -p {s}/etc/{s} && ln -sf {s}/etc/ca-certificates/cert.pem {s}/etc/{s}/cert.pem",
         .{ prefix, keg, prefix, prefix, keg },
@@ -1531,7 +1531,7 @@ fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
 /// downstream "grep for warnings" gates don't false-positive.
 fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1566,8 +1566,7 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
 
     while (stmt.step() catch false) {
         const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
-        const row = std.fmt.allocPrint(
-            ctx.allocator,
+        const row = ctx.allocator.print(
             "{s}   (mt link --isolate {s} to hide from PATH)",
             .{ k_name, k_name },
         ) catch continue;
@@ -1583,7 +1582,7 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
     }
 
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d} dependency keg(s) link bin/sbin (use `mt link --isolate <name>` to hide).",
         .{offenders.items.len},
@@ -1595,7 +1594,7 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1611,7 +1610,7 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     }
     var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &msg_buf,
         "{d}/{d} local keg(s) reference a .rb that no longer exists on disk. Run `mt info <name>` to see which.",
         .{ missing.stale, missing.total },
@@ -1626,7 +1625,7 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
 /// decides "text", so doctor never flags a file relocation would skip.
 fn textCarriesPlaceholder(content: []const u8) bool {
     if (patch.classifyHead(content) != .text) return false;
-    return std.mem.indexOf(u8, content, "@@HOMEBREW_") != null;
+    return std.mem.find(u8, content, "@@HOMEBREW_") != null;
 }
 
 /// True if `rel_path` still carries a relocation token, in a Mach-O load
@@ -1671,8 +1670,8 @@ fn hasUnpatchedPlaceholder(
     defer macho.deinit();
 
     for (macho.paths) |lcp| {
-        if (std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") != null) return true;
-        if (std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") != null) return true;
+        if (std.mem.find(u8, lcp.path, "@@HOMEBREW_PREFIX@@") != null) return true;
+        if (std.mem.find(u8, lcp.path, "@@HOMEBREW_CELLAR@@") != null) return true;
     }
     return false;
 }
@@ -1696,7 +1695,7 @@ pub fn pathContainsDir(path_env: []const u8, dir: []const u8) bool {
 /// A PATH lookup could report a prefix-resident shim as healthy even though
 /// production deliberately refuses to execute it.
 pub fn externalToolAvailable(io: std.Io, tool_path: []const u8) bool {
-    if (!std.fs.path.isAbsolute(tool_path)) return false;
+    if (!std.Io.Dir.path.isAbsolute(tool_path)) return false;
     std.Io.Dir.accessAbsolute(io, tool_path, .{}) catch return false;
     return true;
 }
@@ -1758,8 +1757,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -1768,7 +1766,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test reports compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -1779,8 +1777,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1795,7 +1792,7 @@ const Scratch = struct {
 };
 
 fn fixHintEmitted(buf: []const u8) bool {
-    return std.mem.indexOf(u8, buf, "safe-class fixes") != null;
+    return std.mem.find(u8, buf, "safe-class fixes") != null;
 }
 
 fn captureFixEmit(allocator: std.mem.Allocator, fix_requested: bool) !std.ArrayList(u8) {
@@ -2025,11 +2022,11 @@ test "checkBrokenSymlinks: an intact link with an inaccessible target is not rep
     defer s.deinit();
     const prefix = s.base;
 
-    var wb: [std.fs.max_path_bytes]u8 = undefined;
-    const walled = try std.fmt.bufPrint(&wb, "{s}/walled", .{prefix});
+    var wb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const walled = try std.mem.print(&wb, "{s}/walled", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, walled);
-    var tb: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try std.fmt.bufPrint(&tb, "{s}/keg", .{walled});
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try std.mem.print(&tb, "{s}/keg", .{walled});
     {
         const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
         f.close(io);
@@ -2039,11 +2036,11 @@ test "checkBrokenSymlinks: an intact link with an inaccessible target is not rep
     try walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0));
     defer walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
 
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bin = try std.mem.print(&pb, "{s}/bin", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, bin);
-    var lb: [std.fs.max_path_bytes]u8 = undefined;
-    const link = try std.fmt.bufPrint(&lb, "{s}/wall", .{bin});
+    var lb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const link = try std.mem.print(&lb, "{s}/wall", .{bin});
     try std.Io.Dir.symLinkAbsolute(io, target, link, .{});
 
     var out: std.ArrayList(u8) = .empty;
@@ -2091,11 +2088,11 @@ test "checkCellarPackageDirs: a symlinked package dir warns and names the offend
     defer resetVerboseHint();
 
     try testing.expectEqual(CheckResult.warn_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
-    try testing.expect(std.mem.indexOf(u8, out.items, "planted") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "refused") != null);
+    try testing.expect(std.mem.find(u8, out.items, "planted") != null);
+    try testing.expect(std.mem.find(u8, out.items, "refused") != null);
     // Every sibling check names a remedy; a row that only says "broken"
     // leaves the user with nowhere to go.
-    try testing.expect(std.mem.indexOf(u8, out.items, "Replace with a real directory") != null);
+    try testing.expect(std.mem.find(u8, out.items, "Replace with a real directory") != null);
 }
 
 test "checkCellarPackageDirs: a dangling package-dir symlink is still reported" {
@@ -2152,11 +2149,11 @@ test "checkOrphanedStore: counts every row no keg holds across store entries" {
     defer s.deinit();
     const prefix = s.base;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_dir = try std.mem.print(&buf, "{s}/db", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, db_dir);
-    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_path = try std.mem.printSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec(
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY);
@@ -2167,8 +2164,8 @@ test "checkOrphanedStore: counts every row no keg holds across store entries" {
     db.close();
 
     for ([_][]const u8{ "orphan-a", "orphan-b", "live", "norow" }) |sha| {
-        var eb: [std.fs.max_path_bytes]u8 = undefined;
-        const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
+        var eb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const entry = try std.mem.print(&eb, "{s}/store/{s}", .{ prefix, sha });
         try std.Io.Dir.cwd().createDirPath(io, entry);
     }
 
@@ -2179,7 +2176,7 @@ test "checkOrphanedStore: counts every row no keg holds across store entries" {
 
     const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
     try testing.expectEqual(CheckResult.warn_status, checkOrphanedStore(ctx, "Orphaned store entries"));
-    try testing.expect(std.mem.indexOf(u8, out.items, "2 orphaned store entr") != null);
+    try testing.expect(std.mem.find(u8, out.items, "2 orphaned store entr") != null);
 }
 
 test "checkOrphanedStore: a store whose every row a keg holds is ok" {
@@ -2191,11 +2188,11 @@ test "checkOrphanedStore: a store whose every row a keg holds is ok" {
     defer s.deinit();
     const prefix = s.base;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_dir = try std.mem.print(&buf, "{s}/db", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, db_dir);
-    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_path = try std.mem.printSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec(
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY);
@@ -2206,8 +2203,8 @@ test "checkOrphanedStore: a store whose every row a keg holds is ok" {
     db.close();
 
     for ([_][]const u8{ "live", "norow" }) |sha| {
-        var eb: [std.fs.max_path_bytes]u8 = undefined;
-        const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
+        var eb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const entry = try std.mem.print(&eb, "{s}/store/{s}", .{ prefix, sha });
         try std.Io.Dir.cwd().createDirPath(io, entry);
     }
 
@@ -2240,11 +2237,11 @@ test "checkMissingKegs: a relative cellar_path counts as missing instead of abor
     defer s.deinit();
     const prefix = s.base;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_dir = try std.mem.print(&buf, "{s}/db", .{prefix});
     try std.Io.Dir.cwd().createDirPath(io, db_dir);
-    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const db_path = try std.mem.printSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try schema.initSchema(&db);
     try db.exec(
@@ -2469,8 +2466,8 @@ test "checkMachOPlaceholders: an interrupted Cellar walk reports no fault" {
 
     const keg = s.p("/Cellar/pkg/1.0/bin");
     try std.Io.Dir.cwd().createDirPath(io, keg);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const wrapper = try std.fmt.bufPrint(&path_buf, "{s}/wrapper", .{keg});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const wrapper = try std.mem.print(&path_buf, "{s}/wrapper", .{keg});
     try atomic.atomicWriteFile(io, wrapper, "prefix=@@HOMEBREW_PREFIX@@\n");
 
     const ctx: CheckCtx = .{ .allocator = allocator, .prefix = s.base, .io = io, .environ = .empty };

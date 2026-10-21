@@ -319,8 +319,8 @@ test "the interpreter imports no tab module and no json parser" {
     // can't express it, so scan the source. The needles are split so this test's own
     // bytes never contain the contiguous marker it searches for.
     const src = @embedFile("perform.zig");
-    try testing.expect(std.mem.indexOf(u8, src, "@import(\"" ++ "json/") == null);
-    try testing.expect(std.mem.indexOf(u8, src, "_tab.zig" ++ "\")") == null);
+    try testing.expect(std.mem.find(u8, src, "@import(\"" ++ "json/") == null);
+    try testing.expect(std.mem.find(u8, src, "_tab.zig" ++ "\")") == null);
 }
 
 test "startBackground never waits after a kill" {
@@ -329,7 +329,7 @@ test "startBackground never waits after a kill" {
     // and a following `wait` would trip std's assert. The needle is split so this
     // test's own bytes never contain the marker it searches for.
     const src = @embedFile("perform.zig");
-    try testing.expect(std.mem.indexOf(u8, src, "." ++ "wait(") == null);
+    try testing.expect(std.mem.find(u8, src, "." ++ "wait(") == null);
 }
 
 test "classify splits recoverable backend faults from fatal terminal/OOM faults" {

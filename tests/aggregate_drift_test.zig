@@ -60,9 +60,9 @@ test "every tests/*_test.zig is imported by the aggregate root" {
     for (names) |name| {
         // A *file* import - `@import("x_test.zig")` - is what puts the file in
         // the root module. A bare module name would compile and never run.
-        const needle = try std.fmt.allocPrint(a, "@import(\"{s}\")", .{name});
+        const needle = try a.print("@import(\"{s}\")", .{name});
         defer a.free(needle);
-        if (std.mem.indexOf(u8, all_src, needle) == null) {
+        if (std.mem.find(u8, all_src, needle) == null) {
             missing += 1;
             std.debug.print("tests/all.zig does not import {s}\n", .{name});
         }
@@ -83,9 +83,9 @@ test "every tests/*_test.zig is listed in build.zig" {
 
     var missing: usize = 0;
     for (names) |name| {
-        const needle = try std.fmt.allocPrint(a, "\"tests/{s}\"", .{name});
+        const needle = try a.print("\"tests/{s}\"", .{name});
         defer a.free(needle);
-        if (std.mem.indexOf(u8, build_src, needle) == null) {
+        if (std.mem.find(u8, build_src, needle) == null) {
             missing += 1;
             std.debug.print("build.zig does not list tests/{s}\n", .{name});
         }
@@ -102,9 +102,9 @@ test "the aggregate root imports nothing that is not on disk" {
     var it = std.mem.splitSequence(u8, all_src, "@import(\"");
     _ = it.next(); // text before the first import
     while (it.next()) |rest| {
-        const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+        const end = std.mem.findScalar(u8, rest, '"') orelse continue;
         const name = rest[0..end];
-        const path = try std.fmt.allocPrint(a, "tests/{s}", .{name});
+        const path = try a.print("tests/{s}", .{name});
         defer a.free(path);
         test_io.cwd().access(io, path, .{}) catch {
             stale += 1;

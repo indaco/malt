@@ -18,8 +18,8 @@ pub fn classify(resolved_path: []const u8) Origin {
     // Match both formula (`/Cellar/`) and cask (`/Caskroom/`) layouts.
     // Stable across Intel, Apple Silicon, linuxbrew, and custom
     // HOMEBREW_PREFIX — only the prefix changes, the component names don't.
-    if (std.mem.indexOf(u8, resolved_path, "/Cellar/") != null) return .homebrew;
-    if (std.mem.indexOf(u8, resolved_path, "/Caskroom/") != null) return .homebrew;
+    if (std.mem.find(u8, resolved_path, "/Cellar/") != null) return .homebrew;
+    if (std.mem.find(u8, resolved_path, "/Caskroom/") != null) return .homebrew;
     return .direct;
 }
 

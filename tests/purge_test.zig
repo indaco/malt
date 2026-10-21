@@ -248,7 +248,7 @@ test "buildPlan produces absolute paths for every target" {
     const plan = try purge.buildPlan(testing.allocator, opts, "/tmp/mt-fake", "/tmp/mt-fake/cache");
     defer purge.freePlan(testing.allocator, plan);
     for (plan) |t| {
-        try testing.expect(std.fs.path.isAbsolute(t.path));
+        try testing.expect(std.Io.Dir.path.isAbsolute(t.path));
     }
 }
 
@@ -304,7 +304,7 @@ test "applying the plan removes every pre-populated directory under a temp prefi
     const hex_buf = std.fmt.bytesToHex(rand_bytes, .lower);
 
     var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/malt-purge-test-{s}", .{&hex_buf});
+    const prefix = try std.mem.print(&prefix_buf, "/tmp/malt-purge-test-{s}", .{&hex_buf});
 
     // Best-effort cleanup in case a prior run aborted mid-way.
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -320,18 +320,18 @@ test "applying the plan removes every pre-populated directory under a temp prefi
     };
     for (subdirs) |name| {
         var sub_buf: [256]u8 = undefined;
-        const sub = try std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ prefix, name });
+        const sub = try std.mem.print(&sub_buf, "{s}/{s}", .{ prefix, name });
         try makeDir(sub);
         // Drop a file inside so the directory isn't empty — exercises
         // deleteTree's recursive branch, not the fast path.
         var file_buf: [256]u8 = undefined;
-        const file = try std.fmt.bufPrint(&file_buf, "{s}/marker", .{sub});
+        const file = try std.mem.print(&file_buf, "{s}/marker", .{sub});
         try makeFile(file, "x");
     }
 
     // Build the plan pointing at the temp prefix (cache stays in-prefix).
     var cache_buf: [256]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix});
+    const cache_dir = try std.mem.print(&cache_buf, "{s}/cache", .{prefix});
 
     const plan = try purge.buildPlan(allocator, .{}, prefix, cache_dir);
     defer purge.freePlan(allocator, plan);
@@ -361,7 +361,7 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
     const hex_buf = std.fmt.bytesToHex(rand_bytes, .lower);
 
     var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/malt-purge-keepcache-{s}", .{&hex_buf});
+    const prefix = try std.mem.print(&prefix_buf, "/tmp/malt-purge-keepcache-{s}", .{&hex_buf});
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try makeDir(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -369,14 +369,14 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
     // Pre-create cache, Cellar, and db — enough to prove the kept path
     // survives while deleted paths do not.
     var cache_buf: [256]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix});
+    const cache_dir = try std.mem.print(&cache_buf, "{s}/cache", .{prefix});
     try makeDir(cache_dir);
 
     var cellar_buf: [256]u8 = undefined;
-    const cellar_dir = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix});
+    const cellar_dir = try std.mem.print(&cellar_buf, "{s}/Cellar", .{prefix});
     try makeDir(cellar_dir);
     var marker_buf: [256]u8 = undefined;
-    const marker = try std.fmt.bufPrint(&marker_buf, "{s}/CANARY", .{cache_dir});
+    const marker = try std.mem.print(&marker_buf, "{s}/CANARY", .{cache_dir});
     try makeFile(marker, "keep me");
 
     const plan = try purge.buildPlan(allocator, .{ .keep_cache = true }, prefix, cache_dir);
@@ -398,7 +398,7 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
 
 fn plantLinks(prefix: []const u8, sub: []const u8, anchor: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const dir_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, sub });
+    const dir_path = try std.mem.print(&buf, "{s}/{s}", .{ prefix, sub });
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_path);
     var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, dir_path, .{ .iterate = true });
     defer dir.close(std.Options.debug_io);
@@ -408,7 +408,7 @@ fn plantLinks(prefix: []const u8, sub: []const u8, anchor: []const u8) !void {
 
 fn linkExists(prefix: []const u8, rel: []const u8) bool {
     var buf: [512]u8 = undefined;
-    const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, rel }) catch return false;
+    const p = std.mem.print(&buf, "{s}/{s}", .{ prefix, rel }) catch return false;
     _ = std.Io.Dir.cwd().statFile(std.Options.debug_io, p, .{ .follow_symlinks = false }) catch return false;
     return true;
 }
@@ -421,7 +421,7 @@ test "--broken-symlinks removes dangling prefix links and keeps live ones" {
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
 
     var anchor_buf: [512]u8 = undefined;
-    const anchor = try std.fmt.bufPrint(&anchor_buf, "{s}/anchor", .{prefix});
+    const anchor = try std.mem.print(&anchor_buf, "{s}/anchor", .{prefix});
     const f = try test_io.createFileAbsolute(std.Options.debug_io, anchor, .{});
     f.close(std.Options.debug_io);
 

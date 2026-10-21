@@ -19,7 +19,7 @@ const builtin = @import("builtin");
 const f = @import("src/core/formula.zig");
 
 fn tag(comptime codename: []const u8) []const u8 {
-    return if (builtin.cpu.arch == .aarch64) "arm64_" ++ codename else codename;
+    return if (builtin.target.cpu.arch == .aarch64) "arm64_" ++ codename else codename;
 }
 
 fn entry(comptime codename: []const u8, comptime sha_char: []const u8) []const u8 {

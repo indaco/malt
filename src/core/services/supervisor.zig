@@ -93,9 +93,9 @@ pub const ServiceInfo = struct {
 /// Real services only ever need the keg, `var` or `etc`.
 fn precreatableWorkingDir(wd: []const u8, cellar_path: []const u8, malt_prefix: []const u8) bool {
     if (dsl_sandbox.pathHasPrefix(wd, cellar_path)) return true;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     inline for (.{ "var/malt", "var", "etc" }) |sub| {
-        const root = std.fmt.bufPrint(&buf, "{s}/{s}", .{ malt_prefix, sub }) catch return false;
+        const root = std.mem.print(&buf, "{s}/{s}", .{ malt_prefix, sub }) catch return false;
         if (dsl_sandbox.pathHasPrefix(wd, root)) return !std.mem.eql(u8, sub, "var/malt");
     }
     return false;
@@ -104,13 +104,13 @@ fn precreatableWorkingDir(wd: []const u8, cellar_path: []const u8, malt_prefix: 
 /// Returns the services directory: `{prefix}/var/malt/services`.
 pub fn servicesDir(allocator: std.mem.Allocator) SupervisorError![]const u8 {
     const prefix = atomic.maltPrefixOrAbort();
-    return std.fmt.allocPrint(allocator, "{s}/var/malt/services", .{prefix}) catch
+    return allocator.print("{s}/var/malt/services", .{prefix}) catch
         return SupervisorError.OutOfMemory;
 }
 
 pub fn serviceDir(allocator: std.mem.Allocator, name: []const u8) SupervisorError![]const u8 {
     const prefix = atomic.maltPrefixOrAbort();
-    return std.fmt.allocPrint(allocator, "{s}/var/malt/services/{s}", .{ prefix, name }) catch
+    return allocator.print("{s}/var/malt/services/{s}", .{ prefix, name }) catch
         return SupervisorError.OutOfMemory;
 }
 
@@ -121,7 +121,7 @@ pub fn logPath(allocator: std.mem.Allocator, name: []const u8, stream: enum { st
         .stdout => "stdout.log",
         .stderr => "stderr.log",
     };
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, file }) catch
+    return allocator.print("{s}/{s}", .{ dir, file }) catch
         return SupervisorError.OutOfMemory;
 }
 
@@ -208,7 +208,7 @@ pub fn register(
     cellar_path: []const u8,
     malt_prefix: []const u8,
 ) SupervisorError!void {
-    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+    if (builtin.target.os.tag != .macos) return SupervisorError.OsNotSupported;
 
     const allocator = ctx.allocator;
     plist_mod.validate(spec, cellar_path, malt_prefix) catch return SupervisorError.InvalidService;
@@ -234,7 +234,7 @@ pub fn register(
         std.Io.Dir.cwd().createDirPath(ctx.io, wd) catch {};
     };
 
-    const plist_path = std.fmt.allocPrint(allocator, "{s}/service.plist", .{dir}) catch
+    const plist_path = allocator.print("{s}/service.plist", .{dir}) catch
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
 
@@ -319,7 +319,7 @@ pub fn rewritePlist(ctx: SupervisorCtx, spec: plist_mod.ServiceSpec, cellar_path
 fn serviceFile(allocator: std.mem.Allocator, label: []const u8, file: []const u8) SupervisorError![]const u8 {
     const dir = try serviceDir(allocator, label);
     defer allocator.free(dir);
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, file }) catch SupervisorError.OutOfMemory;
+    return allocator.print("{s}/{s}", .{ dir, file }) catch SupervisorError.OutOfMemory;
 }
 
 fn writePlist(ctx: SupervisorCtx, spec: plist_mod.ServiceSpec, path: []const u8) SupervisorError!void {
@@ -332,7 +332,7 @@ fn writePlist(ctx: SupervisorCtx, spec: plist_mod.ServiceSpec, path: []const u8)
 }
 
 fn runLaunchctl(io: std.Io, argv: []const []const u8) SupervisorError!void {
-    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+    if (builtin.target.os.tag != .macos) return SupervisorError.OsNotSupported;
 
     var child = std.process.spawn(io, .{
         .argv = argv,
@@ -348,7 +348,7 @@ fn runLaunchctl(io: std.Io, argv: []const []const u8) SupervisorError!void {
 
 fn userDomain(allocator: std.mem.Allocator) ![]const u8 {
     const uid = std.c.getuid();
-    return std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
+    return allocator.print("gui/{d}", .{uid});
 }
 
 /// Resolve what the user typed to a registered service label.
@@ -402,7 +402,7 @@ fn lookupPlistPath(allocator: std.mem.Allocator, db: *sqlite.Database, name: []c
 }
 
 pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
-    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+    if (builtin.target.os.tag != .macos) return SupervisorError.OsNotSupported;
     const allocator = ctx.allocator;
     // Resolve once: every row is keyed by the label, so the status write below
     // silently matched nothing when the user typed the keg name.
@@ -419,7 +419,7 @@ pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
 }
 
 pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
-    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+    if (builtin.target.os.tag != .macos) return SupervisorError.OsNotSupported;
     const allocator = ctx.allocator;
     const label = try resolveLabel(allocator, ctx.db, name);
     defer allocator.free(label);
@@ -438,10 +438,10 @@ pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
 /// read from the plist: a re-registered plist changes nothing until the
 /// job is bootstrapped again, and launchd clamps what the plist declares.
 pub fn stopGrace(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ?u32 {
-    if (builtin.os.tag != .macos) return null;
+    if (builtin.target.os.tag != .macos) return null;
     const domain = userDomain(allocator) catch return null;
     defer allocator.free(domain);
-    const target = std.fmt.allocPrint(allocator, "{s}/{s}", .{ domain, label }) catch return null;
+    const target = allocator.print("{s}/{s}", .{ domain, label }) catch return null;
     defer allocator.free(target);
     // One job's dump is a few KiB; the cap only guards a runaway launchd.
     const result = std.process.run(allocator, io, .{
@@ -457,9 +457,9 @@ pub fn stopGrace(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ?u
 /// Pull `exit timeout = N` out of `launchctl print` output.
 fn parseLoadedExitTimeout(stdout: []const u8) ?u32 {
     const needle = "exit timeout = ";
-    const at = std.mem.indexOf(u8, stdout, needle) orelse return null;
+    const at = std.mem.find(u8, stdout, needle) orelse return null;
     const rest = stdout[at + needle.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    const end = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
     return std.fmt.parseInt(u32, std.mem.trim(u8, rest[0..end], " \t\r"), 10) catch null;
 }
 
@@ -591,7 +591,7 @@ pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8)
 /// from "nothing loaded", for callers whose action is irreversible. Without
 /// launchd there is nothing to load, so a non-macOS host is a real answer.
 pub fn probeRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ?RuntimeState {
-    if (builtin.os.tag != .macos) return .not_loaded;
+    if (builtin.target.os.tag != .macos) return .not_loaded;
 
     // `launchctl list` output is at most a few hundred lines (one per
     // registered service); on a typical Mac it's well under 50 KiB. Cap
@@ -759,8 +759,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -773,8 +772,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -837,7 +835,7 @@ test "followLog flushes appended bytes between polls" {
 
     try followLog(test_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "appended\n") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "appended\n") != null);
     try testing.expectEqual(@as(usize, 3), FollowProbe.calls);
 }
 
@@ -954,7 +952,7 @@ test "followLog flushes data appended before sleep cancellation lands" {
 
     try followLog(cancel_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "tail-bytes\n") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "tail-bytes\n") != null);
     try testing.expectEqual(@as(usize, 2), CancelSleepProbe.sleep_calls);
 }
 
@@ -1041,7 +1039,7 @@ test "stopAndUnregister removes the service directory its registration owned" {
     const dir = try serviceDir(testing.allocator, label);
     defer testing.allocator.free(dir);
     try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
-    const plist = try std.fmt.allocPrint(testing.allocator, "{s}/service.plist", .{dir});
+    const plist = try testing.allocator.print("{s}/service.plist", .{dir});
     defer testing.allocator.free(plist);
     try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = plist, .data = "<plist/>" });
     var ins = try db.prepare("INSERT INTO services (name, keg_name, plist_path) VALUES (?, 'unregister-probe', ?);");
@@ -1134,7 +1132,7 @@ test "a missing or corrupt formula spec loads as absent, never as a half spec" {
     const dir = try serviceDir(testing.allocator, "com.malt.bad");
     defer testing.allocator.free(dir);
     try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula.json", .{dir});
+    const path = try testing.allocator.print("{s}/formula.json", .{dir});
     defer testing.allocator.free(path);
     try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = "{\"keg_name\":\"bad\"" });
     try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.bad") == null);
@@ -1156,11 +1154,11 @@ test "rewritePlist replaces the plist but refuses a spec that fails validation" 
 
     const dir = try serviceDir(testing.allocator, "com.malt.tree");
     defer testing.allocator.free(dir);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/service.plist", .{dir});
+    const path = try testing.allocator.print("{s}/service.plist", .{dir});
     defer testing.allocator.free(path);
     const first = try std.Io.Dir.cwd().readFileAlloc(dbg_io, path, testing.allocator, .unlimited);
     defer testing.allocator.free(first);
-    try testing.expect(std.mem.indexOf(u8, first, "<key>A</key>") != null);
+    try testing.expect(std.mem.find(u8, first, "<key>A</key>") != null);
 
     var bad = spec;
     bad.env = &.{.{ .key = "A", .value = "x\x00y" }};
@@ -1183,8 +1181,8 @@ test "a formula spec from another format version loads as absent; unknown fields
     const body =
         \\{{"format":{d},"keg_name":"tree","cellar_path":"/c","extra":1,"spec":{{"label":"com.malt.tree","program_args":["/b"],"stdout_path":"/o","stderr_path":"/e"}}}}
     ;
-    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = try std.fmt.allocPrint(arena.allocator(), body, .{formula_spec_format}) });
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = try arena.allocator().print(body, .{formula_spec_format}) });
     try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.tree") != null);
-    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = try std.fmt.allocPrint(arena.allocator(), body, .{formula_spec_format + 1}) });
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = try arena.allocator().print(body, .{formula_spec_format + 1}) });
     try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.tree") == null);
 }

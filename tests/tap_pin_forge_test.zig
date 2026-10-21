@@ -86,7 +86,7 @@ fn resolveServed(
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/commits/{s}", .{ port, fixture_sha });
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/commits/{s}", .{ port, fixture_sha });
     return tap.resolveHeadCommit(io, .empty, testing.allocator, false, forge_kind, url, null);
 }
 

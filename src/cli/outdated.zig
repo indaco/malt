@@ -426,8 +426,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -436,7 +435,7 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test reports compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
@@ -586,11 +585,11 @@ test "pruneSnapshot never synthesises a snapshot that was not there" {
 
 /// Write `{cache}/api/<file>` with `mtime_ns` so the TTL gate can be steered.
 fn seedApiDoc(scratch: *const Scratch, file: []const u8, body: []const u8, mtime_ns: ?i96) !void {
-    var api_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const api_dir = try std.fmt.bufPrint(&api_dir_buf, "{s}/api", .{scratch.base});
+    var api_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const api_dir = try std.mem.print(&api_dir_buf, "{s}/api", .{scratch.base});
     try std.Io.Dir.cwd().createDirPath(fs_test_io, api_dir);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ api_dir, file });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.print(&path_buf, "{s}/{s}", .{ api_dir, file });
     try atomic.atomicWriteFile(fs_test_io, path, body);
     const ns = mtime_ns orelse return;
     const f = try std.Io.Dir.openFileAbsolute(fs_test_io, path, .{ .mode = .write_only });
@@ -919,8 +918,8 @@ test "warmSnapshotFromRecompute swallows a write failure without crashing" {
     // hiccup never sinks the recompute the user already saw, and leave nothing
     // half-written behind.
     (try s.dir.createFile(io, "not_a_dir", .{})).close(io);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const file_as_dir = try std.fmt.bufPrint(&path_buf, "{s}/not_a_dir", .{base});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const file_as_dir = try std.mem.print(&path_buf, "{s}/not_a_dir", .{base});
     warmSnapshotFromRecompute(&ctx, std.testing.allocator, file_as_dir, .all, .{}, true, &.{}, &.{});
     try std.testing.expect(readSnapshot(io, std.testing.allocator, file_as_dir) == null);
 }
@@ -965,9 +964,9 @@ test "emitEntries replaces the all-clear with a warning when the audit is incomp
         .complete = false,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "wget") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "up to date") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
+    try std.testing.expect(std.mem.find(u8, stdout.buffered(), "wget") != null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "up to date") == null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "Could not verify") != null);
 }
 
 test "emitEntries keeps the JSON array clean and warns on stderr when the audit is incomplete" {
@@ -988,11 +987,11 @@ test "emitEntries keeps the JSON array clean and warns on stderr when the audit 
         .complete = false,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "\"outdated\":[]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "Could not verify") == null);
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
+    try std.testing.expect(std.mem.find(u8, stdout.buffered(), "\"outdated\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, stdout.buffered(), "Could not verify") == null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "Could not verify") != null);
     // The child's stderr never reaches the TUI, so the root carries the signal.
-    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "\"complete\":false") != null);
+    try std.testing.expect(std.mem.find(u8, stdout.buffered(), "\"complete\":false") != null);
 }
 
 test "emitEntries still warns about an incomplete audit under --quiet" {
@@ -1016,7 +1015,7 @@ test "emitEntries still warns about an incomplete audit under --quiet" {
         .complete = false,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
+    try std.testing.expect(std.mem.find(u8, err_buf.items, "Could not verify") != null);
 }
 
 const OutdatedFlag = enum { cask, formula, pinned_only, tap, refresh };
@@ -1266,7 +1265,7 @@ fn warnAuditIncomplete() void {
 /// anything that exists there but cannot be opened is an error, never
 /// an all-clear. SQLite's CREATE flag alone would hide that difference.
 pub fn openPrefixDb(io: std.Io, db_path: [:0]const u8, dry_run: bool) error{ Absent, Unreadable }!sqlite.Database {
-    const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
+    const db_dir = std.Io.Dir.path.dirname(db_path) orelse unreachable;
     return schema_report.openPreviewable(io, db_path, dry_run) catch
         if (prefix_path.dirMissing(io, db_dir)) error.Absent else error.Unreadable;
 }
@@ -1297,13 +1296,13 @@ test "abortUnreadableRows turns a failed row load into a diagnostic, not an empt
     for ([_]anyerror{ error.PrepareFailed, error.StepFailed, error.Corrupt }) |e| {
         err_buf.clearRetainingCapacity();
         try std.testing.expectError(error.Aborted, abortUnreadableRows(e));
-        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "mt doctor") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, @errorName(e)) != null);
+        try std.testing.expect(std.mem.find(u8, err_buf.items, "mt doctor") != null);
+        try std.testing.expect(std.mem.find(u8, err_buf.items, @errorName(e)) != null);
     }
 }
 
 fn scratchDbPath(s: *Scratch) ![:0]const u8 {
-    return std.fmt.allocPrintSentinel(s.arena.allocator(), "{s}/db/malt.db", .{s.base}, 0);
+    return s.arena.allocator().printSentinel("{s}/db/malt.db", .{s.base}, 0);
 }
 
 test "openPrefixDb reports a prefix with no db/ directory as absent" {

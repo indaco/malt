@@ -63,7 +63,7 @@ pub fn openFile(
     var dir = try openCanonicalDirNoFollow(io, root_real);
     defer dir.close(io);
 
-    if (std.fs.path.dirname(relative)) |parent| {
+    if (std.Io.Dir.path.dirname(relative)) |parent| {
         var components = std.mem.tokenizeScalar(u8, parent, '/');
         while (components.next()) |component| {
             const next = try dir.openDir(io, component, .{ .follow_symlinks = false });
@@ -72,7 +72,7 @@ pub fn openFile(
         }
     }
 
-    const file = try dir.openFile(io, std.fs.path.basename(relative), .{
+    const file = try dir.openFile(io, std.Io.Dir.path.basename(relative), .{
         .mode = mode,
         .allow_directory = false,
         .follow_symlinks = false,
@@ -92,7 +92,7 @@ pub fn openFile(
 /// symlink following disabled. Opening only the final component would leave an
 /// intermediate-directory swap between `realPath` and `open` exploitable.
 fn openCanonicalDirNoFollow(io: std.Io, path: []const u8) !std.Io.Dir {
-    if (!std.fs.path.isAbsolute(path)) return error.BadPathName;
+    if (!std.Io.Dir.path.isAbsolute(path)) return error.BadPathName;
 
     var dir = try std.Io.Dir.openDirAbsolute(io, "/", .{ .follow_symlinks = false });
     errdefer dir.close(io);
@@ -114,20 +114,20 @@ pub fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
 test "openFile allows an internal symlink but rejects an external one" {
     const io = std.Options.debug_io;
     const a = std.testing.allocator;
-    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_confined_source_{d}", .{std.c.getpid()}, 0);
+    const base = try a.printSentinel("/tmp/malt_confined_source_{d}", .{std.c.getpid()}, 0);
     defer a.free(base);
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
-    const root = try std.fmt.allocPrint(a, "{s}/root", .{base});
+    const root = try a.print("{s}/root", .{base});
     defer a.free(root);
-    const real = try std.fmt.allocPrint(a, "{s}/real", .{root});
+    const real = try a.print("{s}/real", .{root});
     defer a.free(real);
-    const inside = try std.fmt.allocPrint(a, "{s}/inside", .{root});
+    const inside = try a.print("{s}/inside", .{root});
     defer a.free(inside);
-    const outside = try std.fmt.allocPrint(a, "{s}/outside", .{base});
+    const outside = try a.print("{s}/outside", .{base});
     defer a.free(outside);
-    const escaped = try std.fmt.allocPrint(a, "{s}/escaped", .{root});
+    const escaped = try a.print("{s}/escaped", .{root});
     defer a.free(escaped);
 
     try std.Io.Dir.cwd().createDirPath(io, root);

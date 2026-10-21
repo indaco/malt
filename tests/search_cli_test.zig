@@ -25,7 +25,7 @@ const Scratch = struct {
         const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const cache_api = try std.fmt.allocPrint(allocator, "{s}/cache/api", .{path});
+        const cache_api = try allocator.print("{s}/cache/api", .{path});
         defer allocator.free(cache_api);
         try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -40,7 +40,7 @@ const Scratch = struct {
 };
 
 fn writeFile(path: []const u8, content: []const u8) !void {
-    if (std.fs.path.dirname(path)) |dir| {
+    if (std.Io.Dir.path.dirname(path)) |dir| {
         test_io.cwd().createDirPath(std.Options.debug_io, dir) catch {};
     }
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
@@ -51,12 +51,12 @@ fn writeFile(path: []const u8, content: []const u8) !void {
 // Seed `{prefix}/db/malt.db` with kegs + casks so `--installed` and the
 // `default` local-first path find real rows without ever touching the API.
 fn seedDb(allocator: std.mem.Allocator, prefix: []const u8) !void {
-    const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix});
+    const db_dir = try allocator.print("{s}/db", .{prefix});
     defer allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/malt.db", .{db_dir}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -79,20 +79,20 @@ fn seedDb(allocator: std.mem.Allocator, prefix: []const u8) !void {
 // Seed both names indexes + a per-package json so api.exists() and
 // fetchNamesIndex() both hit disk; no network in the substring scan.
 fn seedCache(allocator: std.mem.Allocator, prefix: []const u8) !void {
-    const formula_index = try std.fmt.allocPrint(allocator, "{s}/cache/api/names_formula.txt", .{prefix});
+    const formula_index = try allocator.print("{s}/cache/api/names_formula.txt", .{prefix});
     defer allocator.free(formula_index);
     try writeFile(formula_index, "wget\nwgetpaste\njq\n");
 
-    const cask_index = try std.fmt.allocPrint(allocator, "{s}/cache/api/names_cask.txt", .{prefix});
+    const cask_index = try allocator.print("{s}/cache/api/names_cask.txt", .{prefix});
     defer allocator.free(cask_index);
     try writeFile(cask_index, "firefox\nfirefox-developer-edition\nbrave\n");
 
     // Per-package JSONs back the `exists()` exact-match probe.
-    const wget_json = try std.fmt.allocPrint(allocator, "{s}/cache/api/formula_wget.json", .{prefix});
+    const wget_json = try allocator.print("{s}/cache/api/formula_wget.json", .{prefix});
     defer allocator.free(wget_json);
     try writeFile(wget_json, "{\"name\":\"wget\"}");
 
-    const firefox_json = try std.fmt.allocPrint(allocator, "{s}/cache/api/cask_firefox.json", .{prefix});
+    const firefox_json = try allocator.print("{s}/cache/api/cask_firefox.json", .{prefix});
     defer allocator.free(firefox_json);
     try writeFile(firefox_json, "{\"token\":\"firefox\"}");
 }
@@ -376,7 +376,7 @@ test "execute --installed tolerates a missing local DB without crashing" {
 // Overwrite the formula index with one that adds an API-only name, so an
 // API-scope answer differs from the installed-scope one.
 fn seedApiOnlyName(allocator: std.mem.Allocator, prefix: []const u8) !void {
-    const idx = try std.fmt.allocPrint(allocator, "{s}/cache/api/names_formula.txt", .{prefix});
+    const idx = try allocator.print("{s}/cache/api/names_formula.txt", .{prefix});
     defer allocator.free(idx);
     try writeFile(idx, "wget\nwgetpaste\nwget-api-only\n");
 }
@@ -439,7 +439,7 @@ test "execute online default still returns API-only names" {
 
     const out = try captureExecuteWith(testing.allocator, &.{ "--api", "wget" }, "online_default", .empty, false);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "wget-api-only") != null);
+    try testing.expect(std.mem.find(u8, out, "wget-api-only") != null);
 }
 
 // --- unreadable install database ---------------------------------------
@@ -448,14 +448,14 @@ test "execute online default still returns API-only names" {
 // must stop the search; only a prefix with no db/ has nothing installed.
 
 fn dbDir(buf: []u8, prefix: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/db", .{prefix});
+    return std.mem.print(buf, "{s}/db", .{prefix});
 }
 
 fn writeGarbageDb(prefix: []const u8) !void {
     var dir_buf: [512]u8 = undefined;
     try test_io.cwd().createDirPath(std.Options.debug_io, try dbDir(&dir_buf, prefix));
     var path_buf: [512]u8 = undefined;
-    try writeFile(try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{prefix}), std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
+    try writeFile(try std.mem.print(&path_buf, "{s}/db/malt.db", .{prefix}), std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
 }
 
 /// Runs `search` in both output modes; each must abort and name the DB.
@@ -470,7 +470,7 @@ fn expectSearchRefusesDb(args: []const []const u8) !void {
         output.setMode(mode);
         err_buf.clearRetainingCapacity();
         try testing.expectError(error.Aborted, search.execute(&malt.app_ctx.debug_ctx, testing.allocator, args));
-        try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+        try testing.expect(std.mem.find(u8, err_buf.items, "install database") != null);
     }
 }
 
@@ -497,7 +497,7 @@ test "execute --installed reports package rows it cannot read instead of no resu
     defer s.deinit(testing.allocator);
     try seedDb(testing.allocator, s.path);
     var path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
+    try test_io.corruptTable(try std.mem.printSentinel(&path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
     try expectSearchRefusesDb(&.{ "--installed", "--formula", "wget" });
 }
 
@@ -508,7 +508,7 @@ test "execute --json reports package rows it cannot read instead of marking hits
     try seedCache(testing.allocator, s.path);
     try seedDb(testing.allocator, s.path);
     var path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
+    try test_io.corruptTable(try std.mem.printSentinel(&path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
 
     const prior = OutputState.save();
     defer prior.restore();
@@ -533,5 +533,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--bogus", "wget" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --bogus") != null);
 }

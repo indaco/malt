@@ -26,17 +26,17 @@ const Scratch = struct {
         const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-        const api_dir = try std.fmt.allocPrint(allocator, "{s}/cache/api", .{path});
+        const api_dir = try allocator.print("{s}/cache/api", .{path});
         defer allocator.free(api_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, api_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
         // An inherited MALT_CACHE would miss the seeded records, and a miss
         // aborts just like a refusal does.
         var cache_buf: [512]u8 = undefined;
-        const cache = try std.fmt.bufPrintSentinel(&cache_buf, "{s}/cache", .{path}, 0);
+        const cache = try std.mem.printSentinel(&cache_buf, "{s}/cache", .{path}, 0);
         _ = c.setenv("MALT_CACHE", cache.ptr, 1);
         return .{ .path = path };
     }
@@ -68,7 +68,7 @@ fn unquiet() void {
 /// Seed two installed kegs: wget → openssl@3, curl → openssl@3.
 fn seedDeps(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -219,7 +219,7 @@ fn seedApiCache(prefix: []const u8) !void {
     };
     for (records) |r| {
         var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/api/formula_{s}.json", .{ prefix, r[0] });
+        const path = try std.mem.print(&path_buf, "{s}/cache/api/formula_{s}.json", .{ prefix, r[0] });
         const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, r[1]);
@@ -274,8 +274,8 @@ test "execute reports an interrupt that cut a lookup short, not the lookup failu
 
     const ctx = offlineCtx();
     try testing.expectError(error.UserInterrupted, deps_cli.execute(&ctx, testing.allocator, &.{"nope"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Interrupted") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not cached") == null);
 }
 
 test "execute still renders clean API records offline" {
@@ -301,7 +301,7 @@ test "execute reports an install database it cannot open instead of not-found" {
     defer s.deinit(testing.allocator);
     try seedApiCache(s.path);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{s.path});
+    const db_path = try std.mem.print(&db_path_buf, "{s}/db/malt.db", .{s.path});
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
@@ -318,7 +318,7 @@ test "execute reports a db/ directory it cannot look into instead of not-found" 
     defer s.deinit(testing.allocator);
     try seedDeps(s.path);
     var dir_buf: [512]u8 = undefined;
-    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.mem.print(&dir_buf, "{s}/db", .{s.path}));
     defer test_io.unwallDir(std.Options.debug_io, walled);
 
     try expectDepsAborts(&.{ "--installed", "wget" });
@@ -332,7 +332,7 @@ test "dbDepLookup returns null for an unknown keg" {
     try seedDeps(s.path);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -347,7 +347,7 @@ test "dbDepLookup returns owned strings for an installed keg" {
     try seedDeps(s.path);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -368,7 +368,7 @@ test "dbDepLookup reports a database it cannot query instead of a miss" {
     defer s.deinit(testing.allocator);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -385,7 +385,7 @@ test "dbDepLookup reports an unreadable dependency table instead of a leaf" {
     try seedDeps(s.path);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try db.exec("DROP TABLE dependencies;");
@@ -401,7 +401,7 @@ test "dbDepLookup reports a keg table it cannot read instead of a miss" {
     try seedDeps(s.path);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     try test_io.corruptTable(db_path, "kegs");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
@@ -417,7 +417,7 @@ test "dbDepLookup reports dependency rows it cannot read instead of a leaf" {
     try seedDeps(s.path);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     try test_io.corruptTable(db_path, "dependencies");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
@@ -436,7 +436,7 @@ test "dbDepLookup returns an empty slice for an installed leaf keg" {
     try seedDeps(s.path);
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -456,5 +456,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, deps_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--tree", "wget" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --tree") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --tree") != null);
 }

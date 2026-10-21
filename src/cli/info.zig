@@ -267,7 +267,7 @@ fn emitNotFound(
         return;
     }
     var buf: [4096]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
+    const line = std.mem.print(&buf, "{s}: not installed\n", .{name}) catch return;
     stdout.writeAll(line) catch return;
 }
 
@@ -535,12 +535,12 @@ pub fn encodeInstallHint(
 /// fresh prefix, an error for anything else that will not open.
 pub fn openInstallDb(io: std.Io, prefix: []const u8) error{Aborted}!?sqlite.Database {
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch {
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch {
         output.err("could not open the install database under {s}", .{prefix});
         return error.Aborted;
     };
     return sqlite.Database.open(db_path) catch {
-        if (prefix_path.dirMissing(io, std.fs.path.dirname(db_path).?)) return null;
+        if (prefix_path.dirMissing(io, std.Io.Dir.path.dirname(db_path).?)) return null;
         output.err("could not open the install database at {s}", .{db_path});
         return error.Aborted;
     };
@@ -557,7 +557,7 @@ pub fn dbUnreadable(name: []const u8) error{Aborted} {
 /// that report the failure themselves (doctor's integrity row).
 pub fn openDb(io: std.Io, prefix: []const u8, dry_run: bool) ?sqlite.Database {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
     return schema_report.openPreviewable(io, db_path, dry_run) catch null;
 }
 
@@ -880,11 +880,11 @@ test "encodeInstallHint surfaces both malt and mt invocations" {
     var scratch: [512]u8 = undefined;
     try encodeInstallHint(&aw.writer, &scratch, "wget", false, false, 14);
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "Status:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Not installed") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Install:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "malt install wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "mt install wget") != null);
+    try testing.expect(std.mem.find(u8, out, "Status:") != null);
+    try testing.expect(std.mem.find(u8, out, "Not installed") != null);
+    try testing.expect(std.mem.find(u8, out, "Install:") != null);
+    try testing.expect(std.mem.find(u8, out, "malt install wget") != null);
+    try testing.expect(std.mem.find(u8, out, "mt install wget") != null);
 }
 
 test "encodeInstallHint collapses to a bare line in quiet mode" {
@@ -912,18 +912,18 @@ test "encodeApiFormulaHuman includes metadata and install hint" {
     try encodeApiFormulaHuman(&aw.writer, &scratch, &f, false, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "wget: stable 1.24.5\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Description:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Internet file retriever") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Homepage:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "https://www.gnu.org/software/wget/") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Status:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Install:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "malt install wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "From:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "homebrew/core") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Dependencies:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "libidn2, openssl@3\n") != null);
+    try testing.expect(std.mem.find(u8, out, "wget: stable 1.24.5\n") != null);
+    try testing.expect(std.mem.find(u8, out, "Description:") != null);
+    try testing.expect(std.mem.find(u8, out, "Internet file retriever") != null);
+    try testing.expect(std.mem.find(u8, out, "Homepage:") != null);
+    try testing.expect(std.mem.find(u8, out, "https://www.gnu.org/software/wget/") != null);
+    try testing.expect(std.mem.find(u8, out, "Status:") != null);
+    try testing.expect(std.mem.find(u8, out, "Install:") != null);
+    try testing.expect(std.mem.find(u8, out, "malt install wget") != null);
+    try testing.expect(std.mem.find(u8, out, "From:") != null);
+    try testing.expect(std.mem.find(u8, out, "homebrew/core") != null);
+    try testing.expect(std.mem.find(u8, out, "Dependencies:") != null);
+    try testing.expect(std.mem.find(u8, out, "libidn2, openssl@3\n") != null);
 }
 
 test "encodeApiFormulaJson produces the documented shape" {
@@ -954,16 +954,16 @@ test "encodeApiCaskHuman includes metadata and install hint" {
     try encodeApiCaskHuman(&aw.writer, &scratch, &c, false, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "firefox: 149.0.2 (cask)\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Name:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Mozilla Firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Description:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Web browser") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Status:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Install:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "malt install firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "URL:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "https://example.com/firefox.dmg") != null);
+    try testing.expect(std.mem.find(u8, out, "firefox: 149.0.2 (cask)\n") != null);
+    try testing.expect(std.mem.find(u8, out, "Name:") != null);
+    try testing.expect(std.mem.find(u8, out, "Mozilla Firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "Description:") != null);
+    try testing.expect(std.mem.find(u8, out, "Web browser") != null);
+    try testing.expect(std.mem.find(u8, out, "Status:") != null);
+    try testing.expect(std.mem.find(u8, out, "Install:") != null);
+    try testing.expect(std.mem.find(u8, out, "malt install firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "URL:") != null);
+    try testing.expect(std.mem.find(u8, out, "https://example.com/firefox.dmg") != null);
 }
 
 test "encodeApiCaskJson produces the documented shape" {
@@ -1027,16 +1027,16 @@ test "encodeInstalledCaskHuman renders every populated field" {
     try encodeInstalledCaskHuman(&aw.writer, &scratch, &row, no_history, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "firefox: 120.0 (cask)\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Name:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "URL:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "https://example.com/firefox.dmg") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "App:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "/Applications/Firefox.app") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Auto-updates:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Installed:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "2026-05-13 10:40:56") != null);
+    try testing.expect(std.mem.find(u8, out, "firefox: 120.0 (cask)\n") != null);
+    try testing.expect(std.mem.find(u8, out, "Name:") != null);
+    try testing.expect(std.mem.find(u8, out, "Firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "URL:") != null);
+    try testing.expect(std.mem.find(u8, out, "https://example.com/firefox.dmg") != null);
+    try testing.expect(std.mem.find(u8, out, "App:") != null);
+    try testing.expect(std.mem.find(u8, out, "/Applications/Firefox.app") != null);
+    try testing.expect(std.mem.find(u8, out, "Auto-updates:") != null);
+    try testing.expect(std.mem.find(u8, out, "Installed:") != null);
+    try testing.expect(std.mem.find(u8, out, "2026-05-13 10:40:56") != null);
 }
 
 test "encodeInstalledCaskHuman omits Auto-updates when false and uses fallbacks for nulls" {
@@ -1052,11 +1052,11 @@ test "encodeInstalledCaskHuman omits Auto-updates when false and uses fallbacks 
     try encodeInstalledCaskHuman(&aw.writer, &scratch, &row, no_history, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "ghost: unknown (cask)\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Auto-updates:") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "URL:          N/A") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "App:          N/A") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Installed:    N/A") != null);
+    try testing.expect(std.mem.find(u8, out, "ghost: unknown (cask)\n") != null);
+    try testing.expect(std.mem.find(u8, out, "Auto-updates:") == null);
+    try testing.expect(std.mem.find(u8, out, "URL:          N/A") != null);
+    try testing.expect(std.mem.find(u8, out, "App:          N/A") != null);
+    try testing.expect(std.mem.find(u8, out, "Installed:    N/A") != null);
 }
 
 test "encodeInstalledCaskJson produces the documented shape" {
@@ -1112,11 +1112,11 @@ test "encodeInstalledCaskHuman surfaces the owning tap when set" {
     try encodeInstalledCaskHuman(&aw.writer, &scratch, &row, no_history, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
+    try testing.expect(std.mem.find(u8, out, "Tap:          yuzeguitarist/deck") != null);
     // Tap is appended after Installed so the top of the dump stays
     // stable for scripts that grep the first N lines of `mt info`.
-    const installed_idx = std.mem.indexOf(u8, out, "Installed:") orelse return error.NoInstalledLine;
-    const tap_idx = std.mem.indexOf(u8, out, "Tap:") orelse return error.NoTapLine;
+    const installed_idx = std.mem.find(u8, out, "Installed:") orelse return error.NoInstalledLine;
+    const tap_idx = std.mem.find(u8, out, "Tap:") orelse return error.NoTapLine;
     try testing.expect(installed_idx < tap_idx);
 }
 
@@ -1132,7 +1132,7 @@ test "encodeInstalledCaskHuman omits the Tap line when null (core-API cask)" {
     var scratch: [4096]u8 = undefined;
     try encodeInstalledCaskHuman(&aw.writer, &scratch, &row, no_history, false);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "Tap:") == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "Tap:") == null);
 }
 
 test "encodeInstalledCaskJson includes tap as an empty string for null and the label for tap casks" {
@@ -1147,7 +1147,7 @@ test "encodeInstalledCaskJson includes tap as an empty string for null and the l
     defer aw.deinit();
     try encodeInstalledCaskJson(&aw.writer, &tapped, no_history);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "\"tap\":\"yuzeguitarist/deck\"") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "\"tap\":\"yuzeguitarist/deck\"") != null);
 }
 
 // `mt info` reuses `mt rollback <pkg> --list`'s listing so users see one
@@ -1200,15 +1200,15 @@ test "encodeInstalledFormulaHuman appends the rollback listing when history is n
         false,
     );
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.24") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.23") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "aaa111") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "bbb222") != null);
+    try testing.expect(std.mem.find(u8, out, "Available rollback versions for wget") != null);
+    try testing.expect(std.mem.find(u8, out, "1.24") != null);
+    try testing.expect(std.mem.find(u8, out, "1.23") != null);
+    try testing.expect(std.mem.find(u8, out, "aaa111") != null);
+    try testing.expect(std.mem.find(u8, out, "bbb222") != null);
     // Section sits below the field block so the top of the dump stays
     // stable for greppers reading the first N lines.
-    const installed_idx = std.mem.indexOf(u8, out, "Installed:").?;
-    const section_idx = std.mem.indexOf(u8, out, "Available rollback versions").?;
+    const installed_idx = std.mem.find(u8, out, "Installed:").?;
+    const section_idx = std.mem.find(u8, out, "Available rollback versions").?;
     try testing.expect(installed_idx < section_idx);
 }
 
@@ -1325,7 +1325,7 @@ test "encodeInstalledFormulaJson emits dependencies:[] for a formula with no dep
         no_history,
         &.{},
     );
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "\"dependencies\":[]") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "\"dependencies\":[]") != null);
 }
 
 test "encodeInstalledCaskHuman omits the rollback section when history is empty" {
@@ -1344,7 +1344,7 @@ test "encodeInstalledCaskHuman omits the rollback section when history is empty"
     var scratch: [4096]u8 = undefined;
     try encodeInstalledCaskHuman(&aw.writer, &scratch, &row, no_history, false);
 
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "Available rollback versions") == null);
+    try testing.expect(std.mem.find(u8, aw.written(), "Available rollback versions") == null);
 }
 
 test "encodeInstalledCaskHuman appends the rollback listing when history is non-empty" {
@@ -1364,9 +1364,9 @@ test "encodeInstalledCaskHuman appends the rollback listing when history is non-
     try encodeInstalledCaskHuman(&aw.writer, &scratch, &row, &cask_history, false);
 
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for flux-markdown") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.31.0") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.30.0") != null);
+    try testing.expect(std.mem.find(u8, out, "Available rollback versions for flux-markdown") != null);
+    try testing.expect(std.mem.find(u8, out, "1.31.0") != null);
+    try testing.expect(std.mem.find(u8, out, "1.30.0") != null);
 }
 
 test "encodeInstalledCaskJson splices history entries into the installed-cask object" {

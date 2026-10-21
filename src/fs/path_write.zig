@@ -15,7 +15,7 @@ pub const WriteError = ParentError || error{ OpenFileFailed, WriteFailed };
 /// symlink-to-dir parent (e.g. macOS `/tmp`) would be rejected as `NotDir` —
 /// skip creation when the parent already resolves to a directory.
 pub fn ensureParentDir(io: std.Io, path: []const u8) ParentError!void {
-    const dir = std.fs.path.dirname(path) orelse return;
+    const dir = std.Io.Dir.path.dirname(path) orelse return;
     if (dir.len == 0) return;
 
     // Follows symlinks, so a symlink-to-dir parent counts as already present.
@@ -58,8 +58,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -71,8 +70,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -104,7 +102,7 @@ test "writeFile creates a relative nested parent chain" {
     // the pid+seq uniqueness by hand instead of the /tmp-rooted Scratch.
     const io = std.Options.debug_io;
     var rel_buf: [64]u8 = undefined;
-    const rel_root = try std.fmt.bufPrint(
+    const rel_root = try std.mem.print(
         &rel_buf,
         "zz_malt_pathwrite_rel_{d}_{d}",
         .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
@@ -113,7 +111,7 @@ test "writeFile creates a relative nested parent chain" {
     defer std.Io.Dir.cwd().deleteTree(io, rel_root) catch {};
 
     var dest_buf: [128]u8 = undefined;
-    const dest = try std.fmt.bufPrint(&dest_buf, "{s}/sub/out.txt", .{rel_root});
+    const dest = try std.mem.print(&dest_buf, "{s}/sub/out.txt", .{rel_root});
 
     try writeFile(io, dest, "data\n");
 

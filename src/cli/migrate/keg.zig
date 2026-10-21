@@ -316,7 +316,7 @@ fn migrateFromLocalCellar(
     defer if (deps.db_mu) |m| m.unlock(ctx.io);
 
     var full_name_buf: [full_name_buf_len]u8 = undefined;
-    const full_name = std.fmt.bufPrint(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
+    const full_name = std.mem.print(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
 
     recordAndLink(ctx.io, deps, .{
         .name = keg_name,
@@ -423,7 +423,7 @@ pub fn findTapFormulaRb(
         }
     }
 
-    const slash = std.mem.indexOfScalar(u8, tap, '/') orelse return null;
+    const slash = std.mem.findScalar(u8, tap, '/') orelse return null;
     const user = tap[0..slash];
     const raw_repo = tap[slash + 1 ..];
     if (user.len == 0 or raw_repo.len == 0) return null;
@@ -433,20 +433,20 @@ pub fn findTapFormulaRb(
         raw_repo;
     if (repo.len == 0) return null;
 
-    var tap_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tap_path = std.fmt.bufPrint(&tap_buf, "{s}/Library/Taps/{s}/homebrew-{s}", .{
+    var tap_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tap_path = std.mem.print(&tap_buf, "{s}/Library/Taps/{s}/homebrew-{s}", .{
         homebrew_prefix, user, repo,
     }) catch return null;
 
-    var rb_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const sharded = std.fmt.bufPrint(&rb_buf, "{s}/Formula/{c}/{s}.rb", .{
+    var rb_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sharded = std.mem.print(&rb_buf, "{s}/Formula/{c}/{s}.rb", .{
         tap_path, name[0], name,
     }) catch return null;
     if (std.Io.Dir.accessAbsolute(io, sharded, .{})) |_| {
         return allocator.dupe(u8, sharded) catch null;
     } else |_| {}
 
-    const flat = std.fmt.bufPrint(&rb_buf, "{s}/Formula/{s}.rb", .{ tap_path, name }) catch return null;
+    const flat = std.mem.print(&rb_buf, "{s}/Formula/{s}.rb", .{ tap_path, name }) catch return null;
     if (std.Io.Dir.accessAbsolute(io, flat, .{})) |_| {
         return allocator.dupe(u8, flat) catch null;
     } else |_| {}
@@ -467,7 +467,7 @@ fn findInstalledKegPath(
     name: []const u8,
 ) !?[]const u8 {
     var cellar_buf: [512]u8 = undefined;
-    const cellar_name_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}", .{ homebrew_prefix, name }) catch return null;
+    const cellar_name_path = std.mem.print(&cellar_buf, "{s}/Cellar/{s}", .{ homebrew_prefix, name }) catch return null;
 
     var dir = std.Io.Dir.openDirAbsolute(io, cellar_name_path, .{ .iterate = true }) catch return null;
     defer dir.close(io);
@@ -480,12 +480,12 @@ fn findInstalledKegPath(
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
         var receipt_buf: [512]u8 = undefined;
-        const receipt_rel = std.fmt.bufPrint(&receipt_buf, "{s}/INSTALL_RECEIPT.json", .{entry.name}) catch continue;
+        const receipt_rel = std.mem.print(&receipt_buf, "{s}/INSTALL_RECEIPT.json", .{entry.name}) catch continue;
         const stat = dir.statFile(io, receipt_rel, .{}) catch continue;
         if (stat.kind != .file) continue;
         const mtime_ns = stat.mtime.toNanoseconds();
         if (mtime_ns > best_mtime_ns) {
-            const new_full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_name_path, entry.name });
+            const new_full = try allocator.print("{s}/{s}", .{ cellar_name_path, entry.name });
             if (best_path) |old| allocator.free(old);
             best_path = new_full;
             best_mtime_ns = mtime_ns;
@@ -516,7 +516,7 @@ fn readInstallReceipt(
     keg_path: []const u8,
 ) ![]u8 {
     var path_buf: [512]u8 = undefined;
-    const receipt_path = try std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{keg_path});
+    const receipt_path = try std.mem.print(&path_buf, "{s}/INSTALL_RECEIPT.json", .{keg_path});
     const file = try std.Io.Dir.openFileAbsolute(io, receipt_path, .{});
     defer file.close(io);
     const stat = try file.stat(io);
@@ -562,13 +562,13 @@ fn downloadBottle(
     }
 
     const path = bottle_url[ghcr_prefix_str.len..];
-    const blobs_pos = std.mem.indexOf(u8, path, "/blobs/") orelse {
+    const blobs_pos = std.mem.find(u8, path, "/blobs/") orelse {
         output.err("    {s}: malformed bottle URL", .{name});
         return false;
     };
 
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return false;
-    const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return false;
+    const repo = std.mem.print(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return false;
+    const digest = std.mem.print(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return false;
 
     const tmp_dir = atomic.createTempDir(ctx.io, allocator, name) catch return false;
 
@@ -629,7 +629,7 @@ const RecordError = error{ RecordFailed, LinkFailed };
 fn recordAndLink(io: std.Io, deps: MigrateDeps, fields: record.KegFields, keg_name: []const u8, do_link: bool) RecordError!void {
     // The Cellar dir is revision-tagged (`1.0_2`) while the row keeps the
     // bare version, so the dir is addressed by its own name.
-    const keg_version = std.fs.path.basename(fields.cellar_path);
+    const keg_version = std.Io.Dir.path.basename(fields.cellar_path);
     const keg_id = record.recordKegFields(deps.db, fields, .{}) catch {
         output.err("    {s}: failed to record in database", .{keg_name});
         cellar_mod.remove(io, deps.prefix, fields.name, keg_version) catch {};
@@ -673,8 +673,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -686,8 +685,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -791,8 +789,8 @@ test "findTapFormulaRb does not double-prefix when the tap repo already starts w
     );
     try std.testing.expect(got != null);
     defer std.testing.allocator.free(got.?);
-    try std.testing.expect(std.mem.indexOf(u8, got.?, "/homebrew-foo/") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got.?, "/homebrew-homebrew-") == null);
+    try std.testing.expect(std.mem.find(u8, got.?, "/homebrew-foo/") != null);
+    try std.testing.expect(std.mem.find(u8, got.?, "/homebrew-homebrew-") == null);
 }
 
 test "findTapFormulaRb returns null when neither the receipt path nor the canonical layout exists" {
@@ -842,7 +840,7 @@ test "readFileToOwnedSlice trims allocation when expected_size exceeds bytes rea
     defer r.close(std.Options.debug_io);
 
     // Overshoot is the stat-vs-read shortfall — the result must still
-    // be safe to free under DebugAllocator.
+    // be safe to free under SafeAllocator.
     const text = try readFileToOwnedSlice(std.Options.debug_io, std.testing.allocator, r, 100);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("hello", text);
@@ -869,7 +867,7 @@ test "readFileToOwnedSlice returns the full buffer when expected_size matches by
     try std.testing.expectEqualStrings(payload, text);
 }
 
-test "readInstallReceipt round-trips a real INSTALL_RECEIPT.json under DebugAllocator" {
+test "readInstallReceipt round-trips a real INSTALL_RECEIPT.json under SafeAllocator" {
     var s = try Scratch.init("install_receipt_roundtrip");
     defer s.deinit();
     const dir = s.base;
@@ -890,9 +888,9 @@ test "readInstallReceipt round-trips a real INSTALL_RECEIPT.json under DebugAllo
 
 fn writeBrewReceipt(s: *Scratch, name: []const u8, payload: []const u8) !void {
     const a = s.arena.allocator();
-    const keg_dir = try std.fmt.allocPrint(a, "{s}/Cellar/{s}/1.0", .{ s.base, name });
+    const keg_dir = try a.print("{s}/Cellar/{s}/1.0", .{ s.base, name });
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, keg_dir);
-    const path = try std.fmt.allocPrint(a, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const path = try a.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
     const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
     defer w.close(std.Options.debug_io);
     try w.writeStreamingAll(std.Options.debug_io, payload);
@@ -932,7 +930,7 @@ test "full_name buffer fits realistic long tap+keg combinations" {
     try std.testing.expect(need <= full_name_buf_len);
 
     var buf: [full_name_buf_len]u8 = undefined;
-    const got = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ tap, keg_name });
+    const got = try std.mem.print(&buf, "{s}/{s}", .{ tap, keg_name });
     try std.testing.expect(std.mem.startsWith(u8, got, tap));
     try std.testing.expect(std.mem.endsWith(u8, got, keg_name));
     try std.testing.expect(got[tap.len] == '/');
@@ -1000,7 +998,7 @@ test "claim under db_mu keeps each worker's keg_id bound to its own kegs row" {
             while (i < iters) : (i += 1) {
                 const n = c.keg_seq.fetchAdd(1, .monotonic);
                 var name_buf: [32]u8 = undefined;
-                const name = std.fmt.bufPrint(&name_buf, "keg-{d}", .{n}) catch unreachable;
+                const name = std.mem.print(&name_buf, "keg-{d}", .{n}) catch unreachable;
                 c.db_mu.lockUncancelable(c.io);
                 if (record.recordKegFields(c.db, .{
                     .name = name,
@@ -1031,7 +1029,7 @@ test "claim under db_mu keeps each worker's keg_id bound to its own kegs row" {
             while (i < 2_000_000 and !c.done.load(.acquire)) : (i += 1) {
                 const n = c.ref_seq.fetchAdd(1, .monotonic);
                 var sha_buf: [64]u8 = undefined;
-                const sha = std.fmt.bufPrint(&sha_buf, "{x:0>64}", .{n}) catch unreachable;
+                const sha = std.mem.print(&sha_buf, "{x:0>64}", .{n}) catch unreachable;
                 c.db_mu.lockUncancelable(c.io);
                 c.store.claim(sha) catch {};
                 c.db_mu.unlock(c.io);

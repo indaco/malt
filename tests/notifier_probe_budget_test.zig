@@ -63,7 +63,7 @@ test "the version probe spends one attempt on an endpoint that keeps failing" {
     // `localhost`, not `127.0.0.1`: certificate host verification matches DNS
     // names, and an IP SAN never satisfies it.
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "https://localhost:{s}/releases/latest", .{fx.port});
+    const url = try std.mem.print(&url_buf, "https://localhost:{s}/releases/latest", .{fx.port});
 
     const started_ms = test_io.milliTimestamp(io);
     const result = http.get(url);
@@ -101,7 +101,7 @@ test "a transient failure is still worth retrying for everyone else" {
     http.retry_backoff_ms = &.{ 0, 0, 0 };
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "https://localhost:{s}/retried", .{fx.port});
+    const url = try std.mem.print(&url_buf, "https://localhost:{s}/retried", .{fx.port});
 
     const result = http.get(url);
     http.deinit();

@@ -1152,7 +1152,7 @@ pub const Parser = struct {
     /// Parse a double-quoted string's content for #{...} interpolation segments.
     fn parseStringInterpolation(self: *Parser, content: []const u8, loc: SourceLoc) DslError![]const ast.StringPart {
         // Quick check: if no interpolation, return a single literal part
-        if (std.mem.indexOf(u8, content, "#{") == null) {
+        if (std.mem.find(u8, content, "#{") == null) {
             const parts = self.allocator.alloc(ast.StringPart, 1) catch return DslError.OutOfMemory;
             parts[0] = .{ .literal = content };
             return parts;
@@ -1506,7 +1506,7 @@ test "parser: expression nesting beyond the depth limit is a bounded ParseError"
 
     var found = false;
     for (p.diagnostics()) |d| {
-        if (std.mem.indexOf(u8, d.message, "nesting too deep") != null) found = true;
+        if (std.mem.find(u8, d.message, "nesting too deep") != null) found = true;
     }
     try std.testing.expect(found);
 }
@@ -1530,7 +1530,7 @@ test "parser: unary-not chain beyond the depth limit is a bounded ParseError" {
 
     var found = false;
     for (p.diagnostics()) |d| {
-        if (std.mem.indexOf(u8, d.message, "nesting too deep") != null) found = true;
+        if (std.mem.find(u8, d.message, "nesting too deep") != null) found = true;
     }
     try std.testing.expect(found);
 }
@@ -1556,7 +1556,7 @@ test "parser: block nesting beyond the depth limit is a bounded ParseError" {
 
     var found = false;
     for (p.diagnostics()) |d| {
-        if (std.mem.indexOf(u8, d.message, "nesting too deep") != null) found = true;
+        if (std.mem.find(u8, d.message, "nesting too deep") != null) found = true;
     }
     try std.testing.expect(found);
 }

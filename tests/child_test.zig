@@ -22,8 +22,8 @@ test "run captures the child's stderr and surfaces a non-zero exit code" {
     var report = try child.run(threaded.io(), std.testing.allocator, &argv);
     defer report.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 7), report.code);
-    try std.testing.expect(std.mem.indexOf(u8, report.stderr, "ERR-MSG") != null);
-    try std.testing.expect(std.mem.indexOf(u8, report.stdout, "OUT") != null);
+    try std.testing.expect(std.mem.find(u8, report.stderr, "ERR-MSG") != null);
+    try std.testing.expect(std.mem.find(u8, report.stdout, "OUT") != null);
 }
 
 test "run on a successful child still returns the captured stdout" {
@@ -36,7 +36,7 @@ test "run on a successful child still returns the captured stdout" {
     var report = try child.run(threaded.io(), std.testing.allocator, &argv);
     defer report.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), report.code);
-    try std.testing.expect(std.mem.indexOf(u8, report.stdout, "silent-but-recorded") != null);
+    try std.testing.expect(std.mem.find(u8, report.stdout, "silent-but-recorded") != null);
 }
 
 test "run drains a stream that overflows the pipe buffer while the other stays open" {

@@ -283,7 +283,7 @@ test "interpolateVersion substitutes #{version} once in the URL" {
     var buf: [256]u8 = undefined;
     const got = install_args.interpolateVersion(&buf, "https://example.com/v#{version}/foo-#{version}.tar.gz", "1.2.3");
     // Only the first occurrence is replaced (matches the tap-install contract).
-    try testing.expect(std.mem.indexOf(u8, got, "1.2.3") != null);
+    try testing.expect(std.mem.find(u8, got, "1.2.3") != null);
 }
 
 test "interpolateVersion passes through an URL without the needle" {
@@ -456,7 +456,7 @@ fn scratchPrefix() ![:0]u8 {
     // sweeps; a bare `/tmp/m<hex>` matches no glob there and would leak a
     // whole Cellar tree on every crashed run.
     const rnd = test_io.randomInt(std.Options.debug_io, u32) & 0x000F_FFFF;
-    const dir = try std.fmt.allocPrintSentinel(testing.allocator, "/tmp/ml_{x:0>5}", .{rnd}, 0);
+    const dir = try testing.allocator.printSentinel("/tmp/ml_{x:0>5}", .{rnd}, 0);
     errdefer testing.allocator.free(dir);
     std.debug.assert(dir.len <= "/opt/homebrew".len);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
@@ -554,7 +554,7 @@ test "execute --local with a missing file exits with PartialFailure" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // Never created — inside this run's prefix so no sibling run can make it exist.
-    const missing = try std.fmt.allocPrint(arena.allocator(), "{s}/missing.rb", .{prefix});
+    const missing = try arena.allocator().print("{s}/missing.rb", .{prefix});
     try testing.expectError(
         install_record.InstallError.PartialFailure,
         install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", missing }),
@@ -568,7 +568,7 @@ test "execute --local with a non-.rb realpath is rejected before parse" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/notaformula", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/notaformula", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, "class X end\n");
 
@@ -590,7 +590,7 @@ test "execute --local --dry-run with a valid .rb prints a plan" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/wget.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, sample_rb);
 
@@ -610,10 +610,10 @@ test "execute --local --dry-run refuses a recipe whose directory holds a line br
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/x\nformula evil", .{prefix});
+    const dir = try testing.allocator.print("{s}/x\nformula evil", .{prefix});
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{dir});
+    const rb_path = try testing.allocator.print("{s}/wget.rb", .{dir});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, sample_rb);
 
@@ -635,7 +635,7 @@ test "execute autodetects a .rb path even without --local (tilde-style hint)" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/wget.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, sample_rb);
 
@@ -654,7 +654,7 @@ test "execute --local tolerates a world-writable fixture (advisory only)" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/hello.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, sample_rb);
 
@@ -680,7 +680,7 @@ test "execute --local rejects a .rb whose archive URL is not https" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/evil.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/evil.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     const evil_rb =
         \\class Evil < Formula
@@ -715,7 +715,7 @@ test "execute --local --dry-run accepts a cask DSL multi-arch fixture and reache
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/rebased.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/rebased.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     const cask_rb =
         \\cask "rebased" do
@@ -751,15 +751,15 @@ test "execute --local --dry-run accepts a cask DSL multi-arch fixture and reache
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", rb_path });
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Dry run: would install") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Cannot parse") == null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Dry run: would install") != null);
+    try testing.expect(std.mem.find(u8, stderr_buf.items, "Cannot parse") == null);
 }
 
 test "execute --local rejects a malformed .rb (missing version/url/sha256)" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/broken.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/broken.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, "class Broken < Formula\nend\n");
 
@@ -801,7 +801,7 @@ fn seedLocalKeg(
 
     // Materialise a minimal Cellar layout so cellar.remove has something
     // to tear down when uninstall is exercised.
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(cellar_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 
@@ -822,12 +822,12 @@ test "isInstalled sees a locally-recorded keg by name" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/wget.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try seedLocalKeg(db_path, prefix, "wget", "1.0", rb_path);
 
@@ -843,12 +843,12 @@ test "uninstall + purge CLI flow treats tap='local' rows like any other keg" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/wget.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try seedLocalKeg(db_path, prefix, "wget", "1.0", rb_path);
 
@@ -873,7 +873,7 @@ test "execute --local rejects a directory path (not a regular file)" {
     // Use the prefix itself as the target — it exists but is a directory.
     // We also need the target to end in .rb so realpath + the later `.file`
     // check is what rejects it (rather than basename check).
-    const dir_path = try std.fmt.allocPrint(testing.allocator, "{s}/fake.rb", .{prefix});
+    const dir_path = try testing.allocator.print("{s}/fake.rb", .{prefix});
     defer testing.allocator.free(dir_path);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_path);
 
@@ -896,29 +896,29 @@ test "materializeRubyFormula refuses a symlinked package dir" {
 
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("cc".*)));
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
 
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try writeFile(cache_path, "warm-archive-fixture\n");
 
     // The keg would land here if the guard let the kernel follow the link.
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}-victim", .{prefix});
+    const victim = try testing.allocator.print("{s}-victim", .{prefix});
     defer testing.allocator.free(victim);
     test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, victim);
-    const canary = try std.fmt.allocPrint(testing.allocator, "{s}/SENTINEL", .{victim});
+    const canary = try testing.allocator.print("{s}/SENTINEL", .{victim});
     defer testing.allocator.free(canary);
     try writeFile(canary, "keep\n");
 
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{prefix});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar", .{prefix});
     defer testing.allocator.free(cellar_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 
-    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/wget", .{prefix});
+    const pkg_dir = try testing.allocator.print("{s}/Cellar/wget", .{prefix});
     defer testing.allocator.free(pkg_dir);
     try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
 
@@ -933,9 +933,9 @@ test "materializeRubyFormula refuses a symlinked package dir" {
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     var db = try malt.sqlite.Database.open(db_path);
@@ -965,7 +965,7 @@ test "materializeRubyFormula refuses a symlinked package dir" {
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false,
         false,
         false,
@@ -975,7 +975,7 @@ test "materializeRubyFormula refuses a symlinked package dir" {
 
     // Nothing crossed the link.
     try test_io.accessAbsolute(std.Options.debug_io, canary, .{});
-    const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/1.0", .{victim});
+    const leaked = try testing.allocator.print("{s}/1.0", .{victim});
     defer testing.allocator.free(leaked);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
 }
@@ -986,10 +986,10 @@ test "materializeRubyFormula refuses an escaping raw binary name before touching
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     try seedLocalKeg(db_path, prefix, "tool", "1.0", "u/t/tool");
     var db = try sqlite.Database.open(db_path);
@@ -1019,7 +1019,7 @@ test "materializeRubyFormula refuses an escaping raw binary name before touching
         .binary_name = "../../../../victim",
         .dependencies = &.{"no-such-dep"},
     };
-    const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix});
+    const cache_dir = try allocator.print("{s}/cache", .{prefix});
 
     // force, then dry run: both must stop at the screen.
     for ([_][2]bool{ .{ false, true }, .{ true, false } }) |mode| {
@@ -1040,7 +1040,7 @@ test "materializeRubyFormula refuses an escaping raw binary name before touching
         ));
     }
 
-    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tool/1.0", .{prefix});
+    const keg = try testing.allocator.print("{s}/Cellar/tool/1.0", .{prefix});
     defer testing.allocator.free(keg);
     try test_io.accessAbsolute(std.Options.debug_io, keg, .{});
     var stmt = try db.prepare("SELECT 1 FROM kegs WHERE name = 'tool';");
@@ -1066,17 +1066,17 @@ fn runTar(argv: []const []const u8) !void {
 // Pack a one-file `bin/<name>` keg at the SHA-keyed tap-cache path so
 // `materializeRubyFormula` takes the warm branch and stays offline.
 fn seedKegArchive(prefix: []const u8, name: []const u8, sha: []const u8) !void {
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/work_{s}/bin", .{ prefix, name });
+    const bin_dir = try testing.allocator.print("{s}/work_{s}/bin", .{ prefix, name });
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
-    const exe = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    const exe = try testing.allocator.print("{s}/{s}", .{ bin_dir, name });
     defer testing.allocator.free(exe);
     try writeFile(exe, "#!/bin/sh\necho hi\n");
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     const work = bin_dir[0 .. bin_dir.len - "/bin".len];
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
@@ -1085,24 +1085,24 @@ fn seedKegArchive(prefix: []const u8, name: []const u8, sha: []const u8) !void {
 // Like `seedKegArchive`, but the archive also carries `<label>.plist` at
 // its root with `body`, the way a formula that installs its own plist does.
 fn seedKegArchiveWithPlist(prefix: []const u8, name: []const u8, sha: []const u8, label: []const u8, body: []const u8) !void {
-    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work_{s}", .{ prefix, name });
+    const work = try testing.allocator.print("{s}/work_{s}", .{ prefix, name });
     defer testing.allocator.free(work);
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{work});
+    const bin_dir = try testing.allocator.print("{s}/bin", .{work});
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
-    const exe = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    const exe = try testing.allocator.print("{s}/{s}", .{ bin_dir, name });
     defer testing.allocator.free(exe);
     try writeFile(exe, "#!/bin/sh\necho hi\n");
-    const plist = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.plist", .{ work, label });
+    const plist = try testing.allocator.print("{s}/{s}.plist", .{ work, label });
     defer testing.allocator.free(plist);
     try writeFile(plist, body);
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
     try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
-    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
-    const plist_leaf = try std.fmt.allocPrint(testing.allocator, "{s}.plist", .{label});
+    const plist_leaf = try testing.allocator.print("{s}.plist", .{label});
     defer testing.allocator.free(plist_leaf);
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin", plist_leaf });
 }
@@ -1123,10 +1123,10 @@ fn installFromWarmCacheWith(prefix: [:0]const u8, resolved: install_local.Resolv
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     inline for (.{ "db", "Cellar" }) |sub| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, sub });
+        const dir = try testing.allocator.print("{s}/{s}", .{ prefix, sub });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
@@ -1144,7 +1144,7 @@ fn installFromWarmCacheWith(prefix: [:0]const u8, resolved: install_local.Resolv
         &db,
         &linker,
         prefix,
-        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        try allocator.print("{s}/cache", .{prefix}),
         false, // dry_run
         force,
         false, // download_only
@@ -1158,7 +1158,7 @@ fn installFromWarmCacheWith(prefix: [:0]const u8, resolved: install_local.Resolv
 const KegRow = struct { revision: i64, cellar_path: []const u8 };
 
 fn kegRevisionAndPath(prefix: []const u8, name: []const u8, path_buf: []u8) !KegRow {
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1193,18 +1193,18 @@ test "materializeRubyFormula names the keg row and Cellar leaf by the .rb revisi
         .sha256 = sha,
     }, false);
 
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/revfix/1.0.0_2", .{prefix});
+    const want = try testing.allocator.print("{s}/Cellar/revfix/1.0.0_2", .{prefix});
     defer testing.allocator.free(want);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const row = try kegRevisionAndPath(prefix, "revfix", &path_buf);
     try testing.expectEqual(@as(i64, 2), row.revision);
     try testing.expectEqualStrings(want, row.cellar_path);
     try test_io.accessAbsolute(std.Options.debug_io, want, .{});
 
-    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/revfix", .{prefix});
+    const opt = try testing.allocator.print("{s}/opt/revfix", .{prefix});
     defer testing.allocator.free(opt);
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(want, try test_io.readLinkAbsolute(std.Options.debug_io, opt, &link_buf));
 }
 
@@ -1226,7 +1226,7 @@ test "materializeRubyFormula records the tap subtree its .rb came from" {
         .tap_rb_subtree = .cask,
     }, false);
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1253,9 +1253,9 @@ test "materializeRubyFormula keeps a revision-less .rb on the bare Cellar leaf" 
         .sha256 = sha,
     }, false);
 
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bare/1.0.0", .{prefix});
+    const want = try testing.allocator.print("{s}/Cellar/bare/1.0.0", .{prefix});
     defer testing.allocator.free(want);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const row = try kegRevisionAndPath(prefix, "bare", &path_buf);
     try testing.expectEqual(@as(i64, 0), row.revision);
     try testing.expectEqualStrings(want, row.cellar_path);
@@ -1285,12 +1285,12 @@ test "force reinstall migrates a pre-fix bare keg onto the revisioned leaf" {
     revisioned.revision = 2;
     try installFromWarmCache(prefix, revisioned, true);
 
-    const old = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/migr/1.0.0", .{prefix});
+    const old = try testing.allocator.print("{s}/Cellar/migr/1.0.0", .{prefix});
     defer testing.allocator.free(old);
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/migr/1.0.0_2", .{prefix});
+    const want = try testing.allocator.print("{s}/Cellar/migr/1.0.0_2", .{prefix});
     defer testing.allocator.free(want);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const row = try kegRevisionAndPath(prefix, "migr", &path_buf);
     try testing.expectEqual(@as(i64, 2), row.revision);
     try testing.expectEqualStrings(want, row.cellar_path);
@@ -1312,7 +1312,7 @@ fn swallowLine(_: ?*anyopaque, _: []const u8) void {}
 // `keg_name` of the single services row labelled `label`; null when there
 // is none, an error when the upgrade shape left a duplicate behind.
 fn serviceKegName(prefix: []const u8, label: []const u8, buf: []u8) !?[]const u8 {
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     defer db.close();
@@ -1327,7 +1327,7 @@ fn serviceKegName(prefix: []const u8, label: []const u8, buf: []u8) !?[]const u8
 }
 
 fn readPlist(prefix: []const u8, label: []const u8) ![]u8 {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/var/malt/services/{s}/service.plist", .{ prefix, label });
+    const path = try testing.allocator.print("{s}/var/malt/services/{s}/service.plist", .{ prefix, label });
     defer testing.allocator.free(path);
     return test_io.cwd().readFileAlloc(std.Options.debug_io, path, testing.allocator, .unlimited);
 }
@@ -1359,13 +1359,13 @@ test "materializeRubyFormula registers the service a .rb service block declares"
 
     const plist = try readPlist(prefix, "com.malt.svcd");
     defer testing.allocator.free(plist);
-    const head = try std.fmt.allocPrint(testing.allocator, "<string>{s}/opt/svcd/bin/svcd</string>", .{prefix});
+    const head = try testing.allocator.print("<string>{s}/opt/svcd/bin/svcd</string>", .{prefix});
     defer testing.allocator.free(head);
-    try testing.expect(std.mem.indexOf(u8, plist, head) != null);
-    try testing.expect(std.mem.indexOf(u8, plist, "<string>--foreground</string>") != null);
-    const log = try std.fmt.allocPrint(testing.allocator, "<string>{s}/var/log/svcd.log</string>", .{prefix});
+    try testing.expect(std.mem.find(u8, plist, head) != null);
+    try testing.expect(std.mem.find(u8, plist, "<string>--foreground</string>") != null);
+    const log = try testing.allocator.print("<string>{s}/var/log/svcd.log</string>", .{prefix});
     defer testing.allocator.free(log);
-    try testing.expect(std.mem.indexOf(u8, plist, log) != null);
+    try testing.expect(std.mem.find(u8, plist, log) != null);
 }
 
 test "materializeRubyFormula lifts the plist a name-only service block says the keg ships" {
@@ -1375,7 +1375,7 @@ test "materializeRubyFormula lifts the plist a name-only service block says the 
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("3c".*)));
-    const body = try std.fmt.allocPrint(testing.allocator,
+    const body = try testing.allocator.print(
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         \\<plist version="1.0">
@@ -1423,26 +1423,26 @@ test "materializeRubyFormula lifts the plist a name-only service block says the 
         .shipped_label = "homebrew.mxcl.shipd",
     }, false, sink);
 
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service") == null);
     var keg_buf: [64]u8 = undefined;
     const keg = (try serviceKegName(prefix, "com.malt.shipd", &keg_buf)) orelse return error.ServiceRowMissing;
     try testing.expectEqualStrings("shipd", keg);
 
     const plist = try readPlist(prefix, "com.malt.shipd");
     defer testing.allocator.free(plist);
-    const head = try std.fmt.allocPrint(testing.allocator, "<string>{s}/opt/shipd/bin/shipd</string>", .{prefix});
+    const head = try testing.allocator.print("<string>{s}/opt/shipd/bin/shipd</string>", .{prefix});
     defer testing.allocator.free(head);
-    try testing.expect(std.mem.indexOf(u8, plist, head) != null);
-    try testing.expect(std.mem.indexOf(u8, plist, "<key>SHIPD_HOME</key>") != null);
+    try testing.expect(std.mem.find(u8, plist, head) != null);
+    try testing.expect(std.mem.find(u8, plist, "<key>SHIPD_HOME</key>") != null);
     // Malt's label and log paths, not the shipped ones.
-    try testing.expect(std.mem.indexOf(u8, plist, "<string>com.malt.shipd</string>") != null);
-    try testing.expect(std.mem.indexOf(u8, plist, "homebrew.mxcl.shipd") == null);
-    const log = try std.fmt.allocPrint(testing.allocator, "<string>{s}/var/log/shipd.out</string>", .{prefix});
+    try testing.expect(std.mem.find(u8, plist, "<string>com.malt.shipd</string>") != null);
+    try testing.expect(std.mem.find(u8, plist, "homebrew.mxcl.shipd") == null);
+    const log = try testing.allocator.print("<string>{s}/var/log/shipd.out</string>", .{prefix});
     defer testing.allocator.free(log);
-    try testing.expect(std.mem.indexOf(u8, plist, log) != null);
+    try testing.expect(std.mem.find(u8, plist, log) != null);
 
     // The keg's own file is input only.
-    const keg_plist = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/shipd/1.0/homebrew.mxcl.shipd.plist", .{prefix});
+    const keg_plist = try testing.allocator.print("{s}/Cellar/shipd/1.0/homebrew.mxcl.shipd.plist", .{prefix});
     defer testing.allocator.free(keg_plist);
     const after = try test_io.cwd().readFileAlloc(std.Options.debug_io, keg_plist, testing.allocator, .unlimited);
     defer testing.allocator.free(after);
@@ -1480,7 +1480,7 @@ test "materializeRubyFormula keeps the keg and says so when the declared plist i
         .shipped_label = "homebrew.mxcl.noplist",
     }, false, sink);
 
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for noplist: declares a shipped plist that is not in the keg") != null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service for noplist: declares a shipped plist that is not in the keg") != null);
     var keg_buf: [64]u8 = undefined;
     try testing.expect((try serviceKegName(prefix, "com.malt.noplist", &keg_buf)) == null);
 }
@@ -1514,19 +1514,19 @@ test "materializeRubyFormula keeps the keg and warns when the service is refused
         .service = .{ .run = &.{"\"/usr/bin/true\""} },
     }, false, sink);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try kegRevisionAndPath(prefix, "badsvc", &path_buf);
     var keg_buf: [64]u8 = undefined;
     try testing.expect((try serviceKegName(prefix, "com.malt.badsvc", &keg_buf)) == null);
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for badsvc") != null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service for badsvc") != null);
 }
 
 /// Occupies `<prefix>/bin/<leaf>` with a symlink to `target`, or a stray file.
 fn plantSlot(prefix: []const u8, leaf: []const u8, target: ?[]const u8) !void {
-    const bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
+    const bin = try testing.allocator.print("{s}/bin", .{prefix});
     defer testing.allocator.free(bin);
     try test_io.cwd().createDirPath(std.Options.debug_io, bin);
-    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin, leaf });
+    const slot = try testing.allocator.print("{s}/{s}", .{ bin, leaf });
     defer testing.allocator.free(slot);
     if (target) |t| {
         try test_io.cwd().symLink(std.Options.debug_io, t, slot, .{});
@@ -1542,9 +1542,9 @@ fn refusedInstall(prefix: [:0]const u8, name: []const u8, sha: []const u8, force
         .writeErr = captureWarn,
         .show_progress = false,
     };
-    const url = try std.fmt.allocPrint(testing.allocator, "https://example.invalid/{s}-1.0.tar.gz", .{name});
+    const url = try testing.allocator.print("https://example.invalid/{s}-1.0.tar.gz", .{name});
     defer testing.allocator.free(url);
-    const full = try std.fmt.allocPrint(testing.allocator, "user/repo/{s}", .{name});
+    const full = try testing.allocator.print("user/repo/{s}", .{name});
     defer testing.allocator.free(full);
     try testing.expectError(error.LinkFailed, installFromWarmCacheWith(prefix, .{
         .name = name,
@@ -1563,7 +1563,7 @@ test "materializeRubyFormula refuses a slot another keg links and leaves it alon
     defer cleanupPrefix(prefix);
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("5e".*)));
     try seedKegArchive(prefix, "second", sha);
-    const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/first/1.0/bin/second", .{prefix});
+    const owner = try testing.allocator.print("{s}/Cellar/first/1.0/bin/second", .{prefix});
     defer testing.allocator.free(owner);
     try plantSlot(prefix, "second", owner);
 
@@ -1571,17 +1571,17 @@ test "materializeRubyFormula refuses a slot another keg links and leaves it alon
     defer errs.deinit(testing.allocator);
     try refusedInstall(prefix, "second", sha, false, &errs);
 
-    try testing.expect(std.mem.indexOf(u8, errs.items, "1 symlink conflict(s) detected:") != null);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "already linked by Cellar/first/1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "Uninstall the conflicting package first.") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "1 symlink conflict(s) detected:") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "already linked by Cellar/first/1.0") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "Uninstall the conflicting package first.") != null);
 
-    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    const slot = try testing.allocator.print("{s}/bin/second", .{prefix});
     defer testing.allocator.free(slot);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
     try testing.expectEqualStrings(owner, buf[0..n]);
 
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/second/1.0", .{prefix});
+    const cellar = try testing.allocator.print("{s}/Cellar/second/1.0", .{prefix});
     defer testing.allocator.free(cellar);
     try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, cellar, .{}));
 }
@@ -1613,9 +1613,9 @@ test "materializeRubyFormula --force upgrade refused over another keg's slot kee
     }, false, quiet);
 
     // Another keg takes the slot after the first install.
-    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foo", .{prefix});
+    const slot = try testing.allocator.print("{s}/bin/foo", .{prefix});
     defer testing.allocator.free(slot);
-    const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bar/1.0/bin/foo", .{prefix});
+    const owner = try testing.allocator.print("{s}/Cellar/bar/1.0/bin/foo", .{prefix});
     defer testing.allocator.free(owner);
     try test_io.cwd().deleteFile(std.Options.debug_io, slot);
     try test_io.cwd().symLink(std.Options.debug_io, owner, slot, .{});
@@ -1638,13 +1638,13 @@ test "materializeRubyFormula --force upgrade refused over another keg's slot kee
         .url = "https://example.invalid/foo-2.0.tar.gz",
         .sha256 = sha2,
     }, true, sink));
-    try testing.expect(std.mem.indexOf(u8, errs.items, "already linked by Cellar/bar/1.0") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "already linked by Cellar/bar/1.0") != null);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
     try testing.expectEqualStrings(owner, buf[0..n]);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const row = try kegRevisionAndPath(prefix, "foo", &path_buf);
     try testing.expect(std.mem.endsWith(u8, row.cellar_path, "/Cellar/foo/1.0"));
 }
@@ -1655,18 +1655,18 @@ test "materializeRubyFormula --force still refuses a slot another keg links" {
     defer cleanupPrefix(prefix);
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("6d".*)));
     try seedKegArchive(prefix, "second", sha);
-    const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/first/1.0/bin/second", .{prefix});
+    const owner = try testing.allocator.print("{s}/Cellar/first/1.0/bin/second", .{prefix});
     defer testing.allocator.free(owner);
     try plantSlot(prefix, "second", owner);
 
     var errs: std.ArrayList(u8) = .empty;
     defer errs.deinit(testing.allocator);
     try refusedInstall(prefix, "second", sha, true, &errs);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "already linked by Cellar/first/1.0") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "already linked by Cellar/first/1.0") != null);
 
-    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    const slot = try testing.allocator.print("{s}/bin/second", .{prefix});
     defer testing.allocator.free(slot);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
     try testing.expectEqualStrings(owner, buf[0..n]);
 }
@@ -1677,7 +1677,7 @@ test "materializeRubyFormula --force refuses a same-name link that points outsid
     defer cleanupPrefix(prefix);
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("9c".*)));
     try seedKegArchive(prefix, "second", sha);
-    const foreign = try std.fmt.allocPrint(testing.allocator, "{s}/elsewhere/Cellar/second/1.0/bin/second", .{prefix});
+    const foreign = try testing.allocator.print("{s}/elsewhere/Cellar/second/1.0/bin/second", .{prefix});
     defer testing.allocator.free(foreign);
     try plantSlot(prefix, "second", foreign);
 
@@ -1685,9 +1685,9 @@ test "materializeRubyFormula --force refuses a same-name link that points outsid
     defer errs.deinit(testing.allocator);
     try refusedInstall(prefix, "second", sha, true, &errs);
 
-    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    const slot = try testing.allocator.print("{s}/bin/second", .{prefix});
     defer testing.allocator.free(slot);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
     try testing.expectEqualStrings(foreign, buf[0..n]);
 }
@@ -1696,7 +1696,7 @@ test "materializeRubyFormula --force upgrade works under a prefix with a trailin
     // The keg's own links read "<prefix>//Cellar"; they must not look foreign.
     const base = try scratchPrefix();
     defer cleanupPrefix(base);
-    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/", .{base}, 0);
+    const prefix = try testing.allocator.printSentinel("{s}/", .{base}, 0);
     defer testing.allocator.free(prefix);
     const sha1 = std.mem.asBytes(&@as([32][2]u8, @splat("4a".*)));
     const sha2 = std.mem.asBytes(&@as([32][2]u8, @splat("4b".*)));
@@ -1732,9 +1732,9 @@ test "materializeRubyFormula refuses a stray file in the slot with the file hint
     var errs: std.ArrayList(u8) = .empty;
     defer errs.deinit(testing.allocator);
     try refusedInstall(prefix, "second", sha, false, &errs);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "Remove the conflicting file or directory first.") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "Remove the conflicting file or directory first.") != null);
 
-    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    const slot = try testing.allocator.print("{s}/bin/second", .{prefix});
     defer testing.allocator.free(slot);
     const body = try test_io.cwd().readFileAlloc(std.Options.debug_io, slot, testing.allocator, .unlimited);
     defer testing.allocator.free(body);
@@ -1797,7 +1797,7 @@ test "installLocalFormula warns about an unsupported service block only when it 
     // the user a service was dropped from an install that did not happen.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/nosvc.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/nosvc.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path,
         \\class Nosvc < Formula
@@ -1818,9 +1818,9 @@ test "installLocalFormula warns about an unsupported service block only when it 
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     var db = try malt.sqlite.Database.open(db_path);
@@ -1840,14 +1840,14 @@ test "installLocalFormula warns about an unsupported service block only when it 
     };
 
     try install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, true, false, sink);
-    try testing.expect(std.mem.indexOf(u8, warns.items, "unsupported service block") == null);
+    try testing.expect(std.mem.find(u8, warns.items, "unsupported service block") == null);
 
     // The real pass warns at parse time and then fails on the (offline) fetch.
     try testing.expectError(
         install_record.InstallError.DownloadFailed,
         install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
     );
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for nosvc: unsupported service block") != null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service for nosvc: unsupported service block") != null);
 }
 
 test "installLocalFormula stays quiet about a linux-only service block" {
@@ -1855,7 +1855,7 @@ test "installLocalFormula stays quiet about a linux-only service block" {
     // nothing for this shape either.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/lnxd.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/lnxd.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path,
         \\class Lnxd < Formula
@@ -1877,9 +1877,9 @@ test "installLocalFormula stays quiet about a linux-only service block" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     var db = try malt.sqlite.Database.open(db_path);
@@ -1903,7 +1903,7 @@ test "installLocalFormula stays quiet about a linux-only service block" {
         install_record.InstallError.DownloadFailed,
         install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
     );
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service") == null);
 }
 
 test "installLocalFormula does not refuse a shipped plist before the keg exists" {
@@ -1911,7 +1911,7 @@ test "installLocalFormula does not refuse a shipped plist before the keg exists"
     // pour, so neither the dry run nor a failed fetch may call it refused.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/shipd.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/shipd.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path,
         \\class Shipd < Formula
@@ -1932,9 +1932,9 @@ test "installLocalFormula does not refuse a shipped plist before the keg exists"
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     var db = try malt.sqlite.Database.open(db_path);
@@ -1954,14 +1954,14 @@ test "installLocalFormula does not refuse a shipped plist before the keg exists"
     };
 
     try install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, true, false, sink);
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service") == null);
 
     // The real pass fails on the (offline) fetch, before any lift could run.
     try testing.expectError(
         install_record.InstallError.DownloadFailed,
         install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
     );
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+    try testing.expect(std.mem.find(u8, warns.items, "could not register service") == null);
 }
 
 // ─── the checksum gate on tap/local .rb installs ────────────────────
@@ -1971,7 +1971,7 @@ test "installLocalFormula does not refuse a shipped plist before the keg exists"
 fn dryRunLocalErrors(body: []const u8, errs: *std.ArrayList(u8)) !void {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
-    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/pkg.rb", .{prefix});
+    const rb_path = try testing.allocator.print("{s}/pkg.rb", .{prefix});
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, body);
 
@@ -1982,9 +1982,9 @@ fn dryRunLocalErrors(body: []const u8, errs: *std.ArrayList(u8)) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
     defer testing.allocator.free(db_path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     var db = try malt.sqlite.Database.open(db_path);
@@ -2014,8 +2014,8 @@ test "installLocalFormula names sha256 :no_check as the refusal reason" {
         \\  sha256 :no_check
         \\end
     , &errs));
-    try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "--allow-unpinned") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "sha256 :no_check") != null);
+    try testing.expect(std.mem.find(u8, errs.items, "--allow-unpinned") != null);
 }
 
 test "installLocalFormula refuses a sha256 that is not a pinned digest, even on a dry run" {
@@ -2046,6 +2046,6 @@ test "installLocalFormula refuses a sha256 that is not a pinned digest, even on 
         var errs: std.ArrayList(u8) = .empty;
         defer errs.deinit(testing.allocator);
         try testing.expectError(install_record.InstallError.UnpinnedChecksum, dryRunLocalErrors(body, &errs));
-        try testing.expect(std.mem.indexOf(u8, errs.items, "not a pinned sha256") != null);
+        try testing.expect(std.mem.find(u8, errs.items, "not a pinned sha256") != null);
     }
 }

@@ -57,7 +57,7 @@ test "parseArgs: an unknown flag is refused, never dropped" {
     output_mod.beginStderrCapture(testing.allocator, &captured);
     defer output_mod.endStderrCapture();
     try testing.expectError(error.Aborted, updater.parseArgs(&.{ "--chck", "-y" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --chck") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --chck") != null);
 }
 
 test "parseArgs: a known flag does not excuse a later unknown one" {
@@ -71,7 +71,7 @@ test "parseArgs: a stray word is refused, so `version update check` cannot self-
     output_mod.beginStderrCapture(testing.allocator, &captured);
     defer output_mod.endStderrCapture();
     try testing.expectError(error.Aborted, updater.parseArgs(&.{"check"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown argument for version update: 'check'") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown argument for version update: 'check'") != null);
 }
 
 test "parseArgs: `--` ends options, and nothing may follow it" {
@@ -126,7 +126,7 @@ test "writeResponseBody: writes body and returns caller-owned path" {
 }
 
 test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocations" {
-    // testing.allocator leak-detects; without `errdefer` on the allocPrint
+    // testing.allocator leak-detects; without `errdefer` on the `Allocator.print`
     // the freshly-allocated `path` would escape unfreed here.
     output_mod.setQuiet(true);
     defer output_mod.setQuiet(false);
@@ -168,9 +168,9 @@ test "resolveTwinRegularFile: returns sibling mt when invoked as malt" {
         testing.allocator.free(dir);
     }
 
-    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const malt_path = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(malt_path);
-    const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    const mt_path = try testing.allocator.print("{s}/mt", .{dir});
     defer testing.allocator.free(mt_path);
     try writeFile(malt_path, "m");
     try writeFile(mt_path, "m");
@@ -187,9 +187,9 @@ test "resolveTwinRegularFile: returns sibling malt when invoked as mt" {
         testing.allocator.free(dir);
     }
 
-    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const malt_path = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(malt_path);
-    const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    const mt_path = try testing.allocator.print("{s}/mt", .{dir});
     defer testing.allocator.free(mt_path);
     try writeFile(malt_path, "m");
     try writeFile(mt_path, "m");
@@ -208,9 +208,9 @@ test "resolveTwinRegularFile: returns null when sibling is a symlink" {
         testing.allocator.free(dir);
     }
 
-    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const malt_path = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(malt_path);
-    const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    const mt_path = try testing.allocator.print("{s}/mt", .{dir});
     defer testing.allocator.free(mt_path);
     try writeFile(malt_path, "m");
     try fs_compat.symLinkAbsolute(std.Options.debug_io, malt_path, mt_path, .{});
@@ -226,7 +226,7 @@ test "resolveTwinRegularFile: returns null when no sibling exists" {
         testing.allocator.free(dir);
     }
 
-    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const malt_path = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(malt_path);
     try writeFile(malt_path, "m");
 
@@ -241,7 +241,7 @@ test "resolveTwinRegularFile: returns null for unrelated basenames" {
         testing.allocator.free(dir);
     }
 
-    const other_path = try std.fmt.allocPrint(testing.allocator, "{s}/something-else", .{dir});
+    const other_path = try testing.allocator.print("{s}/something-else", .{dir});
     defer testing.allocator.free(other_path);
     try writeFile(other_path, "x");
 
@@ -281,5 +281,5 @@ test "parseArgs: --dry-run stops at the check, and refuses --cleanup" {
     output_mod.beginStderrCapture(testing.allocator, &captured);
     defer output_mod.endStderrCapture();
     try testing.expectError(error.Aborted, updater.parseArgs(&.{"--cleanup"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--dry-run") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--dry-run") != null);
 }

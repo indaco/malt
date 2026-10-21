@@ -67,7 +67,7 @@ const arch_branch_directives = [_][]const u8{
 /// is unambiguously the branch's own. Callers pass a trimmed, non-empty line.
 fn isArchBranchBody(line: []const u8) bool {
     // A heredoc opener hides arbitrary text, including lines reading `else`.
-    if (std.mem.indexOf(u8, line, "<<") != null) return false;
+    if (std.mem.find(u8, line, "<<") != null) return false;
     if (line[0] == '#') return true;
     for (arch_branch_directives) |directive| {
         if (std.mem.startsWith(u8, line, directive)) return true;
@@ -142,9 +142,9 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         // `on_*` is anchored to the line start (block opener) so the token
         // in a `desc`/comment string never mis-flags a flat formula.
         const has_arm = std.mem.startsWith(u8, line, "on_arm") or
-            std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null;
+            std.mem.find(u8, line, "Hardware::CPU.arm?") != null;
         const has_intel = std.mem.startsWith(u8, line, "on_intel") or
-            std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null;
+            std.mem.find(u8, line, "Hardware::CPU.intel?") != null;
         // Each arch marker re-scopes the section to whether the block is
         // ours. Without `end` tracking the flag is otherwise sticky, so a
         // non-matching block (or the first block under `on_macos` on the
@@ -264,7 +264,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
 /// single `v`/`V`). The strict check stops malt from inventing a
 /// version like `latest` or `nightly` for a floating-tag URL.
 fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, url, "/releases/download/")) |pos| {
+    if (std.mem.find(u8, url, "/releases/download/")) |pos| {
         return firstPathSegmentVersion(url[pos + "/releases/download/".len ..]);
     }
 
@@ -273,26 +273,26 @@ fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
     // next slash rather than suffix-stripping the filename. Must precede
     // the generic `/archive/` branch, whose nested-slash guard would
     // otherwise reject this shape (it contains `/archive/` as a substring).
-    if (std.mem.indexOf(u8, url, "/-/archive/")) |pos| {
+    if (std.mem.find(u8, url, "/-/archive/")) |pos| {
         return firstPathSegmentVersion(url[pos + "/-/archive/".len ..]);
     }
 
     // GitLab release asset: `/-/releases/<tag>/downloads/<asset>`.
-    if (std.mem.indexOf(u8, url, "/-/releases/")) |pos| {
+    if (std.mem.find(u8, url, "/-/releases/")) |pos| {
         return firstPathSegmentVersion(url[pos + "/-/releases/".len ..]);
     }
 
-    if (std.mem.indexOf(u8, url, "/archive/refs/tags/")) |pos| {
+    if (std.mem.find(u8, url, "/archive/refs/tags/")) |pos| {
         const after = url[pos + "/archive/refs/tags/".len ..];
         return stripArchiveSuffixThenValidate(after);
     }
 
-    if (std.mem.indexOf(u8, url, "/archive/")) |pos| {
+    if (std.mem.find(u8, url, "/archive/")) |pos| {
         const after = url[pos + "/archive/".len ..];
         // Nested paths belong to the `/archive/refs/tags/` shape, which
         // would already have matched above — anything still containing
         // a slash here is not a version token.
-        if (std.mem.indexOfScalar(u8, after, '/') != null) return null;
+        if (std.mem.findScalar(u8, after, '/') != null) return null;
         return stripArchiveSuffixThenValidate(after);
     }
 
@@ -308,7 +308,7 @@ fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
 /// digit-led name (`7zip`) or a multi-version filename never mis-derives —
 /// a wrong version is worse than none (it fakes an "outdated").
 fn versionFromFilename(url: []const u8) ?[]const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, url, '/') orelse return null;
+    const slash = std.mem.findScalarLast(u8, url, '/') orelse return null;
     const filename = url[slash + 1 ..];
 
     const stem = for (tap_archive_suffixes) |suffix| {
@@ -347,7 +347,7 @@ fn strictVersionToken(s: []const u8) ?[]const u8 {
 /// rather than as a suffixed filename. Returns null when the segment
 /// is the whole tail (no trailing slash) or fails the version gate.
 fn firstPathSegmentVersion(after: []const u8) ?[]const u8 {
-    const slash = std.mem.indexOfScalar(u8, after, '/') orelse return null;
+    const slash = std.mem.findScalar(u8, after, '/') orelse return null;
     return validateVersionToken(after[0..slash]);
 }
 
@@ -423,7 +423,7 @@ fn isForeignOpener(line: []const u8) bool {
     const conditional = std.mem.startsWith(u8, line, "if ") or
         std.mem.startsWith(u8, line, "elsif ") or
         std.mem.startsWith(u8, line, "unless ");
-    return conditional and std.mem.indexOf(u8, line, "MacOS.version") != null;
+    return conditional and std.mem.find(u8, line, "MacOS.version") != null;
 }
 
 /// `interpolateUrl` expands only these two; any other `#{...}` would reach
@@ -432,7 +432,7 @@ fn hasOnlyExpandableInterpolations(url: []const u8) bool {
     const version_needle = "#" ++ "{version}";
     const arch_needle = "#" ++ "{arch}";
     var rest = url;
-    while (std.mem.indexOf(u8, rest, "#{")) |i| {
+    while (std.mem.find(u8, rest, "#{")) |i| {
         rest = rest[i..];
         if (std.mem.startsWith(u8, rest, version_needle)) {
             rest = rest[version_needle.len..];
@@ -497,7 +497,7 @@ fn isSymbol(value: []const u8, sym: []const u8) bool {
 fn kwArgValue(body: []const u8, is_arm: bool) ?[]const u8 {
     const key = if (is_arm) "arm:" else "intel:";
     var rest = body;
-    while (std.mem.indexOf(u8, rest, key)) |pos| {
+    while (std.mem.find(u8, rest, key)) |pos| {
         // Anchor on a word boundary so `arm:` does not match inside
         // `armadillo:` (hypothetical, but cheap to defend against).
         const before_ok = pos == 0 or rest[pos - 1] == ' ' or rest[pos - 1] == '\t' or rest[pos - 1] == ',';
@@ -524,7 +524,7 @@ pub fn optsOutOfChecksum(rb_content: []const u8) bool {
     var it = std.mem.splitScalar(u8, rb_content, '\n');
     while (it.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        if (std.mem.startsWith(u8, line, "sha256 ") and std.mem.indexOf(u8, line, ":no_check") != null) return true;
+        if (std.mem.startsWith(u8, line, "sha256 ") and std.mem.find(u8, line, ":no_check") != null) return true;
     }
     return false;
 }
@@ -656,14 +656,14 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
     var body_indent: ?usize = null;
     var pos: usize = 0;
     while (pos < rb_content.len) {
-        const nl = std.mem.indexOfScalarPos(u8, rb_content, pos, '\n') orelse rb_content.len;
+        const nl = std.mem.findScalarPos(u8, rb_content, pos, '\n') orelse rb_content.len;
         const raw = rb_content[pos..nl];
         pos = nl + 1;
         // A top-level `#` can only open a comment: `#{` lives inside strings.
         const code = raw[0 .. indexOfTopLevel(raw, '#') orelse raw.len];
         const line = std.mem.trim(u8, code, " \t\r");
         if (line.len == 0) continue;
-        const indent = std.mem.indexOfNone(u8, raw, " \t") orelse raw.len;
+        const indent = std.mem.findNone(u8, raw, " \t") orelse raw.len;
 
         const opener = block_indent orelse {
             if (std.mem.eql(u8, line, "service do")) block_indent = indent;
@@ -738,7 +738,7 @@ pub fn shippedPlistLabel(rb_content: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, line, "end")) return null;
         if (!std.mem.startsWith(u8, line, "name ")) continue;
         const label = extractQuoted(line, "macos: \"") orelse return null;
-        if (label.len == 0 or std.mem.indexOf(u8, label, "#{") != null) return null;
+        if (label.len == 0 or std.mem.find(u8, label, "#{") != null) return null;
         return label;
     }
     return null;
@@ -800,7 +800,7 @@ fn macosArgv(src: []const u8) error{Unsupported}!MacosArgv {
 
 /// Bare form: one token, ending at the line, a comment, or an OS-keyed sibling.
 fn bareTokenEnd(s: []const u8) usize {
-    const eol = std.mem.indexOfScalar(u8, s, '\n') orelse s.len;
+    const eol = std.mem.findScalar(u8, s, '\n') orelse s.len;
     const end = indexOfTopLevel(s[0..eol], '#') orelse eol;
     return indexOfTopLevel(s[0..end], ',') orelse end;
 }
@@ -812,7 +812,7 @@ fn skipBlankAndComments(src: []const u8) []const u8 {
     while (true) {
         s = std.mem.trimStart(u8, s, " \t\r\n\\");
         if (s.len == 0 or s[0] != '#') return s;
-        s = s[std.mem.indexOfScalar(u8, s, '\n') orelse s.len ..];
+        s = s[std.mem.findScalar(u8, s, '\n') orelse s.len ..];
     }
 }
 

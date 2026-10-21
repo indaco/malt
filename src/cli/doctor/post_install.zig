@@ -23,7 +23,7 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
     output.info("Post-install DSL status:", .{});
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
     var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch return;
     defer db.close();
 

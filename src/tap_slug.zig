@@ -26,7 +26,7 @@ pub const max_slug_len = 256;
 /// The strip is not looped: `user/homebrew-homebrew-x` canonicalizes to
 /// `user/homebrew-x`, matching brew's anchored regex.
 pub fn canonicalTapSlug(buf: []u8, slug: []const u8) ?[]const u8 {
-    const slash = std.mem.indexOfScalar(u8, slug, '/') orelse return null;
+    const slash = std.mem.findScalar(u8, slug, '/') orelse return null;
     const user = slug[0..slash];
     var repo = slug[slash + 1 ..];
 
@@ -53,7 +53,7 @@ pub fn canonicalTapSlug(buf: []u8, slug: []const u8) ?[]const u8 {
 ///
 /// Returns `null` when `buf` cannot hold the result.
 pub fn synthRepo(buf: []u8, canonical_repo: []const u8) ?[]const u8 {
-    return std.fmt.bufPrint(buf, "homebrew-{s}", .{canonical_repo}) catch null;
+    return std.mem.print(buf, "homebrew-{s}", .{canonical_repo}) catch null;
 }
 
 test "synthRepo re-prefixes the stripped identity" {

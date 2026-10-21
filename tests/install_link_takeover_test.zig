@@ -37,15 +37,15 @@ const Env = struct {
     }
 
     fn path(self: *Env, comptime fmt: []const u8, args: anytype) ![]u8 {
-        return std.fmt.allocPrint(testing.allocator, "{s}/" ++ fmt, .{self.prefix} ++ args);
+        return testing.allocator.print("{s}/" ++ fmt, .{self.prefix} ++ args);
     }
 
     fn makeKeg(self: *Env, name: []const u8, files: []const []const u8) ![]u8 {
         const keg = try self.path("Cellar/{s}/1.0", .{name});
         for (files) |rel| {
-            const full = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, rel });
+            const full = try testing.allocator.print("{s}/{s}", .{ keg, rel });
             defer testing.allocator.free(full);
-            try test_io.cwd().createDirPath(io, std.fs.path.dirname(full).?);
+            try test_io.cwd().createDirPath(io, std.Io.Dir.path.dirname(full).?);
             const f = try test_io.createFileAbsolute(io, full, .{});
             f.close(io);
         }
@@ -73,7 +73,7 @@ const Env = struct {
 
     fn target(self: *Env, rel: []const u8, buf: []u8) []const u8 {
         var p: [512]u8 = undefined;
-        const full = std.fmt.bufPrint(&p, "{s}/{s}", .{ self.prefix, rel }) catch return "";
+        const full = std.mem.print(&p, "{s}/{s}", .{ self.prefix, rel }) catch return "";
         return test_io.readLinkAbsolute(io, full, buf) catch "";
     }
 
@@ -83,7 +83,7 @@ const Env = struct {
         ) catch return "";
         defer stmt.finalize();
         var p: [512]u8 = undefined;
-        const full = std.fmt.bufPrint(&p, "{s}/{s}", .{ self.prefix, rel }) catch return "";
+        const full = std.mem.print(&p, "{s}/{s}", .{ self.prefix, rel }) catch return "";
         stmt.bindText(1, full) catch return "";
         if (!(stmt.step() catch false)) return "";
         const name = std.mem.sliceTo(stmt.columnText(0) orelse return "", 0);
@@ -97,8 +97,7 @@ const Env = struct {
     }
 
     fn linkNewWith(self: *Env, keg: []const u8, overwrite_json: []const u8, flags: malt.install_args.InstallFlags) !void {
-        const json = try std.fmt.allocPrint(
-            testing.allocator,
+        const json = try testing.allocator.print(
             "{{\"name\":\"new\",\"versions\":{{\"stable\":\"1.0\"}},\"link_overwrite\":{s}}}",
             .{overwrite_json},
         );
@@ -142,7 +141,7 @@ test "a listed slot moves to the new keg and the old keg stays installed" {
     try env.linkNew(new, "[\"lib/libfoo*\"]");
 
     var buf: [512]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, env.target("lib/libfoo.dylib", &buf), "Cellar/new/") != null);
+    try testing.expect(std.mem.find(u8, env.target("lib/libfoo.dylib", &buf), "Cellar/new/") != null);
     var obuf: [64]u8 = undefined;
     try testing.expectEqualStrings("new", env.owner("lib/libfoo.dylib", &obuf));
     try testing.expectEqualStrings("new", env.owner("lib/libfoo.1.dylib", &obuf));
@@ -160,8 +159,8 @@ test "an unlisted slot still refuses the install and leaves every link alone" {
     try testing.expectError(error.LinkFailed, env.linkNew(new, "[\"lib/libfoo*\"]"));
 
     var buf: [512]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, env.target("lib/libfoo.dylib", &buf), "Cellar/old/") != null);
-    try testing.expect(std.mem.indexOf(u8, env.target("bin/foo", &buf), "Cellar/old/") != null);
+    try testing.expect(std.mem.find(u8, env.target("lib/libfoo.dylib", &buf), "Cellar/old/") != null);
+    try testing.expect(std.mem.find(u8, env.target("bin/foo", &buf), "Cellar/old/") != null);
     try testing.expect(!exists(new));
 }
 
@@ -205,13 +204,13 @@ test "a directory symlink into another keg is never written through" {
     const sub = try env.path("lib/sub", .{});
     defer testing.allocator.free(sub);
     try test_io.deleteTreeAbsolute(io, sub);
-    const old_sub = try std.fmt.allocPrint(testing.allocator, "{s}/lib/sub", .{old});
+    const old_sub = try testing.allocator.print("{s}/lib/sub", .{old});
     defer testing.allocator.free(old_sub);
     try test_io.symLinkAbsolute(io, old_sub, sub, .{ .is_directory = true });
 
     try testing.expectError(error.LinkFailed, env.linkNew(new, "[\"lib/sub*\"]"));
 
-    const stray = try std.fmt.allocPrint(testing.allocator, "{s}/lib/sub/libnew.dylib", .{old});
+    const stray = try testing.allocator.print("{s}/lib/sub/libnew.dylib", .{old});
     defer testing.allocator.free(stray);
     try testing.expect(!exists(stray));
 }
@@ -237,7 +236,7 @@ test "a link that fails after a takeover gives the old keg its slots back" {
     var buf: [512]u8 = undefined;
     var obuf: [64]u8 = undefined;
     for (files) |rel| {
-        try testing.expect(std.mem.indexOf(u8, env.target(rel, &buf), "Cellar/old/") != null);
+        try testing.expect(std.mem.find(u8, env.target(rel, &buf), "Cellar/old/") != null);
         try testing.expectEqualStrings("old", env.owner(rel, &obuf));
     }
     try testing.expect(!exists(new));
@@ -266,7 +265,7 @@ test "a rollback leaves a slot a third keg holds with that keg" {
     var obuf: [64]u8 = undefined;
     try testing.expectEqualStrings("old", env.owner("lib/libfoo.dylib", &obuf));
     try testing.expectEqualStrings("old", env.owner("lib/libbar.dylib", &obuf));
-    try testing.expect(std.mem.indexOf(u8, env.target("lib/libbaz.dylib", &buf), "Cellar/third/") != null);
+    try testing.expect(std.mem.find(u8, env.target("lib/libbaz.dylib", &buf), "Cellar/third/") != null);
     try testing.expectEqualStrings("third", env.owner("lib/libbaz.dylib", &obuf));
 }
 
@@ -329,7 +328,7 @@ test "a snapshot that cannot be taken stops the install and removes the new keg"
     try testing.expectError(error.LinkFailed, env.linkNew(new, "[\"lib/libfoo*\"]"));
 
     var buf: [512]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, env.target("lib/libfoo.dylib", &buf), "/Cellar/old/") != null);
+    try testing.expect(std.mem.find(u8, env.target("lib/libfoo.dylib", &buf), "/Cellar/old/") != null);
     try testing.expect(!exists(new));
 }
 

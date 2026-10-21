@@ -115,7 +115,7 @@ pub const GhcrClient = struct {
     /// caller-supplied and unbounded, so the result is sized to its inputs.
     /// Caller owns the result.
     pub fn buildBlobUrl(allocator: std.mem.Allocator, base: []const u8, repo: []const u8, digest: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator, "{s}/v2/{s}/blobs/{s}", .{ base, repo, digest });
+        return allocator.print("{s}/v2/{s}/blobs/{s}", .{ base, repo, digest });
     }
 
     /// Fetch one token covering every repo in `repos` with a single
@@ -264,7 +264,7 @@ pub const GhcrClient = struct {
 
             // Sized exactly to the token: a batch-wide multi-scope token has
             // no bounded length, so any fixed buffer just moves the cliff.
-            const auth_value = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token}) catch
+            const auth_value = self.allocator.print("Bearer {s}", .{token}) catch
                 return GhcrError.OutOfMemory;
             defer self.allocator.free(auth_value);
 

@@ -34,9 +34,9 @@ test "chmod masks an out-of-range mode instead of narrowing" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    var bb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
-    const file = try std.fs.path.join(alloc, &.{ keg, "x" });
+    const file = try std.Io.Dir.path.join(alloc, &.{ keg, "x" });
     defer alloc.free(file);
     (try std.Io.Dir.createFileAbsolute(io, file, .{})).close(io);
 

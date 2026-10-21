@@ -69,7 +69,7 @@ test "every consumer of a parsed .rb revision is accounted for" {
         var hits: usize = 0;
         var it = std.mem.splitScalar(u8, src, '\n');
         while (it.next()) |line| {
-            if (std.mem.indexOf(u8, line, TOKEN) != null) hits += 1;
+            if (std.mem.find(u8, line, TOKEN) != null) hits += 1;
         }
         if (hits == 0) continue;
 

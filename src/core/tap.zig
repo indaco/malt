@@ -103,14 +103,14 @@ fn forgeResolveError(
     host: []const u8,
 ) []const u8 {
     return switch (err) {
-        error.RateLimited => std.fmt.bufPrint(buf, "{s} API rate limit reached at {s}. Set {s} to an authorized token to lift the anonymous cap.", .{ name, host, token_var }) catch unreachable,
+        error.RateLimited => std.mem.print(buf, "{s} API rate limit reached at {s}. Set {s} to an authorized token to lift the anonymous cap.", .{ name, host, token_var }) catch unreachable,
         // No homebrew-/--repo hint: that synthesis is github-only.
-        error.NotFound => std.fmt.bufPrint(buf, "{s} returned 404 for the tap repo at {s}. Verify the owner/repo, or set {s} if the repo is private.", .{ name, host, token_var }) catch unreachable,
-        error.NetworkError => std.fmt.bufPrint(buf, "Network failure while reaching {s} — check connectivity and retry.", .{host}) catch unreachable,
-        error.AuthTokenTooLong => std.fmt.bufPrint(buf, "The {s} token in {s} is too long to fit the auth request buffer.", .{ name, token_var }) catch unreachable,
-        error.MalformedJson => std.fmt.bufPrint(buf, "Unexpected response shape from {s} ({s}) — rerun with --debug and attach the log when filing an issue.", .{ name, host }) catch unreachable,
-        error.InvalidSha => std.fmt.bufPrint(buf, "{s} ({s}) returned a commit SHA that failed validation (not 40-char lowercase hex).", .{ name, host }) catch unreachable,
-        error.ResolveFailed => std.fmt.bufPrint(buf, "{s} ({s}) returned an unexpected status while resolving HEAD — retry, or set {s} if this persists.", .{ name, host, token_var }) catch unreachable,
+        error.NotFound => std.mem.print(buf, "{s} returned 404 for the tap repo at {s}. Verify the owner/repo, or set {s} if the repo is private.", .{ name, host, token_var }) catch unreachable,
+        error.NetworkError => std.mem.print(buf, "Network failure while reaching {s} — check connectivity and retry.", .{host}) catch unreachable,
+        error.AuthTokenTooLong => std.mem.print(buf, "The {s} token in {s} is too long to fit the auth request buffer.", .{ name, token_var }) catch unreachable,
+        error.MalformedJson => std.mem.print(buf, "Unexpected response shape from {s} ({s}) — rerun with --debug and attach the log when filing an issue.", .{ name, host }) catch unreachable,
+        error.InvalidSha => std.mem.print(buf, "{s} ({s}) returned a commit SHA that failed validation (not 40-char lowercase hex).", .{ name, host }) catch unreachable,
+        error.ResolveFailed => std.mem.print(buf, "{s} ({s}) returned an unexpected status while resolving HEAD — retry, or set {s} if this persists.", .{ name, host, token_var }) catch unreachable,
         error.OfflineRequired => offline_resolve_hint,
         error.OutOfMemory => "Out of memory while resolving HEAD commit.",
     };
@@ -134,20 +134,20 @@ test "describeResolveError github: NetworkError stays byte-identical (host ignor
 test "describeResolveError gitlab: RateLimited names the host and MALT_GITLAB_TOKEN" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.RateLimited, .gitlab, "gitlab.com");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "gitlab.com") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITLAB_TOKEN") != null);
     // No GitHub host or token leaking onto a GitLab tap.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "github.com") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "github.com") == null);
 }
 
 test "describeResolveError gitlab: NetworkError names the instance host, not api.github.com" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.NetworkError, .gitlab, "gitlab.gnome.org");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.gnome.org") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "api.github.com") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "gitlab.gnome.org") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "api.github.com") == null);
     // The skip-guard regex in scripts/regressions/*.sh keys on this phrase.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "Network failure") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "Network failure") != null);
 }
 
 test "describeResolveError github: NotFound points --repo at the command that accepts it" {
@@ -155,72 +155,72 @@ test "describeResolveError github: NotFound points --repo at the command that ac
     // bare "rerun with --repo" would be unactionable for half its callers.
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.NotFound, .github, "github.com");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "mt tap <user>/<repo> --repo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "rerun with --repo") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "mt tap <user>/<repo> --repo") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "rerun with --repo") == null);
 }
 
 test "describeResolveError gitlab: NotFound drops the github-only homebrew-/--repo hint" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.NotFound, .gitlab, "gitlab.com");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "gitlab.com") != null);
     // The homebrew-<repo> synthesis is github-only; it must not appear here.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "homebrew-") == null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "--repo") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "homebrew-") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "--repo") == null);
 }
 
 test "describeResolveError gitea: RateLimited names the host and MALT_GITEA_TOKEN" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.RateLimited, .gitea, "codeberg.org");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "codeberg.org") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITEA_TOKEN") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "codeberg.org") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITEA_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") == null);
 }
 
 test "describeResolveError gitea: a self-hosted Forgejo host is named" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.MalformedJson, .gitea, "git.example.org");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "git.example.org") != null);
 }
 
 test "describeResolveError github: AuthTokenTooLong names the token, not the network" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.AuthTokenTooLong, .github, "github.com");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "too long") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "too long") != null);
     // Must not be misreported as a connectivity failure.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "Network failure") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "Network failure") == null);
 }
 
 test "describeResolveError gitlab: AuthTokenTooLong names the forge's own token var" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.AuthTokenTooLong, .gitlab, "gitlab.com");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "too long") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "too long") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") == null);
 }
 
 test "describeResolveError gogs: names the instance host and the shared MALT_GITEA_TOKEN" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.RateLimited, .gogs, "git.example.org");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITEA_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "git.example.org") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITEA_TOKEN") != null);
     // Gogs reuses the Gitea family token; no separate var leaks in.
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GOGS_TOKEN") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GOGS_TOKEN") == null);
 }
 
 test "describeResolveError gitlab: ResolveFailed (the 5xx catch-all) names host and token" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.ResolveFailed, .gitlab, "gitlab.gnome.org");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.gnome.org") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(std.mem.find(u8, msg, "gitlab.gnome.org") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") == null);
 }
 
 test "describeResolveError gitlab: InvalidSha names the instance host" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.InvalidSha, .gitlab, "gitlab.com");
-    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "GitLab") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "gitlab.com") != null);
+    try std.testing.expect(std.mem.find(u8, msg, "GitLab") != null);
 }
 
 test "describeResolveError github: ignores a non-canonical host (fixed-host literals win)" {
@@ -546,7 +546,7 @@ fn freeTapInfoFields(allocator: std.mem.Allocator, info: TapInfo) void {
 
 /// Resolve a tap formula — builds the full tap formula name.
 pub fn resolveFormula(allocator: std.mem.Allocator, user: []const u8, repo: []const u8, formula: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ user, repo, formula });
+    return allocator.print("{s}/{s}/{s}", .{ user, repo, formula });
 }
 
 /// The URL triple every tap fetch site needs. Re-exported from the
@@ -643,7 +643,7 @@ pub fn effectiveOwnerRepo(
     // as `homebrew-homebrew-<repo>`, which no tap repo answers to.
     var canon_buf: [160]u8 = undefined;
     const canon = tap_slug.canonicalTapSlug(&canon_buf, slug) orelse return error.ExplicitRepoRequired;
-    const slash = std.mem.indexOfScalar(u8, canon, '/').?;
+    const slash = std.mem.findScalar(u8, canon, '/').?;
     const user = canon[0..slash];
     const repo_part = canon[slash + 1 ..];
     const owner_owned = try allocator.dupe(u8, user);
@@ -1663,9 +1663,9 @@ pub const TrippedHosts = struct {
 
     /// Only `host[:port]` dials; the owner/repo path is per tap.
     fn hostOf(raw_base: []const u8) []const u8 {
-        const start = if (std.mem.indexOf(u8, raw_base, "://")) |i| i + 3 else 0;
+        const start = if (std.mem.find(u8, raw_base, "://")) |i| i + 3 else 0;
         const rest = raw_base[start..];
-        return rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse rest.len];
+        return rest[0 .. std.mem.findScalar(u8, rest, '/') orelse rest.len];
     }
 
     /// Caller holds the mutex.
@@ -1804,7 +1804,7 @@ test "fetchRawFile returns the first 200 across layouts" {
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, null);
     knockListener(io, &listener);
@@ -1838,7 +1838,7 @@ test "fetchRawFile reports not_found when no layout hits" {
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, null);
     knockListener(io, &listener);
@@ -1866,7 +1866,7 @@ test "fetchRawFile surfaces a transport failure as an error, not not_found" {
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     if (fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula}, null)) |_| {
         return error.TestExpectedTransportError; // a refused connect must not read as not_found
@@ -1916,7 +1916,7 @@ test "fetchRawFile trips a raw host after one exhausted transport budget" {
     http.retry_backoff_ms = &.{ 1, 1, 1 };
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     var tripped = TrippedHosts{};
 
     const first = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", &.{.formula}, &tripped);
@@ -1950,7 +1950,7 @@ test "fetchRawFile trips a raw host after an exhausted transient status" {
         http.retry_backoff_ms = &.{ 1, 1, 1 };
 
         var base_buf: [64]u8 = undefined;
-        const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+        const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
         var tripped = TrippedHosts{};
 
         // Three layouts: the first keg walks every one (a budget each), the
@@ -1987,7 +1987,7 @@ test "fetchRawFile does not trip when a later layout answers 404: the host is up
     http.retry_backoff_ms = &.{ 1, 1, 1 };
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     var tripped = TrippedHosts{};
 
     const subtrees: []const forge.RawKind = &.{ .formula, .formula_root };
@@ -2020,7 +2020,7 @@ test "fetchRawFile does not trip on 404: the next keg may exist" {
     defer http.deinit();
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     var tripped = TrippedHosts{};
 
     const subtrees: []const forge.RawKind = &.{ .formula, .formula_root };
@@ -2074,7 +2074,7 @@ test "fetchRawFile does not trip on Ctrl-C: the user stopped the walk, the host 
     }.f;
 
     var base_buf: [64]u8 = undefined;
-    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
     var tripped = TrippedHosts{};
 
     const r = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula}, &tripped);
@@ -2158,6 +2158,6 @@ test "describeResolveError names offline mode, not the network, for every forge"
     var buf: [512]u8 = undefined;
     inline for (.{ forge.Forge.github, .gitlab, .gitea, .gogs }) |f| {
         const msg = describeResolveError(&buf, TapError.OfflineRequired, f, "git.example.com");
-        try std.testing.expect(std.mem.indexOf(u8, msg, "offline mode") != null);
+        try std.testing.expect(std.mem.find(u8, msg, "offline mode") != null);
     }
 }

@@ -187,13 +187,13 @@ test "formatRate handles zero rate" {
 test "formatRate shows KB/s for small rates" {
     var buf: [32]u8 = undefined;
     const result = progress_mod.ProgressBar.formatRate(&buf, 512 * 1024); // 512 KB/s
-    try testing.expect(std.mem.indexOf(u8, result, "KB/s") != null);
+    try testing.expect(std.mem.find(u8, result, "KB/s") != null);
 }
 
 test "formatRate shows MB/s for large rates" {
     var buf: [32]u8 = undefined;
     const result = progress_mod.ProgressBar.formatRate(&buf, 5 * 1024 * 1024); // 5 MB/s
-    try testing.expect(std.mem.indexOf(u8, result, "MB/s") != null);
+    try testing.expect(std.mem.find(u8, result, "MB/s") != null);
 }
 
 test "formatEta returns empty for zero rate" {
@@ -205,16 +205,16 @@ test "formatEta returns empty for zero rate" {
 test "formatEta returns seconds for short durations" {
     var buf: [32]u8 = undefined;
     const result = progress_mod.ProgressBar.formatEta(&buf, 1000, 100); // 10s
-    try testing.expect(std.mem.indexOf(u8, result, "ETA") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "10s") != null);
+    try testing.expect(std.mem.find(u8, result, "ETA") != null);
+    try testing.expect(std.mem.find(u8, result, "10s") != null);
 }
 
 test "formatEta returns minutes and seconds for medium durations" {
     var buf: [32]u8 = undefined;
     // 180,000 bytes at 1000 B/s = 180s = 3m
     const result = progress_mod.ProgressBar.formatEta(&buf, 180_000, 1000);
-    try testing.expect(std.mem.indexOf(u8, result, "ETA") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "m") != null);
+    try testing.expect(std.mem.find(u8, result, "ETA") != null);
+    try testing.expect(std.mem.find(u8, result, "m") != null);
 }
 
 test "formatEta suppresses output for > 1h durations" {
@@ -478,7 +478,7 @@ test "HttpClient.get retries a 503 and returns the body from the next attempt" {
     defer http.deinit();
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/flaky", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/flaky", .{port});
     var resp = try http.get(url);
     defer resp.deinit();
     // Join before the listener's deferred close, not after.

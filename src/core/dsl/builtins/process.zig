@@ -85,9 +85,9 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 fn recordFailure(ctx: ExecCtx, argv0: []const u8, exit_code: ?u32) void {
     const flog = ctx.fallback_log orelse return;
     const detail = if (exit_code) |code|
-        std.fmt.allocPrint(ctx.allocator, "{s} exited with code {d}", .{ argv0, code }) catch argv0
+        ctx.allocator.print("{s} exited with code {d}", .{ argv0, code }) catch argv0
     else
-        std.fmt.allocPrint(ctx.allocator, "{s} terminated abnormally", .{argv0}) catch argv0;
+        ctx.allocator.print("{s} terminated abnormally", .{argv0}) catch argv0;
     flog.log(.{
         .formula = ctx.formula_name,
         .reason = .system_command_failed,
@@ -126,13 +126,13 @@ pub fn devToolsLocate(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError
     // Reusable scratch buffer — every probe writes through this one stack
     // slot instead of allocating a fresh slice per iteration. The PATH
     // split itself uses tokenizeScalar (zero-alloc) so no caching needed.
-    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    var probe: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     // Search PATH for the command.
     const path_env = std.process.Environ.getPosix(ctx.environ, "PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
     var path_iter = std.mem.tokenizeScalar(u8, path_env, ':');
     while (path_iter.next()) |dir| {
-        const full = std.fmt.bufPrint(&probe, "{s}/{s}", .{ dir, cmd_name }) catch continue;
+        const full = std.mem.print(&probe, "{s}/{s}", .{ dir, cmd_name }) catch continue;
         std.Io.Dir.cwd().access(ctx.io, full, .{}) catch continue;
         const owned = ctx.allocator.dupe(u8, full) catch return BuiltinError.OutOfMemory;
         return Value{ .pathname = owned };
@@ -141,7 +141,7 @@ pub fn devToolsLocate(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError
     // Fallback: try common locations.
     const fallbacks = [_][]const u8{ "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/" };
     for (fallbacks) |prefix| {
-        const full = std.fmt.bufPrint(&probe, "{s}{s}", .{ prefix, cmd_name }) catch continue;
+        const full = std.mem.print(&probe, "{s}{s}", .{ prefix, cmd_name }) catch continue;
         std.Io.Dir.cwd().access(ctx.io, full, .{}) catch continue;
         const owned = ctx.allocator.dupe(u8, full) catch return BuiltinError.OutOfMemory;
         return Value{ .pathname = owned };
@@ -158,7 +158,7 @@ pub fn formulaLookup(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
     const name = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
 
     // Formula["name"] resolves to MALT_PREFIX/opt/name
-    const opt_path = std.fs.path.join(ctx.allocator, &.{ ctx.malt_prefix, "opt", name }) catch
+    const opt_path = std.Io.Dir.path.join(ctx.allocator, &.{ ctx.malt_prefix, "opt", name }) catch
         return BuiltinError.OutOfMemory;
     return Value{ .pathname = opt_path };
 }
@@ -208,7 +208,7 @@ pub fn kernelVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Val
     if (std.c.sysctlbyname("kern.osrelease", &buf, &len, null, 0) != 0)
         return BuiltinError.UnknownMethod;
     const text = std.mem.sliceTo(buf[0..len], 0);
-    return Value{ .string = std.fmt.allocPrint(ctx.allocator, "{s}", .{text}) catch
+    return Value{ .string = ctx.allocator.print("{s}", .{text}) catch
         return BuiltinError.OutOfMemory };
 }
 
@@ -237,7 +237,7 @@ pub fn setNew(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 
 /// Hardware::CPU.arch — return "arm64" or "x86_64"
 pub fn cpuArch(_: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const is_arm = @import("builtin").target.cpu.arch == .aarch64;
     return Value{ .string = if (is_arm) "arm64" else "x86_64" };
 }
 
@@ -362,8 +362,8 @@ test "system records a fatal flog entry when the child exits non-zero" {
     try std.testing.expect(flog.hasFatal());
     const entry = flog.entries()[0];
     try std.testing.expectEqualStrings("foo", entry.formula);
-    try std.testing.expect(std.mem.indexOf(u8, entry.detail, "/usr/bin/false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, entry.detail, "1") != null);
+    try std.testing.expect(std.mem.find(u8, entry.detail, "/usr/bin/false") != null);
+    try std.testing.expect(std.mem.find(u8, entry.detail, "1") != null);
 }
 
 // The failure entry must be failure-only: a clean exit that logged
@@ -439,7 +439,7 @@ test "system records an abnormal termination when the child dies to a signal" {
     try std.testing.expect(result == .bool and !result.bool);
     try std.testing.expect(flog.hasFatal());
     const entry = flog.entries()[0];
-    try std.testing.expect(std.mem.indexOf(u8, entry.detail, "terminated abnormally") != null);
+    try std.testing.expect(std.mem.find(u8, entry.detail, "terminated abnormally") != null);
 }
 
 // Ruby's `quiet_system` never raises — formulas use it for may-fail
@@ -578,17 +578,17 @@ test "safe_popen_read rejects an argv0 outside the sandbox roots before spawning
 // `system` is fenced; `safe_popen_read` must be too, or a formula can reach any
 // path the user can write by picking the capturing builtin instead.
 test "safe_popen_read runs under the sandbox-exec write fence" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_popen_fence_{d}", .{std.c.getpid()});
+    const base = try alloc.print("/tmp/malt_popen_fence_{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
     defer std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
-    const keg = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{base});
+    const keg = try alloc.print("{s}/Cellar/foo/1.0", .{base});
     try std.Io.Dir.cwd().createDirPath(lio.io(), keg);
 
     const ctx = ExecCtx{
@@ -601,7 +601,7 @@ test "safe_popen_read runs under the sandbox-exec write fence" {
 
     // `/usr/bin/touch` clears the argv0 lint (system dir), so only the fence
     // can stop the write landing outside the keg.
-    const outside = try std.fmt.allocPrint(alloc, "{s}/ESCAPED", .{base});
+    const outside = try alloc.print("{s}/ESCAPED", .{base});
     _ = try safePopenRead(ctx, null, &.{
         .{ .string = "/usr/bin/touch" },
         .{ .string = outside },
@@ -616,17 +616,17 @@ test "safe_popen_read runs under the sandbox-exec write fence" {
 // the pipe, so a child abandoned there never gets EPIPE — it blocks in write(2)
 // until malt exits.
 test "safe_popen_read reaps the child when output overruns the cap" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_popen_overrun_{d}", .{std.c.getpid()});
+    const base = try alloc.print("/tmp/malt_popen_overrun_{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
     defer std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
-    const keg = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{base});
+    const keg = try alloc.print("{s}/Cellar/foo/1.0", .{base});
     try std.Io.Dir.cwd().createDirPath(lio.io(), keg);
 
     const ctx = ExecCtx{
@@ -657,17 +657,17 @@ test "safe_popen_read reaps the child when output overruns the cap" {
 // The reap fix must not cost the success path its exit status or its output:
 // a completed read still ends in `wait`, not `kill`.
 test "safe_popen_read still captures output and reaps on the success path" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_popen_ok_{d}", .{std.c.getpid()});
+    const base = try alloc.print("/tmp/malt_popen_ok_{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
     defer std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
-    const keg = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{base});
+    const keg = try alloc.print("{s}/Cellar/foo/1.0", .{base});
     try std.Io.Dir.cwd().createDirPath(lio.io(), keg);
 
     const ctx = ExecCtx{
@@ -711,15 +711,14 @@ test "system rejects an argv0 outside the sandbox roots before spawning" {
 // process's real stdout and check what a hostile post_install would land on
 // the user's terminal.
 test "system strips terminal escapes a formula emits, keeping the text" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const cap_path = try std.fmt.allocPrintSentinel(
-        alloc,
+    const cap_path = try alloc.printSentinel(
         "/tmp/malt_sanitize_capture_{d}",
         .{std.c.getpid()},
         0,
@@ -757,16 +756,16 @@ test "system strips terminal escapes a formula emits, keeping the text" {
     const n = try f.readPositionalAll(lio.io(), &buf, 0);
     const got = buf[0..n];
 
-    try std.testing.expect(std.mem.indexOf(u8, got, "VISIBLE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\x1b]52") == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, got, "VISIBLE") != null);
+    try std.testing.expect(std.mem.find(u8, got, "\x1b]52") == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x1b) == null);
 }
 
 // A pump that cannot start leaves its pipe undrained: the child blocks once the
 // buffer fills and `wait` never returns. Failing loudly is the only safe
 // outcome, and the test hangs rather than fails if that regresses.
 test "waitSanitized fails loudly when a sanitizer pump cannot start" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -802,7 +801,7 @@ const FdCapture = struct {
     io: std.Io,
 
     fn start(alloc: std.mem.Allocator, io: std.Io, fd: c_int, tag: []const u8) !FdCapture {
-        const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/malt_cap_{s}_{d}", .{ tag, std.c.getpid() }, 0);
+        const path = try alloc.printSentinel("/tmp/malt_cap_{s}_{d}", .{ tag, std.c.getpid() }, 0);
         const saved = std.c.dup(fd);
         const cap = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
         if (saved < 0 or cap < 0) return error.CaptureFailed;
@@ -837,7 +836,7 @@ fn sanitizeTestCtx(alloc: std.mem.Allocator, io: std.Io) ExecCtx {
 // stderr is half the surface the filter now covers, and a formula controls what
 // lands there just as much as on stdout.
 test "system sanitizes what a formula puts on stderr" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -853,26 +852,26 @@ test "system sanitizes what a formula puts on stderr" {
     }) catch {};
     const got = try cap.finish(alloc);
 
-    try std.testing.expect(std.mem.indexOf(u8, got, "VISIBLE") != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, got, "VISIBLE") != null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x1b) == null);
 }
 
 // Concurrent pumps exist so neither pipe can wedge the other. Anything past the
 // buffer would deadlock a sequential drain, so this test hangs if that breaks.
 test "system drains child output larger than a pipe buffer" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const root = try std.fmt.allocPrint(alloc, "/tmp/malt_bigout_{d}", .{std.c.getpid()});
+    const root = try alloc.print("/tmp/malt_bigout_{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().deleteTree(lio.io(), root) catch {};
     defer std.Io.Dir.cwd().deleteTree(lio.io(), root) catch {};
-    const cellar = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{root});
+    const cellar = try alloc.print("{s}/Cellar/foo/1.0", .{root});
     try std.Io.Dir.cwd().createDirPath(lio.io(), cellar);
-    const fixture = try std.fmt.allocPrint(alloc, "{s}/payload", .{root});
+    const fixture = try alloc.print("{s}/payload", .{root});
     {
         const f = try std.Io.Dir.createFileAbsolute(lio.io(), fixture, .{ .truncate = true });
         defer f.close(lio.io());
@@ -894,15 +893,15 @@ test "system drains child output larger than a pipe buffer" {
     const got = try cap.finish(alloc);
 
     try std.testing.expect(got.len > 64 * 1024);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x1b) == null);
     // The tail proves nothing was truncated when the pipe filled.
-    try std.testing.expect(std.mem.indexOf(u8, got, "TAIL-MARKER") != null);
+    try std.testing.expect(std.mem.find(u8, got, "TAIL-MARKER") != null);
 }
 
 // Under --json/--ndjson the child's stdout must not reach the document, even
 // though stderr still goes through the filter.
 test "suppressed child stdout stays off the json document" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

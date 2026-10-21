@@ -434,7 +434,7 @@ fn failDetail(buf: []u8, s: *const State, kind: Kind, code: u8) []const u8 {
     if (countKind(s, kind) == 1) {
         var one: [1]UpgradedRef = undefined;
         _ = collectKind(s, kind, &one);
-        return std.fmt.bufPrint(buf, "{s} is running", .{one[0].name}) catch "an app is running";
+        return std.mem.print(buf, "{s} is running", .{one[0].name}) catch "an app is running";
     }
     return "a selected app is running";
 }
@@ -747,10 +747,10 @@ test "render heads the columns in bold, indented past the checkbox" {
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    try testing.expect(std.mem.find(u8, out, color.Style.bold.code()) != null);
     // The 4-col checkbox indent plus exact padding aligns the labels over values.
-    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ &@as([19]u8, @splat(' ')) ++ "CURRENT" ++ &@as([6]u8, @splat(' ')) ++ "AVAILABLE" ++ &@as([4]u8, @splat(' ')) ++ "KIND") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still renders below
+    try testing.expect(std.mem.find(u8, out, "    NAME" ++ &@as([19]u8, @splat(' ')) ++ "CURRENT" ++ &@as([6]u8, @splat(' ')) ++ "AVAILABLE" ++ &@as([4]u8, @splat(' ')) ++ "KIND") != null);
+    try testing.expect(std.mem.find(u8, out, "wget") != null); // the list still renders below
 }
 
 test "render lists checkboxes with the current and latest versions and the type column" {
@@ -760,12 +760,12 @@ test "render lists checkboxes with the current and latest versions and the type 
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
-    try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
-    try testing.expect(std.mem.indexOf(u8, out, "→") == null); // the arrow is gone; the headings name the columns
-    try testing.expect(std.mem.indexOf(u8, out, "1.24.5") != null); // current version
-    try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // latest version
-    try testing.expect(std.mem.indexOf(u8, out, "cask") != null); // type column
+    try testing.expect(std.mem.find(u8, out, "✓") != null); // wget checked
+    try testing.expect(std.mem.find(u8, out, "[ ]") != null); // an unchecked box
+    try testing.expect(std.mem.find(u8, out, "→") == null); // the arrow is gone; the headings name the columns
+    try testing.expect(std.mem.find(u8, out, "1.24.5") != null); // current version
+    try testing.expect(std.mem.find(u8, out, "1.25.0") != null); // latest version
+    try testing.expect(std.mem.find(u8, out, "cask") != null); // type column
 }
 
 test "render marks only the rows the CLI tagged as a backward move" {
@@ -812,7 +812,7 @@ test "the backward marker is a trailing tag — it steals no column at a narrow 
     var c: [8192]u8 = undefined;
     var fc: tab.Frame = .{ .buf = &c };
     render(&sb, &fc, .{ .row = 1, .col = 1, .width = 80, .height = 6 });
-    try testing.expect(std.mem.indexOf(u8, fc.slice(), "downgrade") != null);
+    try testing.expect(std.mem.find(u8, fc.slice(), "downgrade") != null);
 }
 
 test "a pinned row that also moved backward carries both tags, space-separated" {
@@ -826,8 +826,8 @@ test "a pinned row that also moved backward carries both tags, space-separated" 
     var f: tab.Frame = .{ .buf = &buf };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 6 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "pinned downgrade") != null); // both, spaced
-    try testing.expect(std.mem.indexOf(u8, out, "pinneddowngrade") == null); // never run together
+    try testing.expect(std.mem.find(u8, out, "pinned downgrade") != null); // both, spaced
+    try testing.expect(std.mem.find(u8, out, "pinneddowngrade") == null); // never run together
 }
 
 test "render greys a pinned row, shows the blocked box, and marks it pinned" {
@@ -837,9 +837,9 @@ test "render greys a pinned row, shows the blocked box, and marks it pinned" {
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "pinned") != null); // curl marked
-    try testing.expect(std.mem.indexOf(u8, out, "[-]") != null); // a pinned row gets the blocked box, never a check
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // greyed: muted role == dim on the basic tier
+    try testing.expect(std.mem.find(u8, out, "pinned") != null); // curl marked
+    try testing.expect(std.mem.find(u8, out, "[-]") != null); // a pinned row gets the blocked box, never a check
+    try testing.expect(std.mem.find(u8, out, color.Style.dim.code()) != null); // greyed: muted role == dim on the basic tier
 }
 
 test "render narrows to the filter" {
@@ -850,8 +850,8 @@ test "render narrows to the filter" {
     s.chrome.filter.push("firefox");
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "wget") == null); // filtered out
+    try testing.expect(std.mem.find(u8, out, "firefox") != null);
+    try testing.expect(std.mem.find(u8, out, "wget") == null); // filtered out
 }
 
 test "render highlights the selected row" {
@@ -861,13 +861,13 @@ test "render highlights the selected row" {
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "footerHint exposes the multi-select keys for the shared footer" {
     // The selection is carried by the row checkboxes; the keys live in the footer.
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "space") != null);
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "upgrade") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "space") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "upgrade") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -887,7 +887,7 @@ test "render on an empty list shows the up-to-date placeholder, not a blank pane
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 }); // must not trap
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
+    try std.testing.expect(std.mem.find(u8, f.slice(), "up to date") != null);
 }
 
 test "hitTest maps a click on the first list row to a selectable, unopenable row" {
@@ -1139,8 +1139,8 @@ test "an unverified empty read withholds the all-clear and the header count" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Could not verify") != null);
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") == null);
+    try testing.expect(std.mem.find(u8, f.slice(), "Could not verify") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "up to date") == null);
 }
 
 test "an unverified read still renders its proven rows" {
@@ -1166,7 +1166,7 @@ test "a complete reload after an unverified one restores the all-clear and the c
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "up to date") != null);
 }
 
 test "a known-zero read after an unverified one restores the all-clear" {
@@ -1181,7 +1181,7 @@ test "a known-zero read after an unverified one restores the all-clear" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "up to date") != null);
 }
 
 test "upgrading the proven rows of an unverified read keeps the count withheld" {
@@ -1198,7 +1198,7 @@ test "upgrading the proven rows of an unverified read keeps the count withheld" 
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Could not verify") != null);
+    try testing.expect(std.mem.find(u8, f.slice(), "Could not verify") != null);
 }
 
 test "dropUpgradedRows on an unloaded store is a no-op" {

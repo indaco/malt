@@ -23,10 +23,10 @@ const ScratchPrefix = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !ScratchPrefix {
         const base = try test_io.uniqueTempPath(allocator, "uninstall", tag);
         defer allocator.free(base);
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
+        const path = try allocator.printSentinel("{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -52,12 +52,12 @@ fn unquiet() void {
 // claim is exercised separately by the store tests.
 fn seedKeg(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
-    const cellar_rel = try std.fmt.allocPrint(allocator, "Cellar/{s}/{s}", .{ name, version });
+    const cellar_rel = try allocator.print("Cellar/{s}/{s}", .{ name, version });
     defer allocator.free(cellar_rel);
 
     var stmt = try db.prepare(
@@ -70,7 +70,7 @@ fn seedKeg(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, v
     try stmt.bindText(3, cellar_rel);
     _ = try stmt.step();
 
-    const cellar_dir = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const cellar_dir = try allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer allocator.free(cellar_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 }
@@ -82,7 +82,7 @@ fn pathExists(path: []const u8) bool {
 
 fn kegRowExists(prefix: []const u8, name: []const u8) !bool {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("SELECT 1 FROM kegs WHERE name = ?1;");
@@ -102,12 +102,12 @@ fn seedKegWithStoreRef(
     sha256: []const u8,
 ) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
-    const cellar_rel = try std.fmt.allocPrint(allocator, "Cellar/{s}/{s}", .{ name, version });
+    const cellar_rel = try allocator.print("Cellar/{s}/{s}", .{ name, version });
     defer allocator.free(cellar_rel);
 
     var ins_keg = try db.prepare(
@@ -126,14 +126,14 @@ fn seedKegWithStoreRef(
     try ins_ref.bindText(1, sha256);
     _ = try ins_ref.step();
 
-    const cellar_dir = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const cellar_dir = try allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer allocator.free(cellar_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 }
 
 fn storeRefExists(prefix: []const u8, sha256: []const u8) !bool {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("SELECT 1 FROM store_refs WHERE store_sha256 = ?1;");
@@ -177,7 +177,7 @@ test "execute on a non-installed package returns Aborted" {
     // takes the "not installed" branch (rather than the open-failure one).
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -199,7 +199,7 @@ test "execute -q flag is accepted alongside the package argument" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -228,7 +228,7 @@ test "execute removes the kegs row and the Cellar directory" {
 
     try testing.expect(!try kegRowExists(prefix.path, "foo"));
 
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix.path});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix.path});
     defer testing.allocator.free(cellar_dir);
     try testing.expect(!pathExists(cellar_dir));
 }
@@ -243,7 +243,7 @@ test "execute --force bypasses the dependents check" {
 
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
 
@@ -293,7 +293,7 @@ test "execute on a cask surfaces removeRecord SqliteError with db.errMsg in the 
     // SQLite error message verbatim — that's what we expect in the log.
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -307,7 +307,7 @@ test "execute on a cask surfaces removeRecord SqliteError with db.errMsg in the 
         var parsed = try cask.parseCask(testing.allocator, cask_json);
         defer parsed.deinit();
 
-        const app_path = try std.fmt.allocPrint(testing.allocator, "{s}/Firefox.app", .{prefix.path});
+        const app_path = try testing.allocator.print("{s}/Firefox.app", .{prefix.path});
         defer testing.allocator.free(app_path);
         try cask.recordInstall(&db, &parsed, app_path, null);
 
@@ -319,8 +319,7 @@ test "execute on a cask surfaces removeRecord SqliteError with db.errMsg in the 
 
     // Stage the app directory so the `isAppRunning` and `deleteTree`
     // steps inside uninstall reach the DB step where the trigger fires.
-    const app_path_z = try std.fmt.allocPrintSentinel(
-        testing.allocator,
+    const app_path_z = try testing.allocator.printSentinel(
         "{s}/Firefox.app",
         .{prefix.path},
         0,
@@ -342,8 +341,8 @@ test "execute on a cask surfaces removeRecord SqliteError with db.errMsg in the 
         uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{token}),
     );
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask-row-pinned-by-test-trigger") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ConstraintViolation") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask-row-pinned-by-test-trigger") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ConstraintViolation") != null);
 }
 
 test "execute drops the kegs row and leaves the store claim for the orphan sweep" {
@@ -372,22 +371,22 @@ test "execute clears a symlinked package dir instead of deleting through it" {
 
     try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
 
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}-victim", .{prefix.path});
+    const victim = try testing.allocator.print("{s}-victim", .{prefix.path});
     defer testing.allocator.free(victim);
     test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
 
-    const canary = try std.fmt.allocPrint(testing.allocator, "{s}/1.0/SENTINEL", .{victim});
+    const canary = try testing.allocator.print("{s}/1.0/SENTINEL", .{victim});
     defer testing.allocator.free(canary);
     {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/1.0", .{victim});
+        const dir = try testing.allocator.print("{s}/1.0", .{victim});
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         (try test_io.createFileAbsolute(std.Options.debug_io, canary, .{})).close(std.Options.debug_io);
     }
 
     // Swap the seeded package dir for a link pointing outside the prefix.
-    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo", .{prefix.path});
+    const pkg_dir = try testing.allocator.print("{s}/Cellar/foo", .{prefix.path});
     defer testing.allocator.free(pkg_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, pkg_dir);
     try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
@@ -416,13 +415,13 @@ test "execute keeps a symlinked package dir while another version is recorded" {
     try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
     try seedKeg(testing.allocator, prefix.path, "foo", "2.0");
 
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}-victim", .{prefix.path});
+    const victim = try testing.allocator.print("{s}-victim", .{prefix.path});
     defer testing.allocator.free(victim);
     test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, victim);
 
-    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo", .{prefix.path});
+    const pkg_dir = try testing.allocator.print("{s}/Cellar/foo", .{prefix.path});
     defer testing.allocator.free(pkg_dir);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, pkg_dir);
     try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
@@ -446,10 +445,10 @@ const snapshot_seed =
 fn seedSnapshot(prefix: []const u8) !void {
     const io = std.Options.debug_io;
     var dir_buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    const dir = try std.mem.print(&dir_buf, "{s}/cache", .{prefix});
     try test_io.cwd().createDirPath(io, dir);
     var path_buf: [600]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/outdated.json", .{dir});
+    const path = try std.mem.print(&path_buf, "{s}/outdated.json", .{dir});
     const f = try test_io.createFileAbsolute(io, path, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, snapshot_seed);
@@ -457,13 +456,13 @@ fn seedSnapshot(prefix: []const u8) !void {
 
 fn readSnapshot(prefix: []const u8) !malt.cli_outdated.OwnedSnapshot {
     var dir_buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    const dir = try std.mem.print(&dir_buf, "{s}/cache", .{prefix});
     return malt.cli_outdated.readSnapshot(std.Options.debug_io, testing.allocator, dir) orelse error.SnapshotMissing;
 }
 
 fn readSnapshotRaw(prefix: []const u8) ![]u8 {
     var path_buf: [600]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    const path = try std.mem.print(&path_buf, "{s}/cache/outdated.json", .{prefix});
     return test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, path, 4096);
 }
 
@@ -494,10 +493,10 @@ test "execute drops the uninstalled keg from the outdated snapshot and nothing e
 // running-app probe and the teardown have something real. Caller frees the
 // returned app path.
 fn seedFirefoxCask(prefix: []const u8) ![]u8 {
-    const app_path = try std.fmt.allocPrint(testing.allocator, "{s}/Firefox.app", .{prefix});
+    const app_path = try testing.allocator.print("{s}/Firefox.app", .{prefix});
     errdefer testing.allocator.free(app_path);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -555,7 +554,7 @@ test "an aborted uninstall leaves the outdated snapshot byte-identical" {
 
 fn sabotage(prefix: []const u8, sql: [:0]const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try db.exec(sql);
@@ -563,7 +562,7 @@ fn sabotage(prefix: []const u8, sql: [:0]const u8) !void {
 
 fn expectKegIntact(prefix: []const u8, name: []const u8, version: []const u8) !void {
     try testing.expect(try kegRowExists(prefix, name));
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(cellar_dir);
     try testing.expect(pathExists(cellar_dir));
 }
@@ -572,17 +571,17 @@ fn expectKegIntact(prefix: []const u8, name: []const u8, version: []const u8) !v
 // `mt link` would. Caller frees the returned path.
 fn seedLink(prefix: []const u8, name: []const u8, version: []const u8) ![]u8 {
     const io = std.Options.debug_io;
-    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
+    const bin_dir = try testing.allocator.print("{s}/bin", .{prefix});
     defer testing.allocator.free(bin_dir);
     try test_io.cwd().createDirPath(io, bin_dir);
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    const target = try testing.allocator.print("{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(target);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    const link = try testing.allocator.print("{s}/{s}", .{ bin_dir, name });
     errdefer testing.allocator.free(link);
     try test_io.symLinkAbsolute(io, target, link, .{});
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("INSERT INTO links (keg_id, link_path, target) SELECT id, ?2, ?3 FROM kegs WHERE name = ?1;");
@@ -635,8 +634,8 @@ test "execute aborts and keeps the keg when the lookup query cannot be prepared"
 
     try expectKegIntact(prefix.path, "foo", "1.0");
     // The cause, not a misleading "not installed".
-    try testing.expect(std.mem.indexOf(u8, captured.items, "revision") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "revision") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
 }
 
 test "execute reports an unreadable lookup instead of calling the package not installed" {
@@ -648,7 +647,7 @@ test "execute reports an unreadable lookup instead of calling the package not in
     // the lookup's step fails whichever index the planner picks, the way a
     // real disk or lock error would.
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
     var offsets: [8]u64 = undefined;
     var n: usize = 0;
     {
@@ -673,9 +672,9 @@ test "execute reports an unreadable lookup instead of calling the package not in
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{"foo"});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "malformed") != null);
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix.path});
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "malformed") != null);
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix.path});
     defer testing.allocator.free(cellar_dir);
     try testing.expect(pathExists(cellar_dir));
 }
@@ -691,7 +690,7 @@ test "execute refuses when the dependents query cannot be prepared" {
     try expectAbortCaptured(&captured, &.{"foo"});
 
     try expectKegIntact(prefix.path, "foo", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--force") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--force") != null);
 }
 
 test "execute refuses to remove a package whose dependents cannot be checked" {
@@ -706,7 +705,7 @@ test "execute refuses to remove a package whose dependents cannot be checked" {
 
     try expectKegIntact(prefix.path, "foo", "1.0");
     // The only way past an unreadable gate is the explicit override.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--force") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--force") != null);
 }
 
 test "execute --force still removes a package whose dependents cannot be checked" {
@@ -720,7 +719,7 @@ test "execute --force still removes a package whose dependents cannot be checked
     try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "foo" });
 
     try testing.expect(!try kegRowExists(prefix.path, "foo"));
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix.path});
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/foo/1.0", .{prefix.path});
     defer testing.allocator.free(cellar_dir);
     try testing.expect(!pathExists(cellar_dir));
 }
@@ -742,12 +741,12 @@ test "execute keeps the Cellar entry when the keg row cannot be deleted" {
     try expectAbortCaptured(&captured, &.{ "-q", "foo" });
 
     try expectKegIntact(prefix.path, "foo", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "keg-row-pinned-by-test-trigger") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstalled") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "keg-row-pinned-by-test-trigger") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "uninstalled") == null);
     // Links go before the row delete, so the message must say how to get
     // them back rather than claim nothing was touched.
     try testing.expect(!isSymlink(link));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "mt link foo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "mt link foo") != null);
 }
 
 test "execute aborts and keeps the links when their rows cannot be read" {
@@ -765,7 +764,7 @@ test "execute aborts and keeps the links when their rows cannot be read" {
     // Going on would CASCADE the rows away and strand an untracked symlink.
     try expectKegIntact(prefix.path, "foo", "1.0");
     try testing.expect(isSymlink(link));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "link_path") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "link_path") != null);
 }
 
 test "execute under a max-length prefix takes the lock and fails loud instead of exiting 0" {
@@ -783,7 +782,7 @@ test "execute under a max-length prefix takes the lock and fails loud instead of
     const long = try testing.allocator.dupeSentinel(u8, &buf, 0);
     defer testing.allocator.free(long);
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{long});
+    const db_dir = try testing.allocator.print("{s}/db", .{long});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(io, db_dir);
     _ = c.setenv("MALT_PREFIX", long.ptr, 1);
@@ -794,7 +793,7 @@ test "execute under a max-length prefix takes the lock and fails loud instead of
     try expectAbortCaptured(&captured, &.{"foo"});
     try testing.expect(captured.items.len > 0);
     // Proves the prefix was accepted and the lock taken, not rejected early.
-    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{long});
+    const lock_path = try testing.allocator.print("{s}/db/malt.lock", .{long});
     defer testing.allocator.free(lock_path);
     try testing.expect(pathExists(lock_path));
 }
@@ -828,8 +827,8 @@ test "execute --dry-run previews a formula and keeps its row, Cellar entry and s
     try dryRunCaptured(&captured, &.{"foo"});
 
     try expectKegIntact(prefix.path, "foo", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall foo 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstalled") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall foo 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "uninstalled") == null);
     const after = try readSnapshotRaw(prefix.path);
     defer testing.allocator.free(after);
     try testing.expectEqualStrings(snapshot_seed, after);
@@ -848,14 +847,14 @@ test "execute --dry-run still refuses a formula other kegs depend on" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try testing.expectError(error.Aborted, dryRunCaptured(&captured, &.{"foo"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "is required by bar") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "is required by bar") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall") == null);
 
     // --force lifts the gate but not the preview: still nothing removed.
     captured.clearRetainingCapacity();
     try dryRunCaptured(&captured, &.{ "--force", "foo" });
     try expectKegIntact(prefix.path, "foo", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall foo 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall foo 1.0") != null);
 }
 
 test "execute --dry-run on a missing formula or cask still reports it not installed" {
@@ -865,11 +864,11 @@ test "execute --dry-run on a missing formula or cask still reports it not instal
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try testing.expectError(error.Aborted, dryRunCaptured(&captured, &.{"ghost"}));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost is not installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghost is not installed") != null);
 
     captured.clearRetainingCapacity();
     try testing.expectError(error.Aborted, dryRunCaptured(&captured, &.{ "--cask", "ghost" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost is not installed as a cask") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghost is not installed as a cask") != null);
 }
 
 test "execute --dry-run previews a cask and keeps its row, files and snapshot" {
@@ -878,7 +877,7 @@ test "execute --dry-run previews a cask and keeps its row, files and snapshot" {
     const token = "firefox";
     const app_path = try seedFirefoxCask(prefix.path);
     defer testing.allocator.free(app_path);
-    const caskroom = try std.fmt.allocPrint(testing.allocator, "{s}/Caskroom/firefox/123.0", .{prefix.path});
+    const caskroom = try testing.allocator.print("{s}/Caskroom/firefox/123.0", .{prefix.path});
     defer testing.allocator.free(caskroom);
     try test_io.cwd().createDirPath(std.Options.debug_io, caskroom);
     try seedSnapshot(prefix.path);
@@ -887,13 +886,13 @@ test "execute --dry-run previews a cask and keeps its row, files and snapshot" {
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{token});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask firefox 123.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstalled") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall cask firefox 123.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "uninstalled") == null);
     try testing.expect(pathExists(app_path));
     try testing.expect(pathExists(caskroom));
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try testing.expect(try cask.isInstalled(&db, token));
@@ -919,7 +918,7 @@ test "execute refuses an unknown flag and keeps the package" {
         var captured: std.ArrayList(u8) = .empty;
         defer captured.deinit(testing.allocator);
         try expectAbortCaptured(&captured, argv);
-        try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag") != null);
+        try testing.expect(std.mem.find(u8, captured.items, "Unknown flag") != null);
         try expectKegIntact(prefix.path, "foo", "1.0");
     }
 }
@@ -932,7 +931,7 @@ test "execute refuses an unknown flag and keeps the package" {
 // Records a cask row with no app bundle, enough for the teardown to run.
 fn seedCask(prefix: []const u8, token: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -944,7 +943,7 @@ fn seedCask(prefix: []const u8, token: []const u8) !void {
 
 fn caskInstalled(prefix: []const u8, token: []const u8) !bool {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     return cask.isInstalled(&db, token);
@@ -952,14 +951,14 @@ fn caskInstalled(prefix: []const u8, token: []const u8) !bool {
 
 fn expectKegGone(prefix: []const u8, name: []const u8) !void {
     try testing.expect(!try kegRowExists(prefix, name));
-    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}", .{ prefix, name });
+    const cellar_dir = try testing.allocator.print("{s}/Cellar/{s}", .{ prefix, name });
     defer testing.allocator.free(cellar_dir);
     try testing.expect(!pathExists(cellar_dir));
 }
 
 fn seedDependent(prefix: []const u8, dependent: []const u8, dep: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     var stmt = try db.prepare("INSERT INTO dependencies (keg_id, dep_name) SELECT id, ?2 FROM kegs WHERE name = ?1;");
@@ -981,7 +980,7 @@ test "execute with no package names the repeatable argument in its usage line" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{"-q"});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "<package>...") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "<package>...") != null);
 }
 
 test "execute removes every named package" {
@@ -1007,9 +1006,9 @@ test "execute removes nothing and names every package that is not installed" {
 
     // The installed name comes first, so any removal before the check shows.
     try expectKegIntact(prefix.path, "foo", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost1 is not installed") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost2 is not installed") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Uninstalling") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghost1 is not installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghost2 is not installed") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Uninstalling") == null);
 }
 
 test "execute lets a batch remove a package whose dependents are all in it" {
@@ -1026,7 +1025,7 @@ test "execute lets a batch remove a package whose dependents are all in it" {
     // baz stays behind, so foo is still needed: the gate refuses before
     // bar, which nothing needs, is removed either.
     try expectAbortCaptured(&captured, &.{ "bar", "foo" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "foo is required by baz") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "foo is required by baz") != null);
     try expectKegIntact(prefix.path, "bar", "2.0");
     try expectKegIntact(prefix.path, "foo", "1.0");
 
@@ -1053,7 +1052,7 @@ test "execute removes a dependent before its dependency, so a failed removal kee
     // fail on bar, leaving bar installed without what it needs.
     try expectAbortCaptured(&captured, &.{ "foo", "bar" });
     try expectKegIntact(prefix.path, "foo", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "foo was not uninstalled") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "foo was not uninstalled") != null);
 }
 
 test "execute stops a batch at Ctrl-C and names what it skipped" {
@@ -1081,7 +1080,7 @@ test "execute stops a batch at Ctrl-C and names what it skipped" {
     }
     try expectKegGone(prefix.path, "foo");
     try expectKegIntact(prefix.path, "bar", "2.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "bar was not uninstalled") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "bar was not uninstalled") != null);
 }
 
 test "execute refuses a batch with a running cask app before removing anything" {
@@ -1122,7 +1121,7 @@ test "execute refuses a batch with a running cask app before removing anything" 
         // The formula comes first, so a check made only at removal time shows.
         try testing.expectError(error.Aborted, uninstall.execute(&ctx, testing.allocator, &.{ "foo", "firefox" }));
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "firefox appears to be running") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "firefox appears to be running") != null);
     try expectKegIntact(prefix.path, "foo", "1.0");
     try testing.expect(try caskInstalled(prefix.path, "firefox"));
 }
@@ -1139,7 +1138,7 @@ test "execute refuses a batch that removes only one of a dependent's installed v
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{ "foo", "bar" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "foo is required by bar") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "foo is required by bar") != null);
     try expectKegIntact(prefix.path, "foo", "1.0");
 }
 
@@ -1156,7 +1155,7 @@ test "execute removes a package named twice once, without a not-installed error"
 
     try expectKegGone(prefix.path, "foo");
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "foo uninstalled"));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
 }
 
 test "execute removes a formula and a cask named together" {
@@ -1180,7 +1179,7 @@ test "execute --cask applies to every name and refuses a batch with a missing ca
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{ "--cask", "c1", "ghost" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost is not installed as a cask") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "ghost is not installed as a cask") != null);
     try testing.expect(try caskInstalled(prefix.path, "c1"));
 
     try runQuiet(&.{ "--cask", "c1", "c2" });
@@ -1206,8 +1205,8 @@ test "execute stops the batch at a failed removal and names what it skipped" {
     try expectKegGone(prefix.path, "foo");
     try expectKegIntact(prefix.path, "bar", "2.0");
     try expectKegIntact(prefix.path, "baz", "3.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "baz was not uninstalled") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "baz 3.0...") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "baz was not uninstalled") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "baz 3.0...") == null);
 }
 
 test "execute --dry-run previews every named package and removes none" {
@@ -1221,9 +1220,9 @@ test "execute --dry-run previews every named package and removes none" {
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{ "foo", "bar", "c1" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall foo 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall bar 2.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask c1 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall foo 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall bar 2.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall cask c1 1.0") != null);
     try expectKegIntact(prefix.path, "foo", "1.0");
     try expectKegIntact(prefix.path, "bar", "2.0");
     try testing.expect(try caskInstalled(prefix.path, "c1"));
@@ -1234,7 +1233,7 @@ fn seedCorruptCaskOverKeg(prefix: []const u8, name: []const u8) !void {
     try seedKeg(testing.allocator, prefix, name, "1.0");
     try seedCask(prefix, name);
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
 }
 
 test "execute refuses an unreadable casks table instead of removing a same-named formula" {
@@ -1248,7 +1247,7 @@ test "execute refuses an unreadable casks table instead of removing a same-named
 
     // The cask may be the real target: the formula must survive untouched.
     try expectKegIntact(prefix.path, "box", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database") != null);
 }
 
 test "execute on a cask over an unreadable kegs table points at --cask and keeps the cask" {
@@ -1256,13 +1255,13 @@ test "execute on a cask over an unreadable kegs table points at --cask and keeps
     defer prefix.deinit(testing.allocator);
     try seedCask(prefix.path, "box");
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{"box"});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula box") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "If box is a cask, pass --cask.") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database for formula box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "If box is a cask, pass --cask.") != null);
     try testing.expect(try caskInstalled(prefix.path, "box"));
 }
 
@@ -1271,13 +1270,13 @@ test "execute --formula over an unreadable kegs table does not point at --cask" 
     defer prefix.deinit(testing.allocator);
     try seedCask(prefix.path, "box");
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{ "--formula", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula box") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--cask") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database for formula box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--cask") == null);
 }
 
 test "execute --cask removes a cask while the kegs table cannot be read" {
@@ -1285,7 +1284,7 @@ test "execute --cask removes a cask while the kegs table cannot be read" {
     defer prefix.deinit(testing.allocator);
     try seedCask(prefix.path, "box");
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
 
     try runQuiet(&.{ "--cask", "box" });
     try testing.expect(!try caskInstalled(prefix.path, "box"));
@@ -1301,10 +1300,10 @@ test "execute --cask reports an unreadable casks table instead of not installed"
     try expectAbortCaptured(&captured, &.{ "--cask", "box" });
 
     try expectKegIntact(prefix.path, "box", "1.0");
-    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "package database") != null);
     // The user named a cask; pointing at --formula would contradict them.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--formula") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "--formula") == null);
 }
 
 const treated_as_formula = "Treating box as a formula";
@@ -1320,9 +1319,9 @@ test "execute --dry-run on a name that is both kinds previews the formula and wa
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{"box"});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall box 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") == null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall box 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "cask box") == null);
+    try testing.expect(std.mem.find(u8, captured.items, treated_as_formula) != null);
     try expectKegIntact(prefix.path, "box", "1.0");
     try testing.expect(try caskInstalled(prefix.path, "box"));
 }
@@ -1366,8 +1365,8 @@ test "execute --cask on a name that is both kinds previews the cask without the 
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{ "--cask", "box" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall cask box 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, treated_as_formula) == null);
 }
 
 test "execute --formula on a name that is both kinds previews the formula without the warning" {
@@ -1380,8 +1379,8 @@ test "execute --formula on a name that is both kinds previews the formula withou
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{ "--formula", "box" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall box 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall box 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, treated_as_formula) == null);
 }
 
 test "execute on a cask-only name still removes the cask, with no collision warning" {
@@ -1393,8 +1392,8 @@ test "execute on a cask-only name still removes the cask, with no collision warn
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{"box"});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box 1.0") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall cask box 1.0") != null);
+    try testing.expect(std.mem.find(u8, captured.items, treated_as_formula) == null);
 }
 
 test "execute --formula removes a formula while the casks table cannot be read" {
@@ -1417,7 +1416,7 @@ test "execute without --formula points at it when the casks table cannot be read
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{"box"});
     // Conditional: the name may be a cask only, and then --formula is no way out.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "If box is a formula, pass --formula") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "If box is a formula, pass --formula") != null);
 }
 
 test "execute --formula takes the formula over a same-named cask and keeps the cask" {
@@ -1441,7 +1440,7 @@ test "execute --formula on a cask-only name refuses and keeps the cask" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{ "--formula", "box" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "box is not installed as a formula") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "box is not installed as a formula") != null);
     try testing.expect(try caskInstalled(prefix.path, "box"));
 }
 
@@ -1455,7 +1454,7 @@ test "execute refuses --cask with --formula before touching anything" {
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{ "--casks", "--formula", "box" });
     // Brew's wording, so a brew user reads the same refusal.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
     try expectKegIntact(prefix.path, "box", "1.0");
     try testing.expect(try caskInstalled(prefix.path, "box"));
 }
@@ -1464,5 +1463,5 @@ test "execute refuses --formula with --cask even with no package named, as brew 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{ "--formula", "--cask" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "mutually exclusive") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "mutually exclusive") != null);
 }

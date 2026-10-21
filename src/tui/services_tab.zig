@@ -381,8 +381,8 @@ const sample = [_]Row{
 
 test "footerHint advertises the details affordance alongside the lifecycle keys" {
     const h = footerHint();
-    try testing.expect(std.mem.indexOf(u8, h, "enter: details") != null);
-    try testing.expect(std.mem.indexOf(u8, h, "s: start") != null);
+    try testing.expect(std.mem.find(u8, h, "enter: details") != null);
+    try testing.expect(std.mem.find(u8, h, "s: start") != null);
 }
 
 test "End jumps to the last filtered row" {
@@ -472,10 +472,10 @@ test "render heads the columns in bold, indented past the status dot" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    try testing.expect(std.mem.find(u8, out, color.Style.bold.code()) != null);
     // The 2-col dot indent plus exact padding aligns the labels over values.
-    try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ &@as([21]u8, @splat(' ')) ++ "STATE" ++ &@as([8]u8, @splat(' ')) ++ "START" ++ &@as([3]u8, @splat(' ')) ++ "KEG") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "redis") != null); // the list still renders below
+    try testing.expect(std.mem.find(u8, out, "  NAME" ++ &@as([21]u8, @splat(' ')) ++ "STATE" ++ &@as([8]u8, @splat(' ')) ++ "START" ++ &@as([3]u8, @splat(' ')) ++ "KEG") != null);
+    try testing.expect(std.mem.find(u8, out, "redis") != null); // the list still renders below
 }
 
 test "formatRow marks a scheduled service with a clock and keeps STATE aligned" {
@@ -484,13 +484,13 @@ test "formatRow marks a scheduled service with a clock and keeps STATE aligned" 
     const scheduled = formatRow(&a, .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "interval 300s" });
     const plain = formatRow(&b, .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "" });
     // The clock marks only the scheduled row; the label itself stays out of the list.
-    try testing.expect(std.mem.indexOf(u8, scheduled, "◷") != null);
-    try testing.expect(std.mem.indexOf(u8, plain, "◷") == null);
-    try testing.expect(std.mem.indexOf(u8, scheduled, "interval 300s") == null);
+    try testing.expect(std.mem.find(u8, scheduled, "◷") != null);
+    try testing.expect(std.mem.find(u8, plain, "◷") == null);
+    try testing.expect(std.mem.find(u8, scheduled, "interval 300s") == null);
     // STATE lands at the same display column: the marker's only byte cost over the
     // plain row is the clock's 2 non-display bytes (3-byte glyph, 1 display cell).
-    const i_plain = std.mem.indexOf(u8, plain, "loaded").?;
-    const i_sched = std.mem.indexOf(u8, scheduled, "loaded").?;
+    const i_plain = std.mem.find(u8, plain, "loaded").?;
+    const i_sched = std.mem.find(u8, scheduled, "loaded").?;
     try testing.expectEqual(i_plain + 2, i_sched);
 }
 
@@ -507,8 +507,8 @@ test "ENTER opens a detail pane showing the schedule label; ESC closes it" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 60, .height = 12 });
     const out = f.slice();
     // The label moved off the list into the pane, so this text can only be here.
-    try testing.expect(std.mem.indexOf(u8, out, "Schedule") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "interval 300s") != null);
+    try testing.expect(std.mem.find(u8, out, "Schedule") != null);
+    try testing.expect(std.mem.find(u8, out, "interval 300s") != null);
 
     _ = stepKey(&s, .esc);
     try testing.expect(s.detail == null);
@@ -524,10 +524,10 @@ test "detail pane shows no schedule label for a run-at-load service" {
     _ = stepKey(&s, .enter);
     render(&s, &f, .{ .row = 1, .col = 1, .width = 60, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Schedule") != null);
+    try testing.expect(std.mem.find(u8, out, "Schedule") != null);
     // An empty schedule must not surface a bogus interval/cron label.
-    try testing.expect(std.mem.indexOf(u8, out, "interval") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "cron") == null);
+    try testing.expect(std.mem.find(u8, out, "interval") == null);
+    try testing.expect(std.mem.find(u8, out, "cron") == null);
 }
 
 test "render shows the schedule marker but not the label or a SCHED column" {
@@ -539,9 +539,9 @@ test "render shows the schedule marker but not the label or a SCHED column" {
     const s: State = .{ .items = &rows };
     render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "◷") != null); // at-a-glance marker
-    try testing.expect(std.mem.indexOf(u8, out, "SCHED") == null); // no 5th column heading
-    try testing.expect(std.mem.indexOf(u8, out, "interval 300s") == null); // label lives in the detail pane
+    try testing.expect(std.mem.find(u8, out, "◷") != null); // at-a-glance marker
+    try testing.expect(std.mem.find(u8, out, "SCHED") == null); // no 5th column heading
+    try testing.expect(std.mem.find(u8, out, "interval 300s") == null); // label lives in the detail pane
 }
 
 test "render lists services with a state dot, the state, and the auto-start hint" {
@@ -550,12 +550,12 @@ test "render lists services with a state dot, the state, and the auto-start hint
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "redis") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "running") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "auto") != null); // auto-start hint
-    try testing.expect(std.mem.indexOf(u8, out, "manual") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "●") != null); // running dot
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.green.code()) != null); // coloured
+    try testing.expect(std.mem.find(u8, out, "redis") != null);
+    try testing.expect(std.mem.find(u8, out, "running") != null);
+    try testing.expect(std.mem.find(u8, out, "auto") != null); // auto-start hint
+    try testing.expect(std.mem.find(u8, out, "manual") != null);
+    try testing.expect(std.mem.find(u8, out, "●") != null); // running dot
+    try testing.expect(std.mem.find(u8, out, color.Style.green.code()) != null); // coloured
 }
 
 test "render of an unusual state does not crash and uses the unknown dot" {
@@ -566,8 +566,8 @@ test "render of an unusual state does not crash and uses the unknown dot" {
     const s: State = .{ .items = &only };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "degraded") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "◌") != null); // unknown dot
+    try testing.expect(std.mem.find(u8, out, "degraded") != null);
+    try testing.expect(std.mem.find(u8, out, "◌") != null); // unknown dot
 }
 
 test "render flags an errored service with the danger dot, not the muted unknown" {
@@ -577,10 +577,10 @@ test "render flags an errored service with the danger dot, not the muted unknown
     const s: State = .{ .items = &only };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "errored") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "●") != null); // filled dot, shared with running
-    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.danger)) != null); // in danger red
-    try testing.expect(std.mem.indexOf(u8, out, "◌") == null); // never the muted unknown dot
+    try testing.expect(std.mem.find(u8, out, "errored") != null);
+    try testing.expect(std.mem.find(u8, out, "●") != null); // filled dot, shared with running
+    try testing.expect(std.mem.find(u8, out, color.roleCode(.danger)) != null); // in danger red
+    try testing.expect(std.mem.find(u8, out, "◌") == null); // never the muted unknown dot
 }
 
 test "render narrows to the filter" {
@@ -590,8 +590,8 @@ test "render narrows to the filter" {
     s.chrome.filter.push("redis");
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "redis") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "postgresql") == null); // filtered out
+    try testing.expect(std.mem.find(u8, out, "redis") != null);
+    try testing.expect(std.mem.find(u8, out, "postgresql") == null); // filtered out
 }
 
 test "render highlights the selected row" {
@@ -600,12 +600,12 @@ test "render highlights the selected row" {
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
+    try testing.expect(std.mem.find(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "footerHint exposes the lifecycle keys for the shared footer" {
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "start") != null);
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "restart") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "start") != null);
+    try testing.expect(std.mem.find(u8, footerHint(), "restart") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -628,8 +628,8 @@ test "a hostile service name cannot inject a control sequence into the frame" {
     const out = f.slice();
     // The dot legitimately emits its own SGR via `put`; the row *content* is funnelled
     // through `putContent`, so the name's OSC title-set and BEL are neutralized there.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
-    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+    try testing.expect(std.mem.find(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
+    try testing.expect(std.mem.findScalar(u8, out, 0x07) == null); // BEL dropped
 }
 
 test "render on an empty list shows the no-services placeholder, not a blank pane" {
@@ -637,7 +637,7 @@ test "render on an empty list shows the no-services placeholder, not a blank pan
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 }); // must not trap
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "No services registered") != null);
+    try std.testing.expect(std.mem.find(u8, f.slice(), "No services registered") != null);
 }
 
 test "render clamps to a height of one without crashing" {

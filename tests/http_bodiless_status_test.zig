@@ -77,7 +77,7 @@ fn runBodiless(head: []const u8, if_none_match: ?[]const u8) !Probe {
     const server_thread = try std.Thread.spawn(.{}, serveBodiless, .{&stub});
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/probe", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/probe", .{port});
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);

@@ -60,9 +60,9 @@ test "execute refuses an unknown flag before resolving any package" {
     defer arena.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, install.execute(&ctx, arena.allocator(), &.{ "--forec", "nosuchpkg" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --forec") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --forec") != null);
     // Refused at parse, so resolution never ran.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "nosuchpkg") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "nosuchpkg") == null);
 }
 
 test "execute refuses an empty package name before resolving the others" {
@@ -85,22 +85,22 @@ test "execute refuses an empty package name before resolving the others" {
     defer arena.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
     try testing.expectError(error.Aborted, install.execute(&ctx, arena.allocator(), &.{ "nosuchpkg", "" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Empty package name") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "nosuchpkg") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Empty package name") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "nosuchpkg") == null);
 }
 
 fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !void {
-    const cache_root = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{prefix});
+    const cache_root = try testing.allocator.print("{s}/cache", .{prefix});
     defer testing.allocator.free(cache_root);
     try seedFormulaCacheAt(cache_root, name, json);
 }
 
 /// Seed under an explicit cache root, for the MALT_CACHE override tests.
 fn seedFormulaCacheAt(cache_root: []const u8, name: []const u8, json: []const u8) !void {
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{cache_root});
+    const cache_api = try testing.allocator.print("{s}/api", .{cache_root});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.json", .{ cache_api, name });
+    const path = try testing.allocator.print("{s}/formula_{s}.json", .{ cache_api, name });
     defer testing.allocator.free(path);
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
@@ -155,7 +155,7 @@ test "execute --dry-run honours MALT_CACHE for the API cache" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{prefix_z}, 0);
+    const alt = try testing.allocator.printSentinel("{s}/altcache", .{prefix_z}, 0);
     defer testing.allocator.free(alt);
     _ = c.setenv("MALT_CACHE", alt.ptr, 1);
     defer _ = c.unsetenv("MALT_CACHE");
@@ -223,11 +223,11 @@ test "execute with neither --formula nor --cask: 404 cache markers route through
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     inline for (.{ "formula_zzcft.404", "cask_zzcft.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         f.close(std.Options.debug_io);
@@ -283,10 +283,10 @@ test "execute --dry-run with one cached + one 404 package exits PartialFailure" 
 
     try seedFormulaCache(prefix, "alpha", alpha_no_deps_json);
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
     inline for (.{ "formula_zzbad.404", "cask_zzbad.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         f.close(std.Options.debug_io);
@@ -349,11 +349,11 @@ test "Ctrl-C mid-resolution after a counted miss exits PartialFailure" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix_z});
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix_z});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     inline for (.{ "formula_zzbad1.404", "cask_zzbad1.404", "formula_zzbad2.404", "cask_zzbad2.404" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ cache_api, name });
         defer testing.allocator.free(p);
         const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
         f.close(std.Options.debug_io);
@@ -384,10 +384,10 @@ test "execute --dry-run with an already-installed package short-circuits" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{prefix_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);
@@ -400,7 +400,7 @@ test "execute --dry-run with an already-installed package short-circuits" {
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, &@as([64]u8, @splat('0')));
-    const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{prefix_z});
+    const cellar_path = try testing.allocator.print("{s}/Cellar/seeded/1.0", .{prefix_z});
     defer testing.allocator.free(cellar_path);
     try stmt.bindText(5, cellar_path);
     _ = try stmt.step();
@@ -487,7 +487,7 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-dependencies", "leaf" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would install") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Dry run: would install") == null);
 }
 
 test "execute --only-deps --dry-run plans deps but skips the requested formula" {
@@ -560,9 +560,9 @@ test "execute --only-deps --dry-run plans deps but skips the requested formula" 
     // top-level filtered, only the single dep should land in the plan.
     // (`alpha` still appears upstream in the "Resolved alpha …" log line
     // emitted before the filter, so we anchor on the plan header instead.)
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would install 1 package") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "beta 1.0 (dependency)") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would install 2 packages") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "would install 1 package") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "beta 1.0 (dependency)") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would install 2 packages") == null);
 }
 
 test "execute --dry-run routes a revisioned formula through the install pipeline" {
@@ -675,11 +675,11 @@ test "a package requested alongside its dependent is planned once, as a request"
     var out = try planFor("dup", &.{ "--dry-run", "alpha", "beta" });
     defer out.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, out.items, "would install 2 package") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "would install 3 package") == null);
+    try testing.expect(std.mem.find(u8, out.items, "would install 2 package") != null);
+    try testing.expect(std.mem.find(u8, out.items, "would install 3 package") == null);
     // Promoted: an explicit request is not a dependency, so `purge
     // --unused-deps` must not reclaim it.
-    try testing.expect(std.mem.indexOf(u8, out.items, "beta 1.0 (dependency)") == null);
+    try testing.expect(std.mem.find(u8, out.items, "beta 1.0 (dependency)") == null);
 }
 
 test "the plan does not depend on the order the two names were typed" {
@@ -689,8 +689,8 @@ test "the plan does not depend on the order the two names were typed" {
     var out = try planFor("dup_rev", &.{ "--dry-run", "beta", "alpha" });
     defer out.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, out.items, "would install 2 package") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "beta 1.0 (dependency)") == null);
+    try testing.expect(std.mem.find(u8, out.items, "would install 2 package") != null);
+    try testing.expect(std.mem.find(u8, out.items, "beta 1.0 (dependency)") == null);
 }
 
 test "only-deps skips a dependency the user also asked for by name" {
@@ -699,5 +699,5 @@ test "only-deps skips a dependency the user also asked for by name" {
     var out = try planFor("dup_od", &.{ "--dry-run", "--only-deps", "alpha", "beta" });
     defer out.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, out.items, "Dry run: would install") == null);
+    try testing.expect(std.mem.find(u8, out.items, "Dry run: would install") == null);
 }

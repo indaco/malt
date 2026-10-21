@@ -11,7 +11,7 @@ const dsl = malt.dsl;
 const formula_mod = malt.formula;
 
 fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(alloc,
+    return alloc.print(
         \\{{
         \\  "name": "testpkg",
         \\  "full_name": "testpkg",
@@ -67,16 +67,16 @@ fn makePrefix() !Scratch {
     errdefer s.deinit();
     const prefix = s.path;
 
-    const cellar_share = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/testpkg/1.0/share", .{prefix});
+    const cellar_share = try testing.allocator.print("{s}/Cellar/testpkg/1.0/share", .{prefix});
     defer testing.allocator.free(cellar_share);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_share);
 
-    const etc = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{prefix});
+    const etc = try testing.allocator.print("{s}/etc", .{prefix});
     defer testing.allocator.free(etc);
     try test_io.cwd().createDirPath(std.Options.debug_io, etc);
 
     // The source the post_install body symlinks to.
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/src.pem", .{cellar_share});
+    const src = try testing.allocator.print("{s}/src.pem", .{cellar_share});
     defer testing.allocator.free(src);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
@@ -126,9 +126,9 @@ test "install_symlink: ca-certificates-shaped post_install lands the cert symlin
     }
 
     // <prefix>/etc/cert.pem is a symlink to the keg's share/src.pem.
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/cert.pem", .{prefix});
+    const link = try testing.allocator.print("{s}/etc/cert.pem", .{prefix});
     defer testing.allocator.free(link);
-    const expected = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/testpkg/1.0/share/src.pem", .{prefix});
+    const expected = try testing.allocator.print("{s}/Cellar/testpkg/1.0/share/src.pem", .{prefix});
     defer testing.allocator.free(expected);
 
     var buf: [test_io.max_path_bytes]u8 = undefined;
@@ -161,9 +161,9 @@ test "install_symlink: positional form lands the link by basename end-to-end" {
         .pkg_version = f.pkg_version,
     }, ruby_src, prefix, &flog);
 
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/src.pem", .{prefix});
+    const link = try testing.allocator.print("{s}/etc/src.pem", .{prefix});
     defer testing.allocator.free(link);
-    const expected = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/testpkg/1.0/share/src.pem", .{prefix});
+    const expected = try testing.allocator.print("{s}/Cellar/testpkg/1.0/share/src.pem", .{prefix});
     defer testing.allocator.free(expected);
     var buf: [test_io.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(expected, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
@@ -180,7 +180,7 @@ test "install_symlink: rm_f clears a pre-existing regular file before relinking"
 
     // Pre-seed etc/cert.pem as a *regular file* — the stale state
     // ca-certificates' `rm_f` is there to clear.
-    const stale = try std.fmt.allocPrint(testing.allocator, "{s}/etc/cert.pem", .{prefix});
+    const stale = try testing.allocator.print("{s}/etc/cert.pem", .{prefix});
     defer testing.allocator.free(stale);
     (try test_io.createFileAbsolute(std.Options.debug_io, stale, .{})).close(std.Options.debug_io);
 

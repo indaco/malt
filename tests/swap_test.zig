@@ -52,10 +52,10 @@ const Paths = struct {
         const dir = try resetScratch(allocator, tag);
         return .{
             .dir = dir,
-            .target = try std.fmt.allocPrint(allocator, "{s}/malt", .{dir}),
-            .new = try std.fmt.allocPrint(allocator, "{s}/malt.new", .{dir}),
-            .old = try std.fmt.allocPrint(allocator, "{s}/malt.old", .{dir}),
-            .staged = try std.fmt.allocPrint(allocator, "{s}/.malt-update-{d}", .{ dir, std.c.getpid() }),
+            .target = try allocator.print("{s}/malt", .{dir}),
+            .new = try allocator.print("{s}/malt.new", .{dir}),
+            .old = try allocator.print("{s}/malt.old", .{dir}),
+            .staged = try allocator.print("{s}/.malt-update-{d}", .{ dir, std.c.getpid() }),
         };
     }
 

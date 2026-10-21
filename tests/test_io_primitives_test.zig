@@ -95,7 +95,7 @@ test "unsetenv of an inherited variable keeps the failure printer alive" {
     // so an unprimed scan hits a null entry and the test crashes instead of
     // reporting. `MALT_PREFIX` is inherited from build.zig in every test run.
     const prev = fs.getenv("MALT_PREFIX") orelse return error.SkipZigTest;
-    var prev_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var prev_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     @memcpy(prev_buf[0..prev.len], prev);
     prev_buf[prev.len] = 0;
     defer _ = fs.c.setenv("MALT_PREFIX", prev_buf[0..prev.len :0], 1);

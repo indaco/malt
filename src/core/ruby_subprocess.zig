@@ -321,7 +321,7 @@ pub fn runPostInstallWithBody(
     io.random(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
     const pid = std.c.getpid();
-    const tmp_path = std.fmt.bufPrint(
+    const tmp_path = std.mem.print(
         &tmp_path_buf,
         "/tmp/malt_post_install_{s}_{d}_{s}.rb",
         .{ name, pid, hex[0..] },
@@ -350,7 +350,7 @@ pub fn runPostInstallWithBody(
     //    a minimal PATH, MALT_PREFIX, and a formula-scoped TMPDIR pass.
 
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(
+    const cellar_path = std.mem.print(
         &cellar_buf,
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },

@@ -154,7 +154,7 @@ fn truecolor(r: u8, g: u8, b: u8) Sgr {
 /// widest output is `max_sgr_len` bytes, so `bufPrint` can never overflow.
 fn sgr(comptime fmt: []const u8, args: anytype) Sgr {
     var out: Sgr = .{ .buf = undefined, .len = 0 };
-    const s = std.fmt.bufPrint(&out.buf, fmt, args) catch unreachable; // u8 args ≤ max_sgr_len
+    const s = std.mem.print(&out.buf, fmt, args) catch unreachable; // u8 args ≤ max_sgr_len
     out.len = s.len;
     return out;
 }

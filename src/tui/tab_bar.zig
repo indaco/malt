@@ -143,7 +143,7 @@ test "tabAt agrees with the column render actually draws, whichever tab is activ
     for ([_]Tab{ .search, .installed, .doctor }) |active| {
         var buf: [256]u8 = undefined;
         const out = render(&buf, active, test_titles, 80);
-        const at = std.mem.indexOf(u8, out, "Installed").?;
+        const at = std.mem.find(u8, out, "Installed").?;
         const col: u16 = @intCast(visibleWidth(out[0..at]) + 1);
         try std.testing.expectEqual(installed_span.first, col);
         try std.testing.expectEqual(Tab.installed, tabAt(test_titles, 80, col).?);
@@ -177,15 +177,15 @@ test "fromDigit maps 1-5 and rejects everything else" {
 test "render divides tabs, reverse+bolds the active, accents the rest" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .outdated, test_titles, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, sep) != null); // a divider between tabs
+    try std.testing.expect(std.mem.find(u8, out, sep) != null); // a divider between tabs
     // active: accent + reverse + bold + title + reset
     var ab: [64]u8 = undefined;
-    const active = try std.fmt.bufPrint(&ab, "{s}{s}{s}Outdated{s}", .{ accentCode(), color.Style.reverse.code(), color.Style.bold.code(), color.Style.reset.code() });
-    try std.testing.expect(std.mem.indexOf(u8, out, active) != null);
+    const active = try std.mem.print(&ab, "{s}{s}{s}Outdated{s}", .{ accentCode(), color.Style.reverse.code(), color.Style.bold.code(), color.Style.reset.code() });
+    try std.testing.expect(std.mem.find(u8, out, active) != null);
     // inactive: accent + title (no reverse/bold) + reset
     var ib: [64]u8 = undefined;
-    const inactive = try std.fmt.bufPrint(&ib, "{s}Installed{s}", .{ accentCode(), color.Style.reset.code() });
-    try std.testing.expect(std.mem.indexOf(u8, out, inactive) != null);
+    const inactive = try std.mem.print(&ib, "{s}Installed{s}", .{ accentCode(), color.Style.reset.code() });
+    try std.testing.expect(std.mem.find(u8, out, inactive) != null);
 }
 
 test "render truncates to the column budget without counting SGR escapes" {

@@ -325,7 +325,7 @@ inline fn emitPrefixLine(
     const spec = comptime prefixLineSpec(kind);
     if (spec.respect_quiet and quiet) return;
     var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const msg = std.mem.print(&buf, fmt, args) catch return;
     // The comptime `fmt` is trusted; the interpolated args carry tap and
     // formula text. Scrub the message only — the role colour is added outside.
     writePrefixLine(spec.role, spec.emoji_prefix, spec.plain_prefix, spec.shape, term_sanitize.scrubInPlace(msg));
@@ -366,7 +366,7 @@ pub fn notice(comptime fmt: []const u8, args: anytype) void {
 /// Bypasses `--quiet` — a silent prompt would deadlock interactive flows.
 pub fn question(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const msg = std.mem.print(&buf, fmt, args) catch return;
     const prefix: []const u8 = "  ? ";
     const colorize = color.isColorEnabledForStderr();
     lockStderr();
@@ -389,7 +389,7 @@ pub fn question(comptime fmt: []const u8, args: anytype) void {
 fn lineStyled(style_code: ?[]const u8, comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const msg = std.mem.print(&buf, fmt, args) catch return;
     const colorize = color.isColorEnabledForStderr();
     lockStderr();
     defer unlockStderr();
@@ -504,7 +504,7 @@ pub fn writeField(
     args: anytype,
 ) !void {
     try writeFieldKey(w, colorize, col, key);
-    const value = std.fmt.bufPrint(scratch, value_fmt, args) catch {
+    const value = std.mem.print(scratch, value_fmt, args) catch {
         try w.writeAll("\n");
         return;
     };
@@ -571,7 +571,7 @@ pub fn writeSchemaVersionPrefix(w: *std.Io.Writer) !void {
 pub fn jsonTimeSuffix(w: *std.Io.Writer, start_ts: i64) !void {
     const elapsed = std.Io.Clock.real.now(pkg_io).toMilliseconds() - start_ts;
     var buf: [32]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
+    const s = std.mem.print(&buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
     try w.writeAll(s);
 }
 
@@ -654,13 +654,13 @@ pub fn emitNdjsonEvent(
 // helper is a thin wrapper over the shared `emitPrefixLine`.
 test "escaped writes a UTF-8 C1 control and ESC as hex, so no terminal acts on them" {
     var buf: [64]u8 = undefined;
-    const got = try std.fmt.bufPrint(&buf, "{f}", .{escaped("a\xc2\x9b2J\x1b\"\\ caf\xc3\xa9")});
+    const got = try std.mem.print(&buf, "{f}", .{escaped("a\xc2\x9b2J\x1b\"\\ caf\xc3\xa9")});
     try std.testing.expectEqualStrings("a\\xc2\\x9b2J\\x1b\\\"\\\\ caf\\xc3\\xa9", got);
 }
 
 test "shellQuoted keeps a path with spaces and quotes one argument" {
     var buf: [64]u8 = undefined;
-    const got = try std.fmt.bufPrint(&buf, "{f}", .{shellQuoted("/src/my dir/l'x.rb")});
+    const got = try std.mem.print(&buf, "{f}", .{shellQuoted("/src/my dir/l'x.rb")});
     try std.testing.expectEqualStrings("'/src/my dir/l'\\''x.rb'", got);
 }
 
@@ -795,7 +795,7 @@ test "pushPostInstallEvent serialises concurrent producers" {
             var buf: [64]u8 = undefined;
             var i: usize = 0;
             while (i < events_per_thread) : (i += 1) {
-                const json = std.fmt.bufPrint(
+                const json = std.mem.print(
                     &buf,
                     "{{\"name\":\"t{d}-{d}\",\"status\":\"completed\",\"entries\":[]}}",
                     .{ thread_id, i },
@@ -1041,8 +1041,8 @@ test "info drops OSC 52 from an interpolated message" {
     }
 
     info("{s}", .{osc52_payload});
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x07) == null);
     try std.testing.expect(std.mem.startsWith(u8, buf.items, "  > evil"));
     try std.testing.expect(std.mem.endsWith(u8, buf.items, "tail\n"));
 }
@@ -1061,8 +1061,8 @@ test "err drops OSC 52 even though it ignores --quiet" {
     }
 
     err("{s}", .{osc52_payload});
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x07) == null);
 }
 
 test "the role colour codes survive the message scrub" {
@@ -1081,7 +1081,7 @@ test "the role colour codes survive the message scrub" {
     info("{s}", .{"a\x1b[31mb"});
     // The prefix is coloured outside the scrubbed message, so ESC survives
     // in the line while the payload's own escape is gone from the body.
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) != null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) != null);
     try std.testing.expect(std.mem.endsWith(u8, buf.items, "a[31mb\n"));
 }
 
@@ -1091,8 +1091,8 @@ test "writeField drops OSC 52 from a tap-sourced value" {
     var scratch: [256]u8 = undefined;
     try writeField(&w, &scratch, false, 14, "Description", "{s}", .{osc52_payload});
     const got = w.buffered();
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x07) == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x07) == null);
     try std.testing.expect(std.mem.startsWith(u8, got, "Description:"));
     try std.testing.expect(std.mem.endsWith(u8, got, "tail\n"));
 }
@@ -1103,5 +1103,5 @@ test "writeField keeps an accented, emoji-bearing description intact" {
     var w = std.Io.Writer.fixed(&out);
     var scratch: [256]u8 = undefined;
     try writeField(&w, &scratch, false, 14, "Description", "{s}", .{desc});
-    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), desc) != null);
+    try std.testing.expect(std.mem.find(u8, w.buffered(), desc) != null);
 }

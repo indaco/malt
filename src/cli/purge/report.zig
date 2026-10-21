@@ -102,7 +102,7 @@ pub const Reporter = struct {
     /// passed by `runCache` doesn't silently drop the header.
     pub fn note(self: *const Reporter, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const msg = std.mem.print(&buf, fmt, args) catch return;
         output.info("{s}: {s}", .{ self.scope, msg });
     }
 
@@ -143,7 +143,7 @@ fn writeItem(text: []const u8) void {
 fn writeMore(remaining: usize) void {
     if (output.isQuiet()) return;
     var buf: [96]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &buf,
         "    … {d} more (use --verbose to show all)",
         .{remaining},
@@ -202,7 +202,7 @@ fn writeRow(name: []const u8, count: u32, bytes: u64) void {
     const bytes_str = util.formatBytes(bytes, &bytes_buf);
 
     var line_buf: [128]u8 = undefined;
-    const line = std.fmt.bufPrint(
+    const line = std.mem.print(
         &line_buf,
         "  {s:<16}{d:>6}    {s:>12}",
         .{ name, count, bytes_str },
@@ -262,5 +262,5 @@ test "note prints messages whose formatted length exceeds the legacy 320-byte ca
     const rep = Reporter.init("cache", true);
     rep.note("under {s}", .{long_path});
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, long_path) != null);
+    try testing.expect(std.mem.find(u8, buf.items, long_path) != null);
 }

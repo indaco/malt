@@ -30,9 +30,9 @@ test "cleanUpdateArtefacts removes the .old sibling" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const target = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(target);
-    const old = try std.fmt.allocPrint(testing.allocator, "{s}/malt.old", .{dir});
+    const old = try testing.allocator.print("{s}/malt.old", .{dir});
     defer testing.allocator.free(old);
 
     try writeFile(target, "live");
@@ -50,11 +50,11 @@ test "cleanUpdateArtefacts removes the twin's .old alongside the target's" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const target = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(target);
-    const old = try std.fmt.allocPrint(testing.allocator, "{s}/malt.old", .{dir});
+    const old = try testing.allocator.print("{s}/malt.old", .{dir});
     defer testing.allocator.free(old);
-    const twin_old = try std.fmt.allocPrint(testing.allocator, "{s}/mt.old", .{dir});
+    const twin_old = try testing.allocator.print("{s}/mt.old", .{dir});
     defer testing.allocator.free(twin_old);
 
     try writeFile(target, "live");
@@ -73,9 +73,9 @@ test "cleanUpdateArtefacts targeting mt removes malt.old via the twin branch" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    const target = try testing.allocator.print("{s}/mt", .{dir});
     defer testing.allocator.free(target);
-    const twin_old = try std.fmt.allocPrint(testing.allocator, "{s}/malt.old", .{dir});
+    const twin_old = try testing.allocator.print("{s}/malt.old", .{dir});
     defer testing.allocator.free(twin_old);
 
     try writeFile(target, "live");
@@ -94,11 +94,11 @@ test "cleanUpdateArtefacts skips the twin sweep for generic target names" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/tool", .{dir});
+    const target = try testing.allocator.print("{s}/tool", .{dir});
     defer testing.allocator.free(target);
-    const own_old = try std.fmt.allocPrint(testing.allocator, "{s}/tool.old", .{dir});
+    const own_old = try testing.allocator.print("{s}/tool.old", .{dir});
     defer testing.allocator.free(own_old);
-    const bystander = try std.fmt.allocPrint(testing.allocator, "{s}/mt.old", .{dir});
+    const bystander = try testing.allocator.print("{s}/mt.old", .{dir});
     defer testing.allocator.free(bystander);
 
     try writeFile(target, "live");
@@ -116,13 +116,13 @@ test "cleanUpdateArtefacts removes all .malt-update-* staging files" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const target = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(target);
     try writeFile(target, "live");
 
-    const s1 = try std.fmt.allocPrint(testing.allocator, "{s}/.malt-update-111", .{dir});
+    const s1 = try testing.allocator.print("{s}/.malt-update-111", .{dir});
     defer testing.allocator.free(s1);
-    const s2 = try std.fmt.allocPrint(testing.allocator, "{s}/.malt-update-222", .{dir});
+    const s2 = try testing.allocator.print("{s}/.malt-update-222", .{dir});
     defer testing.allocator.free(s2);
     try writeFile(s1, "orphan-1");
     try writeFile(s2, "orphan-2");
@@ -139,7 +139,7 @@ test "cleanUpdateArtefacts on an already-clean tree is a no-op" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const target = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(target);
     try writeFile(target, "live");
 
@@ -155,13 +155,13 @@ test "cleanUpdateArtefacts does not touch unrelated hidden files" {
     defer testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    const target = try testing.allocator.print("{s}/malt", .{dir});
     defer testing.allocator.free(target);
     try writeFile(target, "live");
 
-    const bystander = try std.fmt.allocPrint(testing.allocator, "{s}/.malt-config", .{dir});
+    const bystander = try testing.allocator.print("{s}/.malt-config", .{dir});
     defer testing.allocator.free(bystander);
-    const also = try std.fmt.allocPrint(testing.allocator, "{s}/.DS_Store", .{dir});
+    const also = try testing.allocator.print("{s}/.DS_Store", .{dir});
     defer testing.allocator.free(also);
     try writeFile(bystander, "user");
     try writeFile(also, "mac");

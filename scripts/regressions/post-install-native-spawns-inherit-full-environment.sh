@@ -66,16 +66,16 @@ test "a run step's child cannot see malt's own environment" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prefix = path_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &path_buf)];
 
-    const keg = try std.fmt.allocPrint(a, "{s}/Cellar/probe/1.0", .{prefix});
-    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{keg});
+    const keg = try a.print("{s}/Cellar/probe/1.0", .{prefix});
+    const libexec = try a.print("{s}/libexec", .{keg});
     try std.Io.Dir.cwd().createDirPath(io, libexec);
-    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/etc", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/etc", .{prefix}));
 
-    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{prefix});
-    const script = try std.fmt.allocPrint(a, "{s}/post-install", .{libexec});
+    const seen = try a.print("{s}/etc/seen.txt", .{prefix});
+    const script = try a.print("{s}/post-install", .{libexec});
     {
         const f = try std.Io.Dir.createFileAbsolute(io, script, .{});
         defer f.close(io);
@@ -110,7 +110,7 @@ test "a run step's child cannot see malt's own environment" {
     var r = f.reader(io, &.{});
     const dump = buf[0..try r.interface.readSliceShort(&buf)];
 
-    if (std.mem.indexOf(u8, dump, "probe-sentinel") != null) {
+    if (std.mem.find(u8, dump, "probe-sentinel") != null) {
         std.debug.print("child environment carried malt's forge token\n", .{});
         return error.ForgeTokenLeakedToPostInstallChild;
     }
@@ -123,7 +123,7 @@ test "a run step's child cannot see malt's own environment" {
         return error.ParentPathLeakedToPostInstallChild;
     }
     // Proves the base is a scrub and not a wipe: build/locale keys still pass.
-    if (std.mem.indexOf(u8, dump, locale) == null) {
+    if (std.mem.find(u8, dump, locale) == null) {
         std.debug.print("allowlisted locale var did not reach the child\n", .{});
         return error.AllowlistedEnvDropped;
     }

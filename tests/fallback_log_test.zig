@@ -102,13 +102,13 @@ test "toJson serialises formula/reason/detail and source location when present" 
 
     try testing.expect(std.mem.startsWith(u8, s, "["));
     try testing.expect(std.mem.endsWith(u8, s, "]"));
-    try testing.expect(std.mem.indexOf(u8, s, "\"formula\":\"wget\"") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\"reason\":\"unknown_method\"") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\"detail\":\"some_method\"") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\"line\":7") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\"col\":3") != null);
+    try testing.expect(std.mem.find(u8, s, "\"formula\":\"wget\"") != null);
+    try testing.expect(std.mem.find(u8, s, "\"reason\":\"unknown_method\"") != null);
+    try testing.expect(std.mem.find(u8, s, "\"detail\":\"some_method\"") != null);
+    try testing.expect(std.mem.find(u8, s, "\"line\":7") != null);
+    try testing.expect(std.mem.find(u8, s, "\"col\":3") != null);
     // Entry without loc should NOT emit line/col fields.
-    try testing.expect(std.mem.indexOf(u8, s, "\"formula\":\"curl\"") != null);
+    try testing.expect(std.mem.find(u8, s, "\"formula\":\"curl\"") != null);
     // Comma between the two entries.
-    try testing.expect(std.mem.indexOf(u8, s, "},{") != null);
+    try testing.expect(std.mem.find(u8, s, "},{") != null);
 }

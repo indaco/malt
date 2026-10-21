@@ -37,7 +37,7 @@ test "detectFromShellPath returns null for missing or unknown shells" {
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    if (std.mem.indexOf(u8, haystack, needle) == null) {
+    if (std.mem.find(u8, haystack, needle) == null) {
         std.debug.print("expected output to contain '{s}', got:\n{s}\n", .{ needle, haystack });
         return error.MissingSubstring;
     }
@@ -100,8 +100,8 @@ test "render fish uses set -gx and avoids POSIX export syntax" {
     try expectContains(out, "set -gx MANPATH \"/opt/malt/share/man\" $MANPATH");
     try expectContains(out, "set -gx INFOPATH \"/opt/malt/share/info\" $INFOPATH");
     // POSIX `export` and bash brace-expansion are syntax errors in fish.
-    try testing.expect(std.mem.indexOf(u8, out, "export ") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "${") == null);
+    try testing.expect(std.mem.find(u8, out, "export ") == null);
+    try testing.expect(std.mem.find(u8, out, "${") == null);
 }
 
 test "render emits SSL_CERT_FILE only when the CA bundle is present" {
@@ -118,7 +118,7 @@ test "render emits SSL_CERT_FILE only when the CA bundle is present" {
     // Absent: nothing — the var must never name a missing file.
     const without = try shellenv.render(testing.allocator, .bash, "/opt/malt", null);
     defer testing.allocator.free(without);
-    try testing.expect(std.mem.indexOf(u8, without, "SSL_CERT_FILE") == null);
+    try testing.expect(std.mem.find(u8, without, "SSL_CERT_FILE") == null);
 }
 
 test "render bash SSL_CERT_FILE line is terminated and follows INFOPATH" {
@@ -127,8 +127,8 @@ test "render bash SSL_CERT_FILE line is terminated and follows INFOPATH" {
     // Must keep the `;\n` line-termination contract eval relies on.
     try testing.expect(std.mem.endsWith(u8, out, ";\n"));
     // Ordering: SSL_CERT_FILE comes after the brew-compatible block.
-    const info = std.mem.indexOf(u8, out, "INFOPATH").?;
-    const ssl = std.mem.indexOf(u8, out, "SSL_CERT_FILE").?;
+    const info = std.mem.find(u8, out, "INFOPATH").?;
+    const ssl = std.mem.find(u8, out, "SSL_CERT_FILE").?;
     try testing.expect(ssl > info);
 }
 
@@ -137,7 +137,7 @@ test "render fish uses set -gx for SSL_CERT_FILE when present" {
     defer testing.allocator.free(out);
     try expectContains(out, "set -gx SSL_CERT_FILE \"/opt/malt/etc/openssl@3/cert.pem\";");
     // No POSIX export / brace-expansion sneaks in via the new line.
-    try testing.expect(std.mem.indexOf(u8, out, "export ") == null);
+    try testing.expect(std.mem.find(u8, out, "export ") == null);
 }
 
 test "render bash and zsh stay byte-identical with SSL_CERT_FILE present" {
@@ -168,7 +168,7 @@ test "render honors a non-default prefix" {
 
     try expectContains(out, "export HOMEBREW_PREFIX=\"/usr/local\"");
     try expectContains(out, "/usr/local/bin");
-    try testing.expect(std.mem.indexOf(u8, out, "/opt/malt") == null);
+    try testing.expect(std.mem.find(u8, out, "/opt/malt") == null);
 }
 
 test "render surfaces allocator failure rather than swallowing it" {
@@ -204,10 +204,10 @@ fn certPrefix(tag: []const u8, kegs: []const []const u8) ![]const u8 {
     errdefer testing.allocator.free(prefix);
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
     for (kegs) |keg| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/{s}", .{ prefix, keg });
+        const dir = try testing.allocator.print("{s}/etc/{s}", .{ prefix, keg });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-        const cert = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+        const cert = try testing.allocator.print("{s}/cert.pem", .{dir});
         defer testing.allocator.free(cert);
         (try test_io.createFileAbsolute(std.Options.debug_io, cert, .{})).close(std.Options.debug_io);
     }
@@ -215,10 +215,10 @@ fn certPrefix(tag: []const u8, kegs: []const []const u8) ![]const u8 {
 }
 
 fn expectFound(prefix: []const u8, keg: []const u8) !void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) orelse
         return error.CertNotFound;
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}/etc/{s}/cert.pem", .{ prefix, keg });
+    const want = try testing.allocator.print("{s}/etc/{s}/cert.pem", .{ prefix, keg });
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, got);
 }
@@ -243,7 +243,7 @@ test "findCertFile returns null when no openssl keg has a bundle" {
     const prefix = try certPrefix("none", &.{});
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -255,12 +255,12 @@ test "findCertFile skips a dangling openssl@4 link and falls back to openssl@3" 
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@3");
     try mkdirIn(prefix, "/opt/openssl@4");
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@4", .{prefix});
+    const dir = try testing.allocator.print("{s}/etc/openssl@4", .{prefix});
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    const link = try testing.allocator.print("{s}/cert.pem", .{dir});
     defer testing.allocator.free(link);
-    const gone = try std.fmt.allocPrint(testing.allocator, "{s}/gone.pem", .{prefix});
+    const gone = try testing.allocator.print("{s}/gone.pem", .{prefix});
     defer testing.allocator.free(gone);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, gone, link, .{});
     try expectFound(prefix, "openssl@3");
@@ -268,7 +268,7 @@ test "findCertFile skips a dangling openssl@4 link and falls back to openssl@3" 
 
 /// `mkdir -p <prefix><sub>`.
 fn mkdirIn(prefix: []const u8, sub: []const u8) !void {
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    const dir = try testing.allocator.print("{s}{s}", .{ prefix, sub });
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 }
@@ -283,12 +283,12 @@ fn linkedLeftoverTo(tag: []const u8, keg: []const u8, kind: LeftoverTarget) ![]c
     errdefer testing.allocator.free(prefix);
     try mkdirIn(prefix, "/opt/ca-certificates");
     try touchIn(prefix, "/opt/ca-certificates/cert.pem");
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/{s}", .{ prefix, keg });
+    const dir = try testing.allocator.print("{s}/etc/{s}", .{ prefix, keg });
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    const link = try testing.allocator.print("{s}/cert.pem", .{dir});
     defer testing.allocator.free(link);
-    const abs = try std.fmt.allocPrint(testing.allocator, "{s}/etc/ca-certificates/cert.pem", .{prefix});
+    const abs = try testing.allocator.print("{s}/etc/ca-certificates/cert.pem", .{prefix});
     defer testing.allocator.free(abs);
     const target = switch (kind) {
         .etc_relative => "../ca-certificates/cert.pem",
@@ -304,7 +304,7 @@ fn linkedLeftover(tag: []const u8, keg: []const u8) ![]const u8 {
 }
 
 fn touchIn(prefix: []const u8, sub: []const u8) !void {
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    const path = try testing.allocator.print("{s}{s}", .{ prefix, sub });
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 }
@@ -357,9 +357,9 @@ test "findCertFile follows a leftover link when the prefix has a trailing slash"
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@4");
-    const slashed = try std.fmt.allocPrint(testing.allocator, "{s}/", .{prefix});
+    const slashed = try testing.allocator.print("{s}/", .{prefix});
     defer testing.allocator.free(slashed);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, slashed) != null);
 }
 
@@ -369,10 +369,10 @@ test "findCertFile ignores a leftover link once ca-certificates is uninstalled" 
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@4");
-    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/ca-certificates", .{prefix});
+    const opt = try testing.allocator.print("{s}/opt/ca-certificates", .{prefix});
     defer testing.allocator.free(opt);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, opt);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -382,7 +382,7 @@ test "findCertFile ignores a plain-file leftover bundle" {
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@4");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -392,13 +392,13 @@ test "findCertFile ignores a leftover link that leaves ca-certificates" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@4");
     try mkdirIn(prefix, "/etc/openssl@3");
-    const other = try std.fmt.allocPrint(testing.allocator, "{s}/other.pem", .{prefix});
+    const other = try testing.allocator.print("{s}/other.pem", .{prefix});
     defer testing.allocator.free(other);
     (try test_io.createFileAbsolute(std.Options.debug_io, other, .{})).close(std.Options.debug_io);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@3/cert.pem", .{prefix});
+    const link = try testing.allocator.print("{s}/etc/openssl@3/cert.pem", .{prefix});
     defer testing.allocator.free(link);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, other, link, .{});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -408,12 +408,12 @@ test "findCertFile exports nothing when the only leftover bundle dangles" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@4");
     try mkdirIn(prefix, "/etc/openssl@3");
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@3/cert.pem", .{prefix});
+    const link = try testing.allocator.print("{s}/etc/openssl@3/cert.pem", .{prefix});
     defer testing.allocator.free(link);
-    const gone = try std.fmt.allocPrint(testing.allocator, "{s}/gone.pem", .{prefix});
+    const gone = try testing.allocator.print("{s}/gone.pem", .{prefix});
     defer testing.allocator.free(gone);
     try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, gone, link, .{});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -422,7 +422,7 @@ test "findCertFile exports nothing when no installed or leftover bundle resolves
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@4");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -440,7 +440,7 @@ test "findCertFile ignores a plain-file leftover when no major is installed" {
     const prefix = try certPrefix("nomajor_plain", &.{"openssl@3"});
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -448,10 +448,10 @@ test "findCertFile ignores an orphaned leftover link when no major is installed"
     const prefix = try linkedLeftover("nomajor_orphan", "openssl@3");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/ca-certificates", .{prefix});
+    const opt = try testing.allocator.print("{s}/opt/ca-certificates", .{prefix});
     defer testing.allocator.free(opt);
     try test_io.deleteTreeAbsolute(std.Options.debug_io, opt);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
 }
 
@@ -467,7 +467,7 @@ test "findCertFile prefers openssl@4 among leftover links when no major is insta
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/etc/openssl@4");
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@4/cert.pem", .{prefix});
+    const link = try testing.allocator.print("{s}/etc/openssl@4/cert.pem", .{prefix});
     defer testing.allocator.free(link);
     try test_io.cwd().symLink(std.Options.debug_io, "../ca-certificates/cert.pem", link, .{});
     try expectFound(prefix, "openssl@4");

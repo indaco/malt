@@ -100,7 +100,7 @@ pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []con
             if (install_args.isCoreTap(tap)) return .{ .presence = .keg, .name = try allocator.dupe(u8, name), .side = .formula };
             return .{
                 .presence = .keg,
-                .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap, name }),
+                .name = try allocator.print("{s}/{s}", .{ tap, name }),
                 .side = sideOf(stmt.columnText(3)),
                 .pinned = true,
             };
@@ -117,7 +117,7 @@ pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []con
             if (install_args.isCoreTap(tap)) return .{ .presence = .cask, .name = try allocator.dupe(u8, token) };
             return .{
                 .presence = .cask,
-                .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap, token }),
+                .name = try allocator.print("{s}/{s}", .{ tap, token }),
                 .pinned = true,
             };
         }
@@ -265,7 +265,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return error.Aborted;
 
     // No DB file means nothing was ever installed under this prefix —

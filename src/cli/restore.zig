@@ -73,7 +73,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.warn(install_args.unprintable_local_fmt ++ "; restore skips it", .{ output.escaped(note.name), output.escaped(note.path) });
     }
 
-    if (std.mem.indexOf(u8, text, backup_mod.versioned_format_marker) == null) warnLegacyPins(entries);
+    if (std.mem.find(u8, text, backup_mod.versioned_format_marker) == null) warnLegacyPins(entries);
 
     if (entries.len == 0) {
         // A file whose every line was refused is not an empty backup; a

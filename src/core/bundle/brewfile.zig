@@ -177,8 +177,7 @@ fn parseLine(
         // synthetic prefix so users see them round-tripped.
         formulas.append(a, .{ .name = first }) catch return BrewfileError.OutOfMemory;
     } else if (diag) |d| {
-        const msg = std.fmt.allocPrint(
-            d.allocator,
+        const msg = d.allocator.print(
             "skipping unknown Brewfile directive: {s}",
             .{directive},
         ) catch return BrewfileError.OutOfMemory;

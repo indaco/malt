@@ -91,7 +91,7 @@ pub fn hostSliceOffset(data: []const u8) ?u64 {
         macho.FAT_MAGIC_64, macho.FAT_CIGAM_64 => true,
         else => return null,
     };
-    const host: macho.cpu_type_t = if (@import("builtin").cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+    const host: macho.cpu_type_t = if (@import("builtin").target.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
     const size = fatArchSize(is64);
     var offset: usize = 8;
     for (0..std.mem.readInt(u32, data[4..8], .big)) |_| {
@@ -627,7 +627,7 @@ test "hostSliceOffset finds this arch's slice in a fat file and nothing in a thi
     std.mem.writeInt(u32, fat[16..20], 0x4000, .big);
     std.mem.writeInt(i32, fat[28..32], macho.CPU_TYPE_ARM64, .big);
     std.mem.writeInt(u32, fat[36..40], 0x8000, .big);
-    const want: u64 = if (@import("builtin").cpu.arch == .aarch64) 0x8000 else 0x4000;
+    const want: u64 = if (@import("builtin").target.cpu.arch == .aarch64) 0x8000 else 0x4000;
     try testing.expectEqual(@as(?u64, want), hostSliceOffset(&fat));
     // An arch table cut short yields nothing rather than a garbage offset.
     try testing.expectEqual(@as(?u64, null), hostSliceOffset(fat[0..20]));
@@ -639,7 +639,7 @@ test "hostSliceOffset refuses a fat64 offset no file position can hold" {
     var fat: [8 + 32]u8 = @splat(0);
     std.mem.writeInt(u32, fat[0..4], macho.FAT_MAGIC_64, .big);
     std.mem.writeInt(u32, fat[4..8], 1, .big);
-    const host: macho.cpu_type_t = if (@import("builtin").cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+    const host: macho.cpu_type_t = if (@import("builtin").target.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
     std.mem.writeInt(i32, fat[8..12], host, .big);
     std.mem.writeInt(u64, fat[16..24], 1 << 63, .big);
     try testing.expectEqual(@as(?u64, null), hostSliceOffset(&fat));

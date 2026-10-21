@@ -31,14 +31,14 @@ pub fn parse(aa: std.mem.Allocator, bytes: []const u8, diag: *Diag) Error![]EnvP
         const lead = std.mem.trimStart(u8, line, " \t");
         if (lead.len == 0 or lead[0] == '#') continue;
 
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse return error.MissingEquals;
+        const eq = std.mem.findScalar(u8, line, '=') orelse return error.MissingEquals;
         const key = line[0..eq];
         const value = line[eq + 1 ..];
         if (!isKey(key)) return error.BadKey;
         if (isReserved(key)) return error.ReservedKey;
         // NUL cuts the plist string short, a lone CR is not a line end, and
         // an over-long value would fail validation for the whole service.
-        if (value.len > plist.max_arg_len or std.mem.indexOfAny(u8, value, "\x00\r") != null) return error.BadValue;
+        if (value.len > plist.max_arg_len or std.mem.findAny(u8, value, "\x00\r") != null) return error.BadValue;
         // launchd refuses a plist string that is not UTF-8.
         if (!std.unicode.utf8ValidateSlice(value)) return error.BadValue;
         try out.append(aa, .{ .key = try aa.dupe(u8, key), .value = try aa.dupe(u8, value) });

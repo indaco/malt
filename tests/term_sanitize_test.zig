@@ -42,7 +42,7 @@ fn check(input: []const u8, expected: []const u8) !void {
 // `anyerror` here would let a hostile sink raise arbitrary tags and
 // defeat exhaustive switching at every caller.
 test "Sink.write_fn declares a closed error set" {
-    const FuncPtr = std.meta.fieldInfo(ts.Sink, .write_fn).type;
+    const FuncPtr = @FieldType(ts.Sink, "write_fn");
     const FnType = @typeInfo(FuncPtr).pointer.child;
     const RetT = @typeInfo(FnType).@"fn".return_type.?;
     const ErrSet = @typeInfo(RetT).error_union.error_set;
@@ -108,7 +108,7 @@ test "vertical cursor motion dropped" {
     try check("\x1b[10A\x1b[2Kok: verified\x1b[10B", "\x1b[2Kok: verified");
     for ([_][]const u8{ "A", "1A", "3A", "999A", "1B", "99B", "9E", "10E", "40F", "0000000009A", "1;999A", "99999999999999999999A" }) |seq| {
         var in: [40]u8 = undefined;
-        const s = std.fmt.bufPrint(&in, "a\x1b[{s}b", .{seq}) catch unreachable;
+        const s = std.mem.print(&in, "a\x1b[{s}b", .{seq}) catch unreachable;
         try check(s, "ab");
     }
 }
@@ -463,14 +463,14 @@ test "no BEL or bare ESC survives a dense hostile control corpus" {
     try s.flush(buf.sink());
     const out = buf.list.items;
     // No BEL leaks; every emitted ESC begins a whitelisted CSI (ESC [ …).
-    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null);
+    try testing.expect(std.mem.findScalar(u8, out, 0x07) == null);
     for (out, 0..) |c, i| {
         if (c == 0x1B) try testing.expect(i + 1 < out.len and out[i + 1] == '[');
         try testing.expect(!(c >= 0x80 and c <= 0x9F)); // no C1 leak (corpus has no UTF-8)
         try testing.expect(c >= 0x20 or c == 0x1B); // no other C0 leak
     }
     // Legitimate output still passes through.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[31mX\x1b[0m") != null);
+    try testing.expect(std.mem.find(u8, out, "\x1b[31mX\x1b[0m") != null);
 }
 
 // ── empty + pathological inputs ─────────────────────────────────────

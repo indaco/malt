@@ -16,7 +16,7 @@ pub fn humanize(bytes: u64, buf: []u8) []const u8 {
         value /= 1024.0;
         unit += 1;
     }
-    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
+    return std.mem.print(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
 }
 
 /// Nullable convenience for size columns that render `"-"` when the size is

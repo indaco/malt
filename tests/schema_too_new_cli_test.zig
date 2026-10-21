@@ -35,7 +35,7 @@ const Scratch = struct {
         defer allocator.free(base);
         const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -48,7 +48,7 @@ const Scratch = struct {
             \\VALUES ('tree', 'tree', '2.1', 0, '', '/c/tree/2.1', 0);
         );
         var sql_buf: [96]u8 = undefined;
-        const bump = try std.fmt.bufPrintSentinel(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{too_new}, 0);
+        const bump = try std.mem.printSentinel(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{too_new}, 0);
         try db.exec(bump);
         return .{ .path = path };
     }
@@ -61,7 +61,7 @@ const Scratch = struct {
 
     fn openDb(prefix: []const u8) !sqlite.Database {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         return sqlite.Database.open(db_path);
     }
 };
@@ -79,12 +79,12 @@ fn ctxWithSink() malt.app_ctx.AppCtx {
 /// never be the old opaque line that hid them.
 fn expectNamesBothVersions(captured: []const u8) !void {
     var db_buf: [16]u8 = undefined;
-    const db_tag = try std.fmt.bufPrint(&db_buf, "v{d}", .{too_new});
+    const db_tag = try std.mem.print(&db_buf, "v{d}", .{too_new});
     var max_buf: [16]u8 = undefined;
-    const max_tag = try std.fmt.bufPrint(&max_buf, "v{d}", .{schema.known_schema_version});
-    try testing.expect(std.mem.indexOf(u8, captured, db_tag) != null);
-    try testing.expect(std.mem.indexOf(u8, captured, max_tag) != null);
-    try testing.expect(std.mem.indexOf(u8, captured, "Failed to initialize database schema") == null);
+    const max_tag = try std.mem.print(&max_buf, "v{d}", .{schema.known_schema_version});
+    try testing.expect(std.mem.find(u8, captured, db_tag) != null);
+    try testing.expect(std.mem.find(u8, captured, max_tag) != null);
+    try testing.expect(std.mem.find(u8, captured, "Failed to initialize database schema") == null);
 }
 
 test "list refuses a too-new DB and names both versions" {
@@ -193,7 +193,7 @@ test "doctor's schema row fails on a too-new DB and passes once the marker is go
         var db = try Scratch.openDb(s.path);
         defer db.close();
         var sql_buf: [96]u8 = undefined;
-        const drop = try std.fmt.bufPrintSentinel(&sql_buf, "DELETE FROM schema_version WHERE version = {d};", .{too_new}, 0);
+        const drop = try std.mem.printSentinel(&sql_buf, "DELETE FROM schema_version WHERE version = {d};", .{too_new}, 0);
         try db.exec(drop);
     }
     try testing.expectEqual(doctor.CheckStatus.ok, ck.run(ctx, ck.name));
@@ -227,7 +227,7 @@ test "every purge scope that reads the DB refuses a too-new one with exit 4, not
     // scripts the same way every other command does.
     var s = try Scratch.init(testing.allocator, "purge");
     defer s.deinit(testing.allocator);
-    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{s.path});
+    const cellar = try testing.allocator.print("{s}/Cellar", .{s.path});
     defer testing.allocator.free(cellar);
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
 
@@ -275,7 +275,7 @@ test "bundle import --dry-run refuses a too-new DB like the real import" {
     // A preview that passes where the real run fails misleads `--dry-run && run`.
     var s = try Scratch.init(testing.allocator, "bundle_import_dry");
     defer s.deinit(testing.allocator);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    const path = try testing.allocator.print("{s}/Maltfile.json", .{s.path});
     defer testing.allocator.free(path);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });

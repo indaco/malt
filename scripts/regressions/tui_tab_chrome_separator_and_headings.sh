@@ -49,14 +49,14 @@ const app = @import("src/tui/app.zig");
 const bold = "\x1b[1m";
 
 fn renderHas(comptime want: []const u8, out: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, out, want) != null);
+    try std.testing.expect(std.mem.find(u8, out, want) != null);
 }
 
 // True when a dim separator sits at the cursor-move row_cup: the move, the muted
 // SGR, then a box-drawing rule. Matches the exact chrome signature so a muted
 // hint line (Doctor's "No findings.") at the same row never reads as a rule.
 fn separatorAtRow(out: []const u8, comptime row_cup: []const u8) bool {
-    const at = std.mem.indexOf(u8, out, row_cup) orelse return false;
+    const at = std.mem.find(u8, out, row_cup) orelse return false;
     const after = out[at + row_cup.len ..];
     const muted = color.roleCode(.muted);
     if (!std.mem.startsWith(u8, after, muted)) return false;

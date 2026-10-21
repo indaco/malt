@@ -22,10 +22,10 @@ const Scratch = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "uses_cli", tag);
         defer allocator.free(base);
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
+        const path = try allocator.printSentinel("{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -57,7 +57,7 @@ fn unquiet() void {
 
 fn seedDeps(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -159,7 +159,7 @@ test "execute --json on no-result emits an empty uses array" {
     defer s.deinit(testing.allocator);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
@@ -202,7 +202,7 @@ test "execute --json with seeded deps emits the dependents in the array" {
 
 fn writeGarbageDb(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const db_path = try std.mem.print(&db_path_buf, "{s}/db/malt.db", .{prefix});
     const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
@@ -236,7 +236,7 @@ test "execute reports a db/ directory it cannot look into instead of no dependen
     defer s.deinit(testing.allocator);
     try seedDeps(s.path);
     var db_dir_buf: [512]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{s.path});
+    const db_dir = try std.mem.print(&db_dir_buf, "{s}/db", .{s.path});
     const walled = try test_io.wallDir(std.Options.debug_io, db_dir);
     defer test_io.unwallDir(std.Options.debug_io, walled);
 
@@ -248,7 +248,7 @@ test "execute reports dependency rows it cannot read instead of no dependents" {
     defer s.deinit(testing.allocator);
     try seedDeps(s.path);
     var db_path_buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
     try test_io.corruptTable(db_path, "dependencies");
 
     try expectUsesAborts(&.{ "-r", "openssl" });
@@ -272,7 +272,7 @@ test "execute appends to a stdout file whose offset an earlier writer advanced" 
     defer s.deinit(testing.allocator);
     try seedDeps(s.path);
 
-    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout.txt", .{s.path});
+    const out_path = try testing.allocator.print("{s}/stdout.txt", .{s.path});
     defer testing.allocator.free(out_path);
     const file = try test_io.cwd().createFile(std.Options.debug_io, out_path, .{ .read = true });
     defer file.close(std.Options.debug_io);
@@ -302,5 +302,5 @@ test "execute refuses an unknown flag instead of answering without it" {
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, uses.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--bogus", "zstd" }));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Unknown flag: --bogus") != null);
 }

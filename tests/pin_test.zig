@@ -16,10 +16,10 @@ const c = test_io.c;
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "pin", suffix);
     defer testing.allocator.free(base);
-    const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{base}, 0);
+    const path = try testing.allocator.printSentinel("{s}", .{base}, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    const db_dir = try testing.allocator.print("{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -28,7 +28,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
 
 fn openDb(prefix: [:0]const u8) !sqlite.Database {
     var buf: [512]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = try std.mem.printSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     errdefer db.close();
     try schema.initSchema(&db);
@@ -37,7 +37,7 @@ fn openDb(prefix: [:0]const u8) !sqlite.Database {
 
 fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', {d});",
         .{ name, name, name, @intFromBool(pinned) },
@@ -163,7 +163,7 @@ test "isPinned reflects DB column" {
 
 fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
     var buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintSentinel(
+    const sql = try std.mem.printSentinel(
         &buf,
         "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', {d});",
         .{ token, token, @intFromBool(pinned) },
@@ -318,7 +318,7 @@ test "mt pin --cask on a name shared with a formula pins only the cask" {
     try runCaptured(false, &.{ "--cask", "box" }, &err_buf);
 
     try expectPins(path, false, true);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) == null);
 }
 
 test "mt unpin --casks on a name shared with a formula clears only the cask" {
@@ -347,7 +347,7 @@ test "a bare mt pin on a shared name pins the formula and says so" {
     try runCaptured(false, &.{"box"}, &err_buf);
 
     try expectPins(path, true, false);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) != null);
 }
 
 test "a bare mt unpin on a shared name leaves a pinned cask held and says so" {
@@ -363,7 +363,7 @@ test "a bare mt unpin on a shared name leaves a pinned cask held and says so" {
 
     // The user is told the formula was chosen, so the cask's hold is not a surprise.
     try expectPins(path, false, true);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) != null);
 }
 
 test "mt pin --formula and -q on a shared name pin the formula without the notice" {
@@ -380,7 +380,7 @@ test "mt pin --formula and -q on a shared name pin the formula without the notic
     try runCaptured(true, &.{ "-q", "box" }, &err_buf);
     try expectPins(path, false, false);
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) == null);
 }
 
 test "a bare mt pin on a cask-only name still pins the cask, without a notice" {
@@ -401,7 +401,7 @@ test "a bare mt pin on a cask-only name still pins the cask, without a notice" {
     var db = try openDb(path);
     defer db.close();
     try testing.expect(try readCaskPinned(&db, "box"));
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+    try testing.expect(std.mem.find(u8, err_buf.items, notice) == null);
 }
 
 test "mt pin --formula on a cask-only name is not installed and touches nothing" {
@@ -419,7 +419,7 @@ test "mt pin --formula on a cask-only name is not installed and touches nothing"
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{ "--formula", "box" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed as a formula") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "box is not installed as a formula") != null);
     var db = try openDb(path);
     defer db.close();
     try testing.expect(!try readCaskPinned(&db, "box"));
@@ -440,7 +440,7 @@ test "mt pin --cask on a formula-only name is not installed and touches nothing"
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{ "--cask", "box" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed as a cask") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "box is not installed as a cask") != null);
     var db = try openDb(path);
     defer db.close();
     try testing.expect(!try readPinned(&db, "box"));
@@ -459,8 +459,8 @@ test "mt pin refuses --cask with --formula ahead of the usage check, as brew doe
     // No name at all: the conflict still wins over the usage line.
     try testing.expectError(error.Aborted, runCaptured(true, &.{ "--formula", "--cask" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Options --formula and --cask are mutually exclusive") != null);
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage") == null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "Options --formula and --cask are mutually exclusive") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "Usage") == null);
     try expectPins(path, false, false);
 }
 
@@ -475,7 +475,7 @@ test "mt pin refuses an unknown flag instead of reading it as the name" {
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{ "--bogus", "box" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "Unknown flag: --bogus") != null);
     try expectPins(path, false, false);
 }
 
@@ -489,7 +489,7 @@ test "mt pin with only a kind flag prints the usage line" {
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{"--cask"}, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage: mt pin <name> [--cask | --formula]") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "Usage: mt pin <name> [--cask | --formula]") != null);
 }
 
 test "a bare mt pin still pins the formula when the casks table cannot be read" {
@@ -499,7 +499,7 @@ test "a bare mt pin still pins the formula when the casks table cannot be read" 
     defer _ = c.unsetenv("MALT_PREFIX");
     try seedSharedName(path, false, false);
     var db_path_buf: [512]u8 = undefined;
-    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0), "casks");
+    try test_io.corruptTable(try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{path}, 0), "casks");
 
     var err_buf: std.ArrayList(u8) = .empty;
     defer err_buf.deinit(testing.allocator);
@@ -527,7 +527,7 @@ test "mt pin refuses a second name instead of silently pinning only the first" {
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{ "wget", "curl" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage: mt pin <name>") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "Usage: mt pin <name>") != null);
     var db = try openDb(path);
     defer db.close();
     try testing.expect(!try readPinned(&db, "wget"));

@@ -37,7 +37,7 @@ const TempDb = struct {
         const dir = try test_io.uniqueTempPath(arena.allocator(), "deps_leak_test", tag);
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
+        const path = try std.mem.printSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -73,13 +73,13 @@ const TempCacheDir = struct {
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
         var api_buf: [512]u8 = undefined;
-        const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
+        const api_dir = try std.mem.print(&api_buf, "{s}/api", .{self.path});
         test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
-        const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
+        const full = try std.mem.print(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
         const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, json);

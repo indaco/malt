@@ -33,7 +33,7 @@ const Fixture = struct {
     }
 
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(self.arena.allocator(), "{s}/{s}", .{ self.base, sub }, 0) catch @panic("OOM");
+        return self.arena.allocator().printSentinel("{s}/{s}", .{ self.base, sub }, 0) catch @panic("OOM");
     }
 
     fn deinit(self: *Fixture) void {
@@ -78,8 +78,8 @@ test "a binary-only zip cask links its executable from a persisted Caskroom copy
     // The extract dir is gone after a real install, so the link must point
     // into the Caskroom, not back at the stage. The link content is the
     // resolved path, so compare against the real one.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const want = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Caskroom/rabbit/0.7.8/rabbit"), &real_buf)];
     try testing.expectEqualStrings(want, try linkTarget(io, placed, &buf));
     const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, placed, 64);
@@ -219,8 +219,8 @@ test "placeExtracted honors binary_entries_override on an artifact-less cask" {
     defer testing.allocator.free(placed);
     try testing.expectEqualStrings(fx.p("bin/tool"), placed);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const want = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Caskroom/tool/1.0/tool-arm64"), &real_buf)];
     try testing.expectEqualStrings(want, try linkTarget(io, placed, &buf));
 }
@@ -314,7 +314,7 @@ test "a binary-only cask rolls back to a version that still links its executable
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"rabbit","name":["Rabbit"],"version":"0.7.8","url":"https://example.invalid/rabbit-darwin-arm64.zip","sha256":"{x}",
         \\ "artifacts":[{{"binary":["rabbit"],"target":"$HOMEBREW_PREFIX/bin/rabbit"}}]}}
     , .{digest});
@@ -341,8 +341,8 @@ test "a binary-only cask rolls back to a version that still links its executable
 
     const info = (try cask.lookupInstalledChecked(&db, "rabbit")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("0.7.8", info.version());
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const want = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Caskroom/rabbit/0.7.8/rabbit"), &real_buf)];
     try testing.expectEqualStrings(want, try linkTarget(io, fx.p("bin/rabbit"), &buf));
     const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("bin/rabbit"), 64);
@@ -359,8 +359,8 @@ const editor_json =
 ;
 
 fn expectLinkInto(io: std.Io, link: []const u8, file: []const u8) !void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const want = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, file, &real_buf)];
     try testing.expectEqualStrings(want, try linkTarget(io, link, &buf));
 }
@@ -392,7 +392,7 @@ test "links an APPDIR binary into the placed bundle" {
     // The links are recorded under the Caskroom so uninstall can remove them.
     const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/editor/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
     defer testing.allocator.free(manifest);
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}\n", .{ fx.p("bin/editor"), fx.p("bin/editor-tunnel") });
+    const want = try testing.allocator.print("{s}\n{s}\n", .{ fx.p("bin/editor"), fx.p("bin/editor-tunnel") });
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, manifest);
 }
@@ -446,7 +446,7 @@ test "uninstall removes every placed link" {
         const manifest_path = fx.p("Caskroom/editor/1.0/" ++ cask.LINKS_MANIFEST_NAME);
         const before = try test_io.readFileAbsoluteAlloc(io, testing.allocator, manifest_path, 4096);
         defer testing.allocator.free(before);
-        const after = try std.fmt.allocPrint(testing.allocator, "{s}relative\n", .{before});
+        const after = try testing.allocator.print("{s}relative\n", .{before});
         defer testing.allocator.free(after);
         try putFile(io, manifest_path, after);
     }
@@ -454,7 +454,7 @@ test "uninstall removes every placed link" {
     try installer.uninstall("editor");
 
     // `app_path` still names the bundle; the links went with the manifest.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor"), &buf));
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor-tunnel"), &buf));
     try testing.expect(!exists(io, fx.p("Applications/Editor.app")));
@@ -487,7 +487,7 @@ test "an app cask installs and rolls back with its APPDIR binaries linked" {
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"editor","name":["Editor"],"version":"1.0","url":"https://example.invalid/editor.zip","sha256":"{x}",
         \\ "artifacts":[{{"app":["Editor.app"]}},
         \\  {{"binary":["$APPDIR/Editor.app/Contents/MacOS/editor"],"target":"$HOMEBREW_PREFIX/bin/editor"}},
@@ -515,13 +515,13 @@ test "an app cask installs and rolls back with its APPDIR binaries linked" {
 
     // The outgoing 2.0 linked a helper 1.0 does not ship; the swap must
     // remove it rather than leave it pointing into the older bundle.
-    const stale_manifest = try std.fmt.allocPrint(testing.allocator, "{s}\n", .{fx.p("bin/editor-new")});
+    const stale_manifest = try testing.allocator.print("{s}\n", .{fx.p("bin/editor-new")});
     defer testing.allocator.free(stale_manifest);
     try putFile(io, fx.p("Caskroom/editor/2.0/" ++ cask.LINKS_MANIFEST_NAME), stale_manifest);
     // Real links store the resolved path; the fixture must too.
-    var apps_real: [std.fs.max_path_bytes]u8 = undefined;
+    var apps_real: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const apps = apps_real[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Applications"), &apps_real)];
-    const stale_target = try std.fmt.allocPrint(testing.allocator, "{s}/Editor.app/Contents/MacOS/editor-new", .{apps});
+    const stale_target = try testing.allocator.print("{s}/Editor.app/Contents/MacOS/editor-new", .{apps});
     defer testing.allocator.free(stale_target);
     try std.Io.Dir.symLinkAbsolute(io, stale_target, fx.p("bin/editor-new"), .{});
 
@@ -532,7 +532,7 @@ test "an app cask installs and rolls back with its APPDIR binaries linked" {
     try testing.expectEqualStrings("1.0", info.version());
     try expectLinkInto(io, fx.p("bin/editor"), fx.p("Applications/Editor.app/Contents/MacOS/editor"));
     try expectLinkInto(io, fx.p("bin/editor-tunnel"), fx.p("Applications/Editor.app/Contents/MacOS/editor-tunnel"));
-    var stale: [std.fs.max_path_bytes]u8 = undefined;
+    var stale: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor-new"), &stale));
 }
 
@@ -565,7 +565,7 @@ test "an app cask whose declared binary is missing installs nothing" {
     // dir, no dangling first link, nothing to roll back to.
     try testing.expectError(error.InstallFailed, installer.install(&c));
     try testing.expect(!exists(io, fx.p("Applications/Editor.app")));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor"), &buf));
     try testing.expect(!exists(io, fx.p("Caskroom/editor/1.0/" ++ cask.LINKS_MANIFEST_NAME)));
     try testing.expect((try installer.readBinarySpec("editor", "1.0")) == null);
@@ -596,7 +596,7 @@ test "an app cask with a staged-path binary rolls back with its bundle and its l
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
     // The live shape of a few editors: the bundle plus a helper that sits
     // beside it in the archive rather than inside it.
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"{x}",
         \\ "artifacts":[{{"app":["Pad.app"]}},{{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}}]}}
     , .{digest});
@@ -670,7 +670,7 @@ test "an app cask links a relative binary from the Caskroom copy beside its plac
     try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Pad.app")));
     const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
     defer testing.allocator.free(manifest);
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}\n", .{fx.p("bin/pad")});
+    const want = try testing.allocator.print("{s}\n", .{fx.p("bin/pad")});
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, manifest);
 }
@@ -707,7 +707,7 @@ test "an app cask links APPDIR and relative binaries in one pass" {
     try expectLinkInto(io, fx.p("bin/pad-cli"), fx.p("Caskroom/pad/1.0/pad-cli"));
     const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
     defer testing.allocator.free(manifest);
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}\n", .{ fx.p("bin/pad"), fx.p("bin/pad-cli") });
+    const want = try testing.allocator.print("{s}\n{s}\n", .{ fx.p("bin/pad"), fx.p("bin/pad-cli") });
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, manifest);
 }
@@ -741,7 +741,7 @@ test "an app cask whose relative binary is missing from the stage installs nothi
     // no link, no Caskroom copy left behind.
     try testing.expectError(error.InstallFailed, installer.install(&c));
     try testing.expect(!exists(io, fx.p("Applications/Pad.app")));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/pad"), &buf));
     try testing.expect(!exists(io, fx.p("Caskroom/pad")));
 }
@@ -769,7 +769,7 @@ test "uninstall removes the relative link, the bundle and the Caskroom copy" {
 
     try installer.uninstall("pad");
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/pad"), &buf));
     try testing.expect(!exists(io, fx.p("Applications/Pad.app")));
     try testing.expect(!exists(io, fx.p("Caskroom/pad")));
@@ -871,7 +871,7 @@ test "a binary-only cask with two stanzas records both links so uninstall remove
 
     // `app_path` names one link; the second must go through the manifest.
     try installer.uninstall("tools");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/a"), &buf));
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/b"), &buf));
 }
@@ -895,7 +895,7 @@ test "a binary-only cask missing its second stanza installs nothing" {
     // No row will be written, so the first link and the Caskroom copy must
     // not outlive the failure.
     try testing.expectError(error.InstallFailed, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/a"), &buf));
     try testing.expect(!exists(io, fx.p("Caskroom/tools")));
 }
@@ -974,7 +974,7 @@ test "a bin entry this cask does not own is refused, not replaced" {
     try test_io.cwd().createDirPath(io, fx.p("bin"));
     try std.Io.Dir.symLinkAbsolute(io, fx.p("Cellar/tool/1.0/bin/editor-tunnel"), fx.p("bin/editor-tunnel"), .{});
     try testing.expectError(error.LinkConflict, installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app")));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(fx.p("Cellar/tool/1.0/bin/editor-tunnel"), try linkTarget(io, fx.p("bin/editor-tunnel"), &buf));
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor"), &buf));
 
@@ -1013,7 +1013,7 @@ test "a symlinked links manifest inside the archive cannot redirect the manifest
     const victim = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("victim"), 64);
     defer testing.allocator.free(victim);
     try testing.expectEqualStrings("keep me\n", victim);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.NotLink, std.Io.Dir.readLinkAbsolute(io, fx.p("Caskroom/rabbit/0.7.8/" ++ cask.LINKS_MANIFEST_NAME), &buf));
 }
 
@@ -1042,12 +1042,12 @@ test "uninstall removes only bin links that still resolve into this cask" {
     // manifest (which an archive can plant) names a file outside bin.
     try std.Io.Dir.cwd().deleteFile(io, fx.p("bin/editor-tunnel"));
     try std.Io.Dir.symLinkAbsolute(io, fx.p("Cellar/tool/1.0/bin/editor-tunnel"), fx.p("bin/editor-tunnel"), .{});
-    const manifest = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}\n{s}\n", .{ fx.p("bin/editor"), fx.p("bin/editor-tunnel"), fx.p("secret") });
+    const manifest = try testing.allocator.print("{s}\n{s}\n{s}\n", .{ fx.p("bin/editor"), fx.p("bin/editor-tunnel"), fx.p("secret") });
     defer testing.allocator.free(manifest);
     try putFile(io, fx.p("Caskroom/editor/1.0/" ++ cask.LINKS_MANIFEST_NAME), manifest);
 
     try installer.uninstall("editor");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor"), &buf));
     try testing.expectEqualStrings(fx.p("Cellar/tool/1.0/bin/editor-tunnel"), try linkTarget(io, fx.p("bin/editor-tunnel"), &buf));
     try testing.expect(exists(io, fx.p("secret")));
@@ -1137,7 +1137,7 @@ test "a caller-supplied override stands in when a version predates the sidecar" 
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"rabbit","name":["Rabbit"],"version":"0.7.8","url":"https://example.invalid/r.zip","sha256":"{x}",
         \\ "artifacts":[{{"binary":["rabbit"]}}]}}
     , .{digest});
@@ -1184,7 +1184,7 @@ test "a sibling cask's link is not this cask's to replace" {
     try putFile(io, fx.p("extract/foo"), "mine");
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(error.LinkConflict, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(fx.p("Caskroom/foo-cli/1.0/foo"), try linkTarget(io, fx.p("bin/foo"), &buf));
 }
 
@@ -1215,7 +1215,7 @@ test "a binary-only zip cask with a stray APPDIR stanza leaves no Caskroom copy 
     installer.prefetched_artifact = zip;
     try testing.expectError(error.InstallFailed, installer.install(&c));
     try testing.expect(!exists(io, fx.p("Caskroom/mixed")));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/cli"), &buf));
 }
 
@@ -1242,7 +1242,7 @@ test "a restore keeps the bundle when a declared helper cannot be linked" {
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"editor","name":["Editor"],"version":"1.0","url":"https://example.invalid/e.zip","sha256":"{x}","artifacts":[{{"app":["Editor.app"]}}]}}
     , .{digest});
     defer testing.allocator.free(json);
@@ -1308,7 +1308,7 @@ test "an upgrade repoints the relative link at the new Caskroom copy and drops t
     // The appdir is pinned under the fixture so the swap never reaches the
     // real /Applications.
     const block = try a.allocSentinel(?[*:0]const u8, 1, null);
-    block[0] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}/Applications", .{fx.base}, 0)).ptr;
+    block[0] = (try a.printSentinel("MALT_APPDIR={s}/Applications", .{fx.base}, 0)).ptr;
     const environ: std.process.Environ = .{ .block = .{ .slice = block } };
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
     defer threaded.deinit();
@@ -1320,10 +1320,10 @@ test "an upgrade repoints the relative link at the new Caskroom copy and drops t
     try test_io.cwd().createDirPath(io, fx.p("bin"));
     // An install links the resolved source path, and ownership is judged
     // on resolved paths.
-    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const real_cli = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Caskroom/pad/1.0/pad-cli"), &real_buf)];
     try std.Io.Dir.symLinkAbsolute(io, real_cli, fx.p("bin/pad"), .{});
-    try putFile(io, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), try std.fmt.allocPrint(a, "{s}\n", .{fx.p("bin/pad")}));
+    try putFile(io, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), try a.print("{s}\n", .{fx.p("bin/pad")}));
     {
         try test_io.cwd().createDirPath(io, fx.p("db"));
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -1345,7 +1345,7 @@ test "an upgrade repoints the relative link at the new Caskroom copy and drops t
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    try putFile(io, fx.p("cache/api/cask_pad.json"), try std.fmt.allocPrint(a,
+    try putFile(io, fx.p("cache/api/cask_pad.json"), try a.print(
         \\{{"token":"pad","name":["Pad"],"version":"2.0","url":"https://example.invalid/pad-2.0.zip","sha256":"{x}",
         \\ "artifacts":[{{"app":["Pad.app"]}},{{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}}]}}
     , .{digest}));
@@ -1414,7 +1414,7 @@ test "the Caskroom copy holds only the entries the linked helpers need" {
     try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Pad.app")));
     try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Other.app")));
     try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/.Trashes")));
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("Caskroom/pad/1.0/Applications"), &buf));
 }
 
@@ -1482,7 +1482,7 @@ test "a tarball bundle reached through an archive symlink is left in place, not 
     installer.prefetched_artifact = tgz;
     const app_path = try installer.install(&c);
     defer testing.allocator.free(app_path);
-    try testing.expectEqualStrings("Pad.app", std.fs.path.basename(app_path));
+    try testing.expectEqualStrings("Pad.app", std.Io.Dir.path.basename(app_path));
     // The duplicate under the Caskroom is only reclaimed when the name is a
     // single component; a nested name could resolve through a symlink.
     try testing.expect(exists(io, fx.p("Caskroom/pad/1.0/Real/Pad.app/Contents/MacOS/pad")));
@@ -1539,7 +1539,7 @@ test "a binary-only cask whose archive holds an app rolls back to its links, not
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"tool","name":["Tool"],"version":"1.0","url":"https://example.invalid/tool.zip","sha256":"{x}",
         \\ "artifacts":[{{"binary":["Tool.app/Contents/MacOS/tool"]}}]}}
     , .{digest});
@@ -1588,7 +1588,7 @@ test "a successful rollback reclaims the outgoing version's Caskroom dir" {
     defer testing.allocator.free(zip_bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
-    const json = try std.fmt.allocPrint(testing.allocator,
+    const json = try testing.allocator.print(
         \\{{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"{x}",
         \\ "artifacts":[{{"app":["Pad.app"]}},{{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}}]}}
     , .{digest});

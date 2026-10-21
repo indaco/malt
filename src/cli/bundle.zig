@@ -375,7 +375,7 @@ fn cmdList(ctx: *const AppCtx, rest: []const []const u8) !void {
         const n = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const ts = stmt.columnInt(1);
         // `plain` writes raw, and a name is now a path, which may hold escapes.
-        var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const shown = name_buf[0..@min(n.len, name_buf.len)];
         @memcpy(shown, n[0..shown.len]);
         output.plain("{s}\t{d}", .{ term_sanitize.scrubInPlace(shown), ts });
@@ -548,20 +548,20 @@ fn canonicalPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) err
     // A dangling link (a stow-managed Brewfile whose target is gone) names
     // the bundle its target was registered as.
     // ponytail: one hop; a chain of dangling links stays unresolved.
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = cwd.readLink(io, path, &link_buf) catch return parentResolved(io, allocator, path);
     const target = link_buf[0..n];
-    if (std.fs.path.isAbsolute(target)) return parentResolved(io, allocator, target);
-    const joined = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path) orelse ".", target });
+    if (std.Io.Dir.path.isAbsolute(target)) return parentResolved(io, allocator, target);
+    const joined = try std.Io.Dir.path.join(allocator, &.{ std.Io.Dir.path.dirname(path) orelse ".", target });
     defer allocator.free(joined);
     return parentResolved(io, allocator, joined);
 }
 
 /// A deleted file still names its bundle through its directory.
 fn parentResolved(io: std.Io, allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!?[:0]u8 {
-    const dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", allocator) catch return null;
+    const dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.Io.Dir.path.dirname(path) orelse ".", allocator) catch return null;
     defer allocator.free(dir);
-    return try std.fs.path.joinZ(allocator, &.{ dir, std.fs.path.basename(path) });
+    return try std.Io.Dir.path.joinZ(allocator, &.{ dir, std.Io.Dir.path.basename(path) });
 }
 
 const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool, dry_run: bool };
@@ -758,7 +758,7 @@ fn resolveBundlefile(ctx: *const AppCtx, allocator: std.mem.Allocator, explicit:
     // ~/.config/malt
     if (std.process.Environ.getPosix(ctx.environ, "HOME")) |home| {
         for ([_][]const u8{ "Brewfile", "Maltfile.json" }) |name| {
-            const p = try std.fmt.allocPrint(allocator, "{s}/.config/malt/{s}", .{ home, name });
+            const p = try allocator.print("{s}/.config/malt/{s}", .{ home, name });
             std.Io.Dir.accessAbsolute(ctx.io, p, .{}) catch {
                 allocator.free(p);
                 continue;
@@ -979,7 +979,7 @@ fn qualifiedName(a: std.mem.Allocator, tap_col: ?[*:0]const u8, name_col: [*:0]c
     const name = std.mem.sliceTo(name_col, 0);
     const tap = install_args.thirdPartyTap(if (tap_col) |p| std.mem.sliceTo(p, 0) else "");
     if (tap.len == 0) return a.dupe(u8, name);
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ tap, name });
+    return a.print("{s}/{s}", .{ tap, name });
 }
 
 fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, name: []const u8) !void {
@@ -1031,13 +1031,13 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
 fn openDb(ctx: *const AppCtx, dry_run: bool) !sqlite.Database {
     const prefix = atomic.maltPrefixOrAbort();
     var db_dir_buf: [512]u8 = undefined;
-    const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
+    const db_dir = std.mem.print(&db_dir_buf, "{s}/db", .{prefix}) catch
         return openFailed();
     // makePath is the idempotent "ensure" variant; a real permission/ENOSPC
     // failure surfaces at sqlite.Database.open below with a narrower error.
     if (!dry_run) std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
+    const path = std.mem.printSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return openFailed();
     var db = schema_report.openPreviewableCreating(ctx.io, path, dry_run) catch return openFailed();
     errdefer db.close();
@@ -1076,8 +1076,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -1089,8 +1088,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1143,7 +1141,7 @@ test "remove: a missing or duplicated name is rejected" {
     // Two positionals are ambiguous; silently purging the second would be
     // destructive, so refuse rather than guess.
     try std.testing.expectError(error.Aborted, resolveRemoveArgs(&.{ "work", "home" }, false));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "expected <name>") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "expected <name>") != null);
 }
 
 test "remove: an unknown flag stops the command before it unregisters" {
@@ -1153,7 +1151,7 @@ test "remove: an unknown flag stops the command before it unregisters" {
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
     try std.testing.expectError(error.Aborted, resolveRemoveArgs(&.{ "--prge", "work" }, false));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Unknown flag: --prge") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Unknown flag: --prge") != null);
 }
 
 test "remove: `--` ends the options, so a dash-led name is the bundle" {
@@ -1197,7 +1195,7 @@ test "create: an unknown flag stops the command before it writes a file" {
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
     try std.testing.expectError(error.Aborted, resolveCreateArgs(&.{"--file=elsewhere"}));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Unknown flag: --file=elsewhere") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "Unknown flag: --file=elsewhere") != null);
 }
 
 test "create: --dry-run and -n request a preview, as on the other bundle subcommands" {
@@ -1236,7 +1234,7 @@ test "create: a second path is refused instead of replacing the first" {
         // Per case, so an abort for another reason cannot pass.
         buf.clearRetainingCapacity();
         try std.testing.expectError(error.Aborted, resolveCreateArgs(args));
-        try std.testing.expect(std.mem.indexOf(u8, buf.items, "bundle create: expected at most one [path]") != null);
+        try std.testing.expect(std.mem.find(u8, buf.items, "bundle create: expected at most one [path]") != null);
     }
 }
 
@@ -1277,8 +1275,8 @@ test "renderFailures appends the captured reason to install failure lines" {
     };
     try std.testing.expect(renderFailures(&failures));
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "install failed: foo: offline mode: formula 'foo' not cached") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "cask install failed: bar: no download for this cask") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "install failed: foo: offline mode: formula 'foo' not cached") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "cask install failed: bar: no download for this cask") != null);
 }
 
 test "renderFailures keeps the bare line when no reason was captured" {
@@ -1293,9 +1291,9 @@ test "renderFailures keeps the bare line when no reason was captured" {
     };
     try std.testing.expect(renderFailures(&failures));
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "install failed: foo\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "install failed: foo:") == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "tap failed: user/tap\n") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "install failed: foo\n") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "install failed: foo:") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "tap failed: user/tap\n") != null);
 }
 
 test "renderFailures scrubs escape sequences out of the reason" {
@@ -1308,8 +1306,8 @@ test "renderFailures scrubs escape sequences out of the reason" {
     const failures = [_]runner_mod.MemberError{testFailure(.formula, "foo", "formula '\x1b]0;pwned\x07' not cached")};
     _ = renderFailures(&failures);
 
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "not cached") != null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "not cached") != null);
 }
 
 test "renderFailures: a failed service start alone is not a hard failure" {
@@ -1320,7 +1318,7 @@ test "renderFailures: a failed service start alone is not a hard failure" {
 
     const failures = [_]runner_mod.MemberError{testFailure(.service_start, "svc", "")};
     try std.testing.expect(!renderFailures(&failures));
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "could not auto-start service: svc") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "could not auto-start service: svc") != null);
 }
 
 test "captureSink keeps the actionable error line and prints nothing" {
@@ -1354,5 +1352,5 @@ test "resolveBundlefile says where it looked when no bundle file is found" {
     output.beginStderrCapture(std.testing.allocator, &captured);
     defer output.endStderrCapture();
     try std.testing.expectError(error.Aborted, resolveBundlefile(&ctx, std.testing.allocator, null));
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "No Brewfile or Maltfile.json") != null);
+    try std.testing.expect(std.mem.find(u8, captured.items, "No Brewfile or Maltfile.json") != null);
 }

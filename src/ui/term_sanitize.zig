@@ -459,7 +459,7 @@ test "scrubInPlace drops a truncated multibyte lead and its stray bytes" {
     // kept (it is a valid lead) but the counter unwinds so 'b' still passes.
     var buf = [_]u8{ 0xE2, 'a', 'b' };
     const got = scrubInPlace(&buf);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x1b) == null);
     try std.testing.expectEqualStrings("ab", got[got.len - 2 ..]);
     // An invalid lead (0xFF) has no sequence length and drops outright.
     var bad = [_]u8{ 'a', 0xFF, 'b' };
@@ -469,8 +469,8 @@ test "scrubInPlace drops a truncated multibyte lead and its stray bytes" {
 test "scrubInPlace strips a whole OSC 52 clipboard payload of its controls" {
     var buf = "evil\x1b]52;c;ZXZpbA==\x07tail".*;
     const got = scrubInPlace(&buf);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x07) == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.findScalar(u8, got, 0x07) == null);
     try std.testing.expect(std.mem.startsWith(u8, got, "evil"));
     try std.testing.expect(std.mem.endsWith(u8, got, "tail"));
 }

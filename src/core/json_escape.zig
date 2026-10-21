@@ -39,7 +39,7 @@ pub fn jsonStr(w: *std.Io.Writer, s: []const u8) !void {
             const code: u8 = if (is_c1) s[i + 1] else byte;
             var hex_buf: [6]u8 = undefined;
             // `\u` + 4 hex digits = 6 bytes exactly; bufPrint cannot overflow a 6-byte buffer.
-            const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{code}) catch unreachable;
+            const hex = std.mem.print(&hex_buf, "\\u{x:0>4}", .{code}) catch unreachable;
             try w.writeAll(hex);
             if (is_c1) i += 1;
             start = i + 1;

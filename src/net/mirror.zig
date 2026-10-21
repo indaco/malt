@@ -89,7 +89,7 @@ pub fn resolve(environ: std.process.Environ) Error!Mirrors {
 pub fn hostProbeUrl(base_url: []const u8) []const u8 {
     if (!std.mem.startsWith(u8, base_url, "https://")) return base_url;
     const after = base_url["https://".len..];
-    const slash = std.mem.indexOfScalar(u8, after, '/') orelse return base_url;
+    const slash = std.mem.findScalar(u8, after, '/') orelse return base_url;
     return base_url[0 .. "https://".len + slash];
 }
 

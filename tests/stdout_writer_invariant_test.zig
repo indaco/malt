@@ -33,9 +33,9 @@ test "no CLI command builds a positional writer on ctx.stdout" {
             lineno += 1;
             // Catches `ctx.stdout.writer(` and a local alias such as
             // `stdout.writer(` / `stdout_file.writer(`.
-            if (std.mem.indexOf(u8, line, "stdout.writer(") == null and
-                std.mem.indexOf(u8, line, "stdout_file.writer(") == null) continue;
-            const msg = try std.fmt.allocPrint(alloc, "src/cli/{s}:{d}: {s}\n", .{ entry.path, lineno, line });
+            if (std.mem.find(u8, line, "stdout.writer(") == null and
+                std.mem.find(u8, line, "stdout_file.writer(") == null) continue;
+            const msg = try alloc.print("src/cli/{s}:{d}: {s}\n", .{ entry.path, lineno, line });
             defer alloc.free(msg);
             try violations.appendSlice(alloc, msg);
         }

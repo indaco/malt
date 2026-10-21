@@ -25,24 +25,24 @@ const Fixture = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
         const base = try a.dupeSentinel(u8, try test_io.uniqueTempPath(a, "flight", tag), 0);
-        const home = try std.fmt.allocPrintSentinel(a, "{s}_home", .{base}, 0);
+        const home = try a.printSentinel("{s}_home", .{base}, 0);
         for ([_][]const u8{ base, home }) |dir| {
             test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
-        try test_io.cwd().createDirPath(std.Options.debug_io, try std.fmt.allocPrint(a, "{s}/Library", .{home}));
-        const kv = try std.fmt.allocPrintSentinel(a, "HOME={s}", .{home}, 0);
+        try test_io.cwd().createDirPath(std.Options.debug_io, try a.print("{s}/Library", .{home}));
+        const kv = try a.printSentinel("HOME={s}", .{home}, 0);
         const block = try a.allocSentinel(?[*:0]const u8, 1, null);
         block[0] = kv.ptr;
         return .{ .arena = arena, .base = base, .home = home, .environ = .{ .block = .{ .slice = block } } };
     }
 
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(self.arena.allocator(), "{s}/{s}", .{ self.base, sub }, 0) catch @panic("OOM");
+        return self.arena.allocator().printSentinel("{s}/{s}", .{ self.base, sub }, 0) catch @panic("OOM");
     }
 
     fn h(self: *Fixture, sub: []const u8) []const u8 {
-        return std.fmt.allocPrint(self.arena.allocator(), "{s}/{s}", .{ self.home, sub }) catch @panic("OOM");
+        return self.arena.allocator().print("{s}/{s}", .{ self.home, sub }) catch @panic("OOM");
     }
 
     fn deinit(self: *Fixture) void {
@@ -84,7 +84,7 @@ const Capture = struct {
 
 /// The link itself, not what it points at: `exists` follows it.
 fn linkExists(io: std.Io, path: []const u8) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return if (std.Io.Dir.readLinkAbsolute(io, path, &buf)) |_| true else |_| false;
 }
 
@@ -281,7 +281,7 @@ test "uninstall aborts before removing anything when the stored preflight fails"
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ };
     try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{"evil"}));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstall preflight steps failed for evil") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "uninstall preflight steps failed for evil") != null);
     try testing.expect(exists(io, app_path));
     try testing.expect(!exists(io, fx.h(".ssh/config")));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -327,7 +327,7 @@ test "uninstall --force removes the cask past a stored preflight that cannot pas
     try testing.expect(exists(io, app_path));
 
     try malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{ "stuck", "--force" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--force: removing stuck") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "--force: removing stuck") != null);
     try testing.expect(!exists(io, app_path));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
@@ -338,9 +338,9 @@ test "uninstall --force removes the cask past a stored preflight that cannot pas
 /// installer reuses it without a network round trip.
 fn seedBoxZip(io: std.Io, fx: *Fixture, version: []const u8) ![]const u8 {
     const a = fx.arena.allocator();
-    const src = try std.fmt.allocPrint(a, "src-{s}/Box.app", .{version});
-    try putFile(io, fx.p(try std.fmt.allocPrint(a, "{s}/Contents/MacOS/box", .{src})), version);
-    const zip = fx.p(try std.fmt.allocPrint(a, "cache/Cask/box-{s}.zip", .{version}));
+    const src = try a.print("src-{s}/Box.app", .{version});
+    try putFile(io, fx.p(try a.print("{s}/Contents/MacOS/box", .{src})), version);
+    const zip = fx.p(try a.print("cache/Cask/box-{s}.zip", .{version}));
     try runTar(&.{ "/usr/bin/ditto", "-c", "-k", "--keepParent", fx.p(src), zip });
     const digest = try cask.hashFileSha256(io, zip);
     return try a.dupe(u8, &digest);
@@ -368,7 +368,7 @@ test "an upgrade whose incoming preflight fails puts the old version back" {
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
-        var c1 = try cask.parseCaskWithMajor(testing.allocator, try std.fmt.allocPrint(a,
+        var c1 = try cask.parseCaskWithMajor(testing.allocator, try a.print(
             \\{{"token":"box","name":["Box"],"version":"1.0","url":"https://example.invalid/box-1.0.zip","sha256":"{s}","artifacts":[{{"app":["Box.app"]}}]}}
         , .{sha1}), null);
         defer c1.deinit();
@@ -376,7 +376,7 @@ test "an upgrade whose incoming preflight fails puts the old version back" {
         try cask.recordCaskVersion(&db, "box", "1.0", c1.url, c1.sha256, "zip", fx.p("cache/Cask/box-1.0.zip"));
     }
     // The API answer for the new version: its preflight escapes confinement.
-    try putFile(io, fx.p("cache/api/cask_box.json"), try std.fmt.allocPrint(a,
+    try putFile(io, fx.p("cache/api/cask_box.json"), try a.print(
         \\{{"token":"box","name":["Box"],"version":"2.0","url":"https://example.invalid/box-2.0.zip","sha256":"{s}",
         \\ "artifacts":[{{"preflight_steps":[{{"steps":[{{"type":"write","path":{{"base":"home","path":".ssh/config"}},"content":"x"}}]}}]}},{{"app":["Box.app"]}}]}}
     , .{sha2}));
@@ -391,8 +391,8 @@ test "an upgrade whose incoming preflight fails puts the old version back" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
     try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, arena.allocator(), &.{ "--cask", "box" }));
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "preflight steps failed for box") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "box 1.0 is back in place") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "preflight steps failed for box") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "box 1.0 is back in place") != null);
     const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Box.app/Contents/MacOS/box"), 16);
     defer testing.allocator.free(body);
     try testing.expectEqualStrings("1.0", body);
@@ -434,14 +434,14 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = fx.environ, .offline = true };
     try malt.install.execute(&ctx, arena.allocator(), &.{ "--cask", "--dry-run", "plan" });
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 1 preflight step(s) for plan") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 4 postflight step(s) for plan") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with sudo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with network_access") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would run 1 preflight step(s) for plan") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would run 4 postflight step(s) for plan") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "unsupported step: run with sudo") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "unsupported step: run with network_access") != null);
     // A full-path match is honoured now, so the plan no longer flags it.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "terminate_process") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "terminate_process") == null);
     // The plan lints against the real HOME, as the install will resolve it.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "run command base home") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "run command base home") == null);
     try testing.expect(!exists(threaded.io(), fx.h("Library/plan")));
 }
 
@@ -616,7 +616,7 @@ test "uninstall warns about a corrupt stored row and still removes the cask" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ };
     try malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{"bent"});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "could not read the flight steps stored for bent") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "could not read the flight steps stored for bent") != null);
     try testing.expect(!exists(io, app_path));
 }
 
@@ -639,8 +639,8 @@ test "a flight phase outcome reaches --ndjson consumers as a post_install event"
 
     try testing.expect(!malt.install_post_install.routeFlightOutcome(testing.allocator, &flog, "box", .uninstall_postflight, malt.install_sink.terminal));
     // The phase key is what tells one upgrade's several events apart.
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"event\":\"post_install\",\"name\":\"box\",\"phase\":\"uninstall_postflight\",\"status\":\"fatal\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"detail\":\"/etc/x\"") != null);
+    try testing.expect(std.mem.find(u8, out.items, "\"event\":\"post_install\",\"name\":\"box\",\"phase\":\"uninstall_postflight\",\"status\":\"fatal\"") != null);
+    try testing.expect(std.mem.find(u8, out.items, "\"detail\":\"/etc/x\"") != null);
 }
 
 test "a rollback keeps the stored flight steps across its row swap" {
@@ -727,7 +727,7 @@ test "a preflight step that cannot write aborts the install before the app is pl
     try test_io.cwd().createDirPath(io, fx.p("Applications"));
 
     // A read-only $HOME/Library: the ROM dir the preflight makes cannot land.
-    const lib = try std.fmt.allocPrintSentinel(fx.arena.allocator(), "{s}/Library", .{fx.home}, 0);
+    const lib = try fx.arena.allocator().printSentinel("{s}/Library", .{fx.home}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o555));
     defer _ = std.c.chmod(lib, 0o755);
 
@@ -755,7 +755,7 @@ test "a postflight step that cannot write fails the phase instead of passing its
     var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
     defer c.deinit();
 
-    const lib = try std.fmt.allocPrintSentinel(fx.arena.allocator(), "{s}/Library", .{fx.home}, 0);
+    const lib = try fx.arena.allocator().printSentinel("{s}/Library", .{fx.home}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o555));
     defer _ = std.c.chmod(lib, 0o755);
 
@@ -869,9 +869,9 @@ test "a cask without flight steps stores NULL and installs as before" {
 /// where an upgrade's prefetch looks first, so the whole flow stays offline.
 fn seedZipArtifact(fx: *Fixture, io: std.Io, token: []const u8, version: []const u8, app: []const u8) ![64]u8 {
     const a = fx.arena.allocator();
-    const stage = try std.fmt.allocPrint(a, "{s}/stage-{s}/{s}", .{ fx.base, version, app });
-    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{stage}), version);
-    const zip = try std.fmt.allocPrint(a, "{s}/cache/Cask/{s}-{s}.zip", .{ fx.base, token, version });
+    const stage = try a.print("{s}/stage-{s}/{s}", .{ fx.base, version, app });
+    try putFile(io, try a.print("{s}/Contents/MacOS/bin", .{stage}), version);
+    const zip = try a.print("{s}/cache/Cask/{s}-{s}.zip", .{ fx.base, token, version });
     try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
     var child = try std.process.spawn(io, .{
         .argv = &.{ "/usr/bin/ditto", "-c", "-k", test_io.path.dirname(stage).?, zip },
@@ -897,8 +897,8 @@ test "upgrade runs the outgoing version's uninstall steps and the new version's 
     // real /Applications.
     const appdir = fx.p("Applications");
     const block = try a.allocSentinel(?[*:0]const u8, 2, null);
-    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
-    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    block[0] = (try a.printSentinel("HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try a.printSentinel("MALT_APPDIR={s}", .{appdir}, 0)).ptr;
     const environ: std.process.Environ = .{ .block = .{ .slice = block } };
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
     defer threaded.deinit();
@@ -914,7 +914,7 @@ test "upgrade runs the outgoing version's uninstall steps and the new version's 
     // The installer stages under `<prefix>/tmp`, which `mt` creates at init.
     try test_io.cwd().createDirPath(io, fx.p("tmp"));
     const sha = try seedZipArtifact(&fx, io, "plain", "2.0", "Plain.app");
-    const v2_json = try std.fmt.allocPrint(a,
+    const v2_json = try a.print(
         \\{{"token":"plain","name":["Plain"],"version":"2.0","url":"https://example.invalid/plain-2.0.zip","sha256":"{s}",
         \\ "artifacts":[{{"app":["Plain.app"]}},
         \\  {{"postflight_steps":[{{"steps":[{{"type":"write","path":{{"base":"home","path":"Library/plain.conf"}},"content":"v={{{{version}}}}"}}]}}]}}]}}
@@ -922,8 +922,8 @@ test "upgrade runs the outgoing version's uninstall steps and the new version's 
     try putFile(io, fx.p("cache/api/cask_plain.json"), v2_json);
 
     // The installed version on disk and in the row, steps stored as install does.
-    const old_app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
-    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{old_app}), "1.0");
+    const old_app = try a.print("{s}/Plain.app", .{appdir});
+    try putFile(io, try a.print("{s}/Contents/MacOS/bin", .{old_app}), "1.0");
     {
         try test_io.cwd().createDirPath(io, fx.p("db"));
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -958,7 +958,7 @@ test "upgrade runs the outgoing version's uninstall steps and the new version's 
     const conf = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.conf"), 64);
     defer testing.allocator.free(conf);
     try testing.expectEqualStrings("v=2.0", conf);
-    const placed = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{old_app}), 64);
+    const placed = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try a.print("{s}/Contents/MacOS/bin", .{old_app}), 64);
     defer testing.allocator.free(placed);
     try testing.expectEqualStrings("2.0", placed);
     // v1 asked for its link to go with it.
@@ -973,8 +973,8 @@ test "upgrade refuses a running app before any stored step can act" {
     const a = fx.arena.allocator();
     const appdir = fx.p("Applications");
     const block = try a.allocSentinel(?[*:0]const u8, 2, null);
-    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
-    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    block[0] = (try a.printSentinel("HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try a.printSentinel("MALT_APPDIR={s}", .{appdir}, 0)).ptr;
     const environ: std.process.Environ = .{ .block = .{ .slice = block } };
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
     defer threaded.deinit();
@@ -989,12 +989,12 @@ test "upgrade refuses a running app before any stored step can act" {
     ;
     try test_io.cwd().createDirPath(io, fx.p("tmp"));
     const sha = try seedZipArtifact(&fx, io, "live", "2.0", "Live.app");
-    try putFile(io, fx.p("cache/api/cask_live.json"), try std.fmt.allocPrint(a,
+    try putFile(io, fx.p("cache/api/cask_live.json"), try a.print(
         \\{{"token":"live","name":["Live"],"version":"2.0","url":"https://example.invalid/live-2.0.zip","sha256":"{s}","artifacts":[{{"app":["Live.app"]}}]}}
     , .{sha}));
 
-    const old_app = try std.fmt.allocPrint(a, "{s}/Live.app", .{appdir});
-    const exe = try std.fmt.allocPrint(a, "{s}/Contents/MacOS/live", .{old_app});
+    const old_app = try a.print("{s}/Live.app", .{appdir});
+    const exe = try a.print("{s}/Contents/MacOS/live", .{old_app});
     try putFile(io, exe, "");
     {
         try test_io.cwd().createDirPath(io, fx.p("db"));
@@ -1084,7 +1084,7 @@ test "uninstall --dry-run runs no stored step; the real run drops the declared s
     try testing.expect(!exists(io, app_path));
     try testing.expect(!linkExists(io, fx.p("lib/libbox.6.dylib")));
     // Declared without `uninstall`: upstream leaves it, so does malt.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(io, fx.p("bin/box"), &buf);
 }
 
@@ -1115,7 +1115,7 @@ const Forge = struct {
             const target = req.head.target;
             // One request per connection: an idle kept-alive one would park
             // this single-threaded server and stall the next client's dial.
-            if (std.mem.indexOf(u8, target, "/api/v1/repos/grp/tap/commits") != null) {
+            if (std.mem.find(u8, target, "/api/v1/repos/grp/tap/commits") != null) {
                 req.respond("[{\"sha\":\"" ++ head_sha ++ "\"}]", .{ .keep_alive = false }) catch {};
             } else if (std.mem.endsWith(u8, target, "/Casks/plain.rb")) {
                 req.respond(f.rb, .{ .keep_alive = false }) catch {};
@@ -1151,8 +1151,8 @@ const TapUpgradeRig = struct {
         const a = rig.fx.arena.allocator();
         const appdir = rig.fx.p("Applications");
         const block = try a.allocSentinel(?[*:0]const u8, 2, null);
-        block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{rig.fx.home}, 0)).ptr;
-        block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+        block[0] = (try a.printSentinel("HOME={s}", .{rig.fx.home}, 0)).ptr;
+        block[1] = (try a.printSentinel("MALT_APPDIR={s}", .{appdir}, 0)).ptr;
         rig.environ = .{ .block = .{ .slice = block } };
         rig.threaded = .init(testing.allocator, .{ .environ = rig.environ });
         const io_ = rig.threaded.io();
@@ -1165,7 +1165,7 @@ const TapUpgradeRig = struct {
         // forge never has to serve bytes and the prefetch is a cache hit.
         try test_io.cwd().createDirPath(io_, rig.fx.p("tmp"));
         const sha = try seedZipArtifact(&rig.fx, io_, "plain", "2.0", zip_app);
-        rig.forge = .{ .io = io_, .listener = &rig.listener, .rb = try std.fmt.allocPrint(a, rb_fmt, .{sha}) };
+        rig.forge = .{ .io = io_, .listener = &rig.listener, .rb = try a.print(rb_fmt, .{sha}) };
         rig.thread = try std.Thread.spawn(.{}, Forge.serve, .{&rig.forge});
 
         const v1_json =
@@ -1175,13 +1175,13 @@ const TapUpgradeRig = struct {
             \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libplain.1.dylib"},"uninstall":true}]}]},
             \\  {"uninstall_postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/plain.gone"},"content":"{{version}}"}]}]}]}
         ;
-        const old_app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
-        try putFile(io_, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{old_app}), "1.0");
+        const old_app = try a.print("{s}/Plain.app", .{appdir});
+        try putFile(io_, try a.print("{s}/Contents/MacOS/bin", .{old_app}), "1.0");
         try test_io.cwd().createDirPath(io_, rig.fx.p("db"));
         var db = try sqlite.Database.open(rig.fx.p("db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
-        const host = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{rig.port});
+        const host = try a.print("http://127.0.0.1:{d}", .{rig.port});
         try malt.tap.addWithForge(&db, "grp/tap", "grp", "tap", host, .gitea, head_sha);
         var c1 = try cask.parseCaskWithMajor(testing.allocator, v1_json, null);
         defer c1.deinit();
@@ -1296,7 +1296,7 @@ test "a tap-routed upgrade whose install fails puts the old version back" {
         break :blk malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" });
     };
     try testing.expectError(error.Aborted, outcome);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "plain 1.0 is back in place") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "plain 1.0 is back in place") != null);
 
     const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Plain.app/Contents/MacOS/bin"), 64);
     defer testing.allocator.free(bin);
@@ -1369,8 +1369,8 @@ test "rollback runs the outgoing version's uninstall steps and drops its declare
     const a = fx.arena.allocator();
     const appdir = fx.p("Applications");
     const block = try a.allocSentinel(?[*:0]const u8, 2, null);
-    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
-    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    block[0] = (try a.printSentinel("HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try a.printSentinel("MALT_APPDIR={s}", .{appdir}, 0)).ptr;
     const environ: std.process.Environ = .{ .block = .{ .slice = block } };
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
     defer threaded.deinit();
@@ -1387,8 +1387,8 @@ test "rollback runs the outgoing version's uninstall steps and drops its declare
         \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libplain.dylib"},"uninstall":true}]}]},
         \\  {"uninstall_postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/plain.gone"},"content":"{{version}}"}]}]}]}
     ;
-    const app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
-    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{app}), "2.0");
+    const app = try a.print("{s}/Plain.app", .{appdir});
+    try putFile(io, try a.print("{s}/Contents/MacOS/bin", .{app}), "2.0");
     {
         try test_io.cwd().createDirPath(io, fx.p("db"));
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -1415,7 +1415,7 @@ test "rollback runs the outgoing version's uninstall steps and drops its declare
     const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.gone"), 64);
     defer testing.allocator.free(gone);
     try testing.expectEqualStrings("2.0", gone);
-    const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{app}), 64);
+    const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try a.print("{s}/Contents/MacOS/bin", .{app}), 64);
     defer testing.allocator.free(bin);
     try testing.expectEqualStrings("1.0", bin);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));

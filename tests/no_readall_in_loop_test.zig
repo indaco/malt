@@ -50,7 +50,7 @@ fn findReadAllInLoop(source: []const u8) ?usize {
 
         // A fresh handle inside the loop body flips the pattern from
         // "re-read same file" (bug) to "one read per new file" (safe).
-        if (loop_open_at != null and std.mem.indexOf(u8, line, "openFile") != null) {
+        if (loop_open_at != null and std.mem.find(u8, line, "openFile") != null) {
             open_file_since_loop = true;
             continue;
         }
@@ -69,8 +69,8 @@ fn isLoopHeader(line: []const u8) bool {
     // rules out `while` as a word inside a comment or string literal.
     return std.mem.startsWith(u8, line, "while (") or
         std.mem.startsWith(u8, line, "for (") or
-        std.mem.indexOf(u8, line, " while (") != null or
-        std.mem.indexOf(u8, line, " for (") != null;
+        std.mem.find(u8, line, " while (") != null or
+        std.mem.find(u8, line, " for (") != null;
 }
 
 fn containsBareReadAll(line: []const u8) bool {
@@ -79,7 +79,7 @@ fn containsBareReadAll(line: []const u8) bool {
     // `t` (i.e. the `readAllAt` prefix we *do* allow).
     const needle = "readAll(";
     var idx: usize = 0;
-    while (std.mem.indexOfPos(u8, line, idx, needle)) |pos| {
+    while (std.mem.findPos(u8, line, idx, needle)) |pos| {
         // Reject `readAllAt(` by checking the 3 chars before `(`.
         if (pos >= 2 and std.mem.eql(u8, line[pos + "readAll".len - 2 .. pos + "readAll".len], "ll") and
             (pos + needle.len) <= line.len and line[pos + needle.len - 1] == '(')
@@ -218,8 +218,7 @@ test "no readAll() inside a loop anywhere under src/" {
         _ = try file.readPositionalAll(io, content, 0);
 
         if (findReadAllInLoop(content)) |line| {
-            const msg = try std.fmt.allocPrint(
-                testing.allocator,
+            const msg = try testing.allocator.print(
                 "src/{s}:{d}: readAll() inside a loop — use readAllAt or stream the file",
                 .{ entry.path, line },
             );

@@ -54,13 +54,12 @@ test "every initSchema catch under cli/ names the error" {
 
 fn scanContent(rel_path: []const u8, content: []const u8, failures: *std.ArrayList([]const u8)) !void {
     var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, content, cursor, call)) |start| {
+    while (std.mem.findPos(u8, content, cursor, call)) |start| {
         cursor = start + call.len;
         const handler = catchHandler(content, cursor) orelse continue;
         if (!namesError(handler)) {
             const line = 1 + std.mem.count(u8, content[0..start], "\n");
-            const msg = try std.fmt.allocPrint(
-                testing.allocator,
+            const msg = try testing.allocator.print(
                 "{s}/{s}:{d} swallows initSchema: `{s}`",
                 .{ scanned_root, rel_path, line, handler },
             );
@@ -99,13 +98,13 @@ fn catchHandler(content: []const u8, after_paren: usize) ?[]const u8 {
 }
 
 fn namesError(handler: []const u8) bool {
-    for (naming_tokens) |tok| if (std.mem.indexOf(u8, handler, tok) != null) return true;
+    for (naming_tokens) |tok| if (std.mem.find(u8, handler, tok) != null) return true;
     return false;
 }
 
 test "catchHandler: try-form calls are not handlers" {
     const src = "    try schema.initSchema(&db);\n";
-    try testing.expect(catchHandler(src, std.mem.indexOf(u8, src, call).? + call.len) == null);
+    try testing.expect(catchHandler(src, std.mem.find(u8, src, call).? + call.len) == null);
 }
 
 test "namesError rejects the handler shapes that hid the gate" {
@@ -116,7 +115,7 @@ test "namesError rejects the handler shapes that hid the gate" {
         "    schema.initSchema(&db) catch {\n        sink.err(\"Failed to initialize database schema\", .{});\n        return InstallError.DatabaseError;\n    };\n",
     };
     for (swallowed) |src| {
-        const h = catchHandler(src, std.mem.indexOf(u8, src, call).? + call.len).?;
+        const h = catchHandler(src, std.mem.find(u8, src, call).? + call.len).?;
         try testing.expect(!namesError(h));
     }
 }
@@ -128,7 +127,7 @@ test "namesError accepts handlers that look at the error" {
         "    schema.initSchema(&db) catch |e| {\n        output.err(\"x ({s})\", .{@errorName(e)});\n        return false;\n    };\n",
     };
     for (named) |src| {
-        const h = catchHandler(src, std.mem.indexOf(u8, src, call).? + call.len).?;
+        const h = catchHandler(src, std.mem.find(u8, src, call).? + call.len).?;
         try testing.expect(namesError(h));
     }
 }

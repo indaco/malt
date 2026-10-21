@@ -2,7 +2,7 @@
 //!
 //! `mt migrate` rewrites and Mach-O text patching both walk large bodies of
 //! `.la` / pkgconfig / dylib bytes; the hot path is dominated by the inner
-//! match loop. `std.mem.indexOf` / `std.mem.findPos` go through memchr,
+//! match loop. `std.mem.find` / `std.mem.findPos` go through memchr,
 //! which beats a hand-rolled `mem.eqlBytes` byte scan by an order of
 //! magnitude on small needles.
 
@@ -21,7 +21,7 @@ pub fn replaceAll(
     if (needle.len == 0) return haystack;
 
     // Fast path: no matches at all -> hand back the original slice.
-    const first = std.mem.indexOf(u8, haystack, needle) orelse return haystack;
+    const first = std.mem.find(u8, haystack, needle) orelse return haystack;
 
     // Count remaining matches in a single linear pass so the output
     // allocation is sized exactly.

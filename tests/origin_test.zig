@@ -82,22 +82,22 @@ test "classifyResolved reports homebrew when a shim points into /Cellar/" {
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     // Stand up a `Cellar/malt/0.6.0/bin/malt` real file.
-    const cellar = try std.fmt.allocPrint(std.testing.allocator, "{s}/Cellar/malt/0.6.0/bin", .{dir});
+    const cellar = try std.testing.allocator.print("{s}/Cellar/malt/0.6.0/bin", .{dir});
     defer std.testing.allocator.free(cellar);
     try fs_compat.cwd().createDirPath(std.Options.debug_io, cellar);
-    const real = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{cellar});
+    const real = try std.testing.allocator.print("{s}/malt", .{cellar});
     defer std.testing.allocator.free(real);
     try touch(real);
 
     // Create a `bin/malt` shim pointing at the real file.
-    const bin = try std.fmt.allocPrint(std.testing.allocator, "{s}/bin", .{dir});
+    const bin = try std.testing.allocator.print("{s}/bin", .{dir});
     defer std.testing.allocator.free(bin);
     try fs_compat.cwd().createDirPath(std.Options.debug_io, bin);
-    const shim = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{bin});
+    const shim = try std.testing.allocator.print("{s}/malt", .{bin});
     defer std.testing.allocator.free(shim);
     try fs_compat.symLinkAbsolute(std.Options.debug_io, real, shim, .{});
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqual(origin.Origin.homebrew, origin.classifyResolved(std.Options.debug_io, &buf, shim));
 }
 
@@ -106,17 +106,17 @@ test "classifyResolved reports direct for a non-symlinked direct install" {
     defer std.testing.allocator.free(dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{dir});
+    const path = try std.testing.allocator.print("{s}/malt", .{dir});
     defer std.testing.allocator.free(path);
     try touch(path);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqual(origin.Origin.direct, origin.classifyResolved(std.Options.debug_io, &buf, path));
 }
 
 test "classifyResolved falls back to direct when the path cannot be resolved" {
     // Safer than refusing to update on a transient FS error.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqual(
         origin.Origin.direct,
         origin.classifyResolved(std.Options.debug_io, &buf, "/tmp/malt_origin_test_absent_xyz_99"),

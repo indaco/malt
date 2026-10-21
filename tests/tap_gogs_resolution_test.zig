@@ -97,7 +97,7 @@ test "gogs resolve: a recorded HEAD commits array yields the sha and its raw .rb
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/team/tap/commits?limit=1&stat=false", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/team/tap/commits?limit=1&stat=false", .{port});
 
     var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gogs, url, null);
     defer res.deinit();
@@ -136,7 +136,7 @@ test "gogs resolve: the API request carries Authorization token from MALT_GITEA_
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/team/tap/commits?limit=1&stat=false", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/team/tap/commits?limit=1&stat=false", .{port});
 
     var res = try tap.resolveHeadCommit(io, envWithGiteaToken(), testing.allocator, false, .gogs, url, null);
     defer res.deinit();
@@ -162,7 +162,7 @@ test "gogs pin: a single commit object at the bare commits/<sha> endpoint resolv
     defer server_thread.join();
 
     var url_buf: [96]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/team/tap/commits/{s}", .{ port, fixture_sha });
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/team/tap/commits/{s}", .{ port, fixture_sha });
 
     var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gogs, url, null);
     defer res.deinit();

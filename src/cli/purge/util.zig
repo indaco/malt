@@ -68,10 +68,10 @@ pub const DbOutcome = union(enum) {
 
 pub fn openDbTri(io: std.Io, prefix: []const u8, dry_run: bool) DbOutcome {
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return .{ .unreadable = error.OpenFailed };
     // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead".
-    const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
+    const db_dir = std.Io.Dir.path.dirname(db_path) orelse unreachable;
     if (schema_report.openPreviewable(io, db_path, dry_run)) |db| {
         return .{ .opened = db };
     } else |e| {
@@ -82,7 +82,7 @@ pub fn openDbTri(io: std.Io, prefix: []const u8, dry_run: bool) DbOutcome {
 pub fn confirmScope(yes: bool, expected: []const u8, scope_label: []const u8) Error!void {
     if (yes) return;
     var prompt_buf: [128]u8 = undefined;
-    const prompt = std.fmt.bufPrint(
+    const prompt = std.mem.print(
         &prompt_buf,
         "Type `{s}` to confirm {s} (anything else aborts): ",
         .{ expected, scope_label },
@@ -122,8 +122,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -135,8 +134,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -199,7 +197,7 @@ test "openDbTri opens a freshly created sqlite file" {
     // Pre-create a real sqlite file so the open path succeeds.
     {
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
         var db = try sqlite.Database.open(db_path);
         db.close();
     }

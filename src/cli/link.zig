@@ -100,7 +100,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     };
     const cellar_path = std.mem.sliceTo(cellar_path_raw, 0);
     // malt only records absolute paths, and the linker walks them as such.
-    if (!std.fs.path.isAbsolute(cellar_path)) {
+    if (!std.Io.Dir.path.isAbsolute(cellar_path)) {
         output.err("The install record for {s} is damaged (cellar path '{s}' is not absolute). Run `mt reinstall {s}` to repair it.", .{ target_name, cellar_path, target_name });
         return error.Aborted;
     }
@@ -143,7 +143,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     // opt/ link is a convenience pointer; primary link.link already
     // succeeded. The dir is named by pkg_version (`<version>_<revision>`),
     // so derive the leaf from cellar_path — raw `version` would dangle.
-    linker.linkOpt(target_name, std.fs.path.basename(cellar_path)) catch {};
+    linker.linkOpt(target_name, std.Io.Dir.path.basename(cellar_path)) catch {};
 
     // A full link materialises bin/sbin, so the row's `bin_isolated`
     // must agree with the filesystem; clear it unconditionally. Best-
@@ -369,7 +369,7 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
 
     // Also remove opt/ symlink
     var opt_buf: [prefix_path.path_buf_len]u8 = undefined;
-    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch {
+    const opt_path = std.mem.print(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch {
         output.err("Failed to remove symlinks for {s}", .{name});
         return error.Aborted;
     };

@@ -13,7 +13,7 @@ const fs_compat = test_io;
 fn scratchManifestPath(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "manifest", suffix);
     defer testing.allocator.free(base);
-    return std.fmt.allocPrintSentinel(testing.allocator, "{s}.json", .{base}, 0);
+    return testing.allocator.printSentinel("{s}.json", .{base}, 0);
 }
 
 test "loadFromPath returns an empty manifest when the file does not exist" {

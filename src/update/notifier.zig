@@ -93,9 +93,9 @@ fn fetchLatestTag(io: std.Io, environ: std.process.Environ, offline: bool, alloc
 /// Errors degrade to `false` — a transient FS error must not silence
 /// the notifier for everyone.
 fn originIsHomebrew(io: std.Io) bool {
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.process.executablePath(io, &exe_buf) catch return false;
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var resolved_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return origin_mod.classifyResolved(io, &resolved_buf, exe_buf[0..n]) == .homebrew;
 }
 
@@ -118,7 +118,7 @@ fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8, gat
 /// Best-effort cache write so a successful self-update silences the
 /// nag immediately, not on the next 24h refresh.
 pub fn markUpdatedTo(io: std.Io, environ: std.process.Environ, latest_tag: []const u8, current_version: []const u8) void {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = cachePath(environ, &path_buf) orelse return;
     writeCache(io, path, .{
         .checked_at = std.Io.Clock.real.now(io).toSeconds(),
@@ -151,7 +151,7 @@ fn runNotify(
     allocator: std.mem.Allocator,
     current_version: []const u8,
 ) !?[]const u8 {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = cachePath(environ, &path_buf) orelse return null;
 
     var state: ?State = readCache(io, allocator, path) catch null;

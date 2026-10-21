@@ -70,7 +70,7 @@ test "Pathname.mkpath creates a directory tree under the receiver" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const nested = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c", .{root});
+    const nested = try testing.allocator.print("{s}/a/b/c", .{root});
     defer testing.allocator.free(nested);
 
     _ = try pathname.mkpath(ctx, Value{ .pathname = nested }, &.{});
@@ -85,7 +85,7 @@ test "Pathname.mkpath refuses a directory outside the sandbox" {
     const outside = try uniqueSandbox("mkpath_escape_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/created", .{outside});
+    const escaped = try testing.allocator.print("{s}/created", .{outside});
     defer testing.allocator.free(escaped);
 
     try testing.expectError(
@@ -102,13 +102,13 @@ test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly
     const ctx = mkCtx(root);
 
     // Create a regular file, a directory, and a symlink.
-    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/f.txt", .{root});
+    const file_path = try testing.allocator.print("{s}/f.txt", .{root});
     defer testing.allocator.free(file_path);
-    const dir_path = try std.fmt.allocPrint(testing.allocator, "{s}/d", .{root});
+    const dir_path = try testing.allocator.print("{s}/d", .{root});
     defer testing.allocator.free(dir_path);
-    const link_path = try std.fmt.allocPrint(testing.allocator, "{s}/link", .{root});
+    const link_path = try testing.allocator.print("{s}/link", .{root});
     defer testing.allocator.free(link_path);
-    const missing_path = try std.fmt.allocPrint(testing.allocator, "{s}/missing", .{root});
+    const missing_path = try testing.allocator.print("{s}/missing", .{root});
     defer testing.allocator.free(missing_path);
 
     const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
@@ -141,7 +141,7 @@ test "Pathname.write + Pathname.read round-trip content through the sandbox" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/payload.txt", .{root});
+    const path = try testing.allocator.print("{s}/payload.txt", .{root});
     defer testing.allocator.free(path);
     const args = [_]Value{.{ .string = "hello world" }};
     _ = try pathname.write(ctx, Value{ .pathname = path }, &args);
@@ -168,7 +168,7 @@ test "Pathname.read returns empty string for a missing file" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const missing = try std.fmt.allocPrint(testing.allocator, "{s}/missing", .{root});
+    const missing = try testing.allocator.print("{s}/missing", .{root});
     defer testing.allocator.free(missing);
     const out = try pathname.read(ctx, Value{ .pathname = missing }, &.{});
     try testing.expectEqualStrings("", out.string);
@@ -181,7 +181,7 @@ test "Pathname.read refuses a source outside the sandbox" {
     const outside = try uniqueSandbox("read_escape_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{outside});
+    const victim = try testing.allocator.print("{s}/private", .{outside});
     defer testing.allocator.free(victim);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, victim, .{});
@@ -206,9 +206,9 @@ test "Pathname.read refuses a final symlink outside the sandbox" {
     const outside = try uniqueSandbox("read_symlink_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{outside});
+    const victim = try testing.allocator.print("{s}/private", .{outside});
     defer testing.allocator.free(victim);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/config", .{root});
+    const link = try testing.allocator.print("{s}/config", .{root});
     defer testing.allocator.free(link);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, victim, .{});
@@ -233,9 +233,9 @@ test "Pathname.children returns array of children; empty for missing dir" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const a = try std.fmt.allocPrint(testing.allocator, "{s}/a", .{root});
+    const a = try testing.allocator.print("{s}/a", .{root});
     defer testing.allocator.free(a);
-    const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{root});
+    const b = try testing.allocator.print("{s}/b", .{root});
     defer testing.allocator.free(b);
     (try test_io.createFileAbsolute(std.Options.debug_io, a, .{})).close(std.Options.debug_io);
     (try test_io.createFileAbsolute(std.Options.debug_io, b, .{})).close(std.Options.debug_io);
@@ -282,7 +282,7 @@ test "Pathname.unlink deletes a file in the sandbox" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/goodbye.txt", .{root});
+    const path = try testing.allocator.print("{s}/goodbye.txt", .{root});
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 
@@ -298,13 +298,13 @@ test "Pathname.unlink refuses an intermediate symlink outside the sandbox" {
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
 
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{outside});
+    const victim = try testing.allocator.print("{s}/victim", .{outside});
     defer testing.allocator.free(victim);
     (try test_io.createFileAbsolute(std.Options.debug_io, victim, .{})).close(std.Options.debug_io);
-    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    const doorway = try testing.allocator.print("{s}/door", .{root});
     defer testing.allocator.free(doorway);
     try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
-    const through = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{doorway});
+    const through = try testing.allocator.print("{s}/victim", .{doorway});
     defer testing.allocator.free(through);
 
     try testing.expectError(
@@ -322,18 +322,18 @@ test "Pathname.install_symlink (positional) links <dir>/<basename(source)> -> so
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/source.txt", .{root});
+    const src = try testing.allocator.print("{s}/source.txt", .{root});
     defer testing.allocator.free(src);
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{root});
+    const dir = try testing.allocator.print("{s}/sub", .{root});
     defer testing.allocator.free(dir);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
     const args = [_]Value{.{ .string = src }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
 
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/source.txt", .{dir});
+    const link = try testing.allocator.print("{s}/source.txt", .{dir});
     defer testing.allocator.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 }
 
@@ -345,9 +345,9 @@ test "Pathname.install_symlink (hash) links <dir>/<link_name> -> source" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/cacert.pem", .{root});
+    const src = try testing.allocator.print("{s}/cacert.pem", .{root});
     defer testing.allocator.free(src);
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    const dir = try testing.allocator.print("{s}/etc", .{root});
     defer testing.allocator.free(dir);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
@@ -355,9 +355,9 @@ test "Pathname.install_symlink (hash) links <dir>/<link_name> -> source" {
     const args = [_]Value{.{ .hash = &pairs }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
 
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    const link = try testing.allocator.print("{s}/cert.pem", .{dir});
     defer testing.allocator.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 }
 
@@ -367,11 +367,11 @@ test "Pathname.install_symlink (array) links each source by basename" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const a = try std.fmt.allocPrint(testing.allocator, "{s}/a.conf", .{root});
+    const a = try testing.allocator.print("{s}/a.conf", .{root});
     defer testing.allocator.free(a);
-    const b = try std.fmt.allocPrint(testing.allocator, "{s}/b.conf", .{root});
+    const b = try testing.allocator.print("{s}/b.conf", .{root});
     defer testing.allocator.free(b);
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    const dir = try testing.allocator.print("{s}/etc", .{root});
     defer testing.allocator.free(dir);
     for ([_][]const u8{ a, b }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
@@ -379,9 +379,9 @@ test "Pathname.install_symlink (array) links each source by basename" {
     const args = [_]Value{.{ .array = &items }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     for ([_][]const u8{ "a.conf", "b.conf" }) |name| {
-        const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, name });
+        const link = try testing.allocator.print("{s}/{s}", .{ dir, name });
         defer testing.allocator.free(link);
         _ = try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf);
     }
@@ -394,10 +394,10 @@ test "Pathname.install_symlink refuses scalar, array, and hash targets outside t
     const outside = try uniqueSandbox("install_symlink_escape_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{outside});
+    const target = try testing.allocator.print("{s}/private", .{outside});
     defer testing.allocator.free(target);
     (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{root});
+    const dir = try testing.allocator.print("{s}/bin", .{root});
     defer testing.allocator.free(dir);
     const ctx = mkCtx(root);
 
@@ -424,13 +424,13 @@ test "Pathname.install_symlink refuses a destination symlink outside the sandbox
     const outside = try uniqueSandbox("install_symlink_dest_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    const target = try testing.allocator.print("{s}/target", .{root});
     defer testing.allocator.free(target);
     (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
-    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    const doorway = try testing.allocator.print("{s}/door", .{root});
     defer testing.allocator.free(doorway);
     try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
-    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{outside});
+    const escaped = try testing.allocator.print("{s}/target", .{outside});
     defer testing.allocator.free(escaped);
 
     try testing.expectError(
@@ -446,11 +446,11 @@ test "Pathname.install_symlink replaces an existing link at the target name" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const old_src = try std.fmt.allocPrint(testing.allocator, "{s}/old.pem", .{root});
+    const old_src = try testing.allocator.print("{s}/old.pem", .{root});
     defer testing.allocator.free(old_src);
-    const new_src = try std.fmt.allocPrint(testing.allocator, "{s}/new.pem", .{root});
+    const new_src = try testing.allocator.print("{s}/new.pem", .{root});
     defer testing.allocator.free(new_src);
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    const dir = try testing.allocator.print("{s}/etc", .{root});
     defer testing.allocator.free(dir);
     for ([_][]const u8{ old_src, new_src }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
@@ -459,9 +459,9 @@ test "Pathname.install_symlink replaces an existing link at the target name" {
     const args_new = [_]Value{.{ .hash = &[_]Value.HashPair{.{ .key = .{ .pathname = new_src }, .value = .{ .string = "cert.pem" } }} }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args_new);
 
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    const link = try testing.allocator.print("{s}/cert.pem", .{dir});
     defer testing.allocator.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(new_src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 }
 
@@ -491,15 +491,15 @@ test "Pathname.install_symlink accepts a plain string source (not only pathname)
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/s.txt", .{root});
+    const src = try testing.allocator.print("{s}/s.txt", .{root});
     defer testing.allocator.free(src);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
     const args = [_]Value{.{ .string = src }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = root }, &args);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/s.txt", .{root});
+    const link = try testing.allocator.print("{s}/s.txt", .{root});
     defer testing.allocator.free(link);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 }
 
@@ -508,11 +508,11 @@ test "Pathname.install_symlink hash with multiple pairs links each" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const s1 = try std.fmt.allocPrint(testing.allocator, "{s}/one", .{root});
+    const s1 = try testing.allocator.print("{s}/one", .{root});
     defer testing.allocator.free(s1);
-    const s2 = try std.fmt.allocPrint(testing.allocator, "{s}/two", .{root});
+    const s2 = try testing.allocator.print("{s}/two", .{root});
     defer testing.allocator.free(s2);
-    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    const dir = try testing.allocator.print("{s}/etc", .{root});
     defer testing.allocator.free(dir);
     for ([_][]const u8{ s1, s2 }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
@@ -523,12 +523,12 @@ test "Pathname.install_symlink hash with multiple pairs links each" {
     const args = [_]Value{.{ .hash = &pairs }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     for ([_]struct { name: []const u8, src: []const u8 }{
         .{ .name = "a.pem", .src = s1 },
         .{ .name = "b.pem", .src = s2 },
     }) |entry| {
-        const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, entry.name });
+        const link = try testing.allocator.print("{s}/{s}", .{ dir, entry.name });
         defer testing.allocator.free(link);
         try testing.expectEqualStrings(entry.src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
     }
@@ -539,7 +539,7 @@ test "Pathname.install_symlink skips a hash entry with an empty link name" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/src", .{root});
+    const src = try testing.allocator.print("{s}/src", .{root});
     defer testing.allocator.free(src);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
@@ -556,7 +556,7 @@ test "rm_f removes an array of paths and skips out-of-sandbox entries" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const rm_f = @import("malt").dsl.builtins.bare_builtins.get("rm_f").?;
-    const good = try std.fmt.allocPrint(testing.allocator, "{s}/g.txt", .{root});
+    const good = try testing.allocator.print("{s}/g.txt", .{root});
     defer testing.allocator.free(good);
     (try test_io.createFileAbsolute(std.Options.debug_io, good, .{})).close(std.Options.debug_io);
 
@@ -586,7 +586,7 @@ test "rm_f silently no-ops on a missing target inside the sandbox" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const rm_f = @import("malt").dsl.builtins.bare_builtins.get("rm_f").?;
-    const missing = try std.fmt.allocPrint(testing.allocator, "{s}/etc/cert.pem", .{root});
+    const missing = try testing.allocator.print("{s}/etc/cert.pem", .{root});
     defer testing.allocator.free(missing);
     const v = try rm_f(ctx, null, &.{.{ .string = missing }});
     try testing.expect(v == .nil);
@@ -597,11 +597,11 @@ test "Pathname.glob with receiver returns matching entries" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const lib_dir = try std.fmt.allocPrint(testing.allocator, "{s}/lib", .{root});
+    const lib_dir = try testing.allocator.print("{s}/lib", .{root});
     defer testing.allocator.free(lib_dir);
     try test_io.makeDirAbsolute(std.Options.debug_io, lib_dir);
     for ([_][]const u8{ "libfoo.dylib", "libbar.dylib", "readme.txt" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ lib_dir, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ lib_dir, name });
         defer testing.allocator.free(p);
         (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
     }
@@ -620,11 +620,11 @@ test "Pathname.glob bare form (no receiver) splits dirname/basename of the patte
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const a_path = try std.fmt.allocPrint(testing.allocator, "{s}/a.zig", .{root});
+    const a_path = try testing.allocator.print("{s}/a.zig", .{root});
     defer testing.allocator.free(a_path);
     (try test_io.createFileAbsolute(std.Options.debug_io, a_path, .{})).close(std.Options.debug_io);
 
-    const pattern = try std.fmt.allocPrint(testing.allocator, "{s}/*.zig", .{root});
+    const pattern = try testing.allocator.print("{s}/*.zig", .{root});
     defer testing.allocator.free(pattern);
     const args = [_]Value{.{ .string = pattern }};
     const result = try pathname.glob(ctx, null, &args);
@@ -641,7 +641,7 @@ test "Pathname.glob honours {a,b,c} brace expansion" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     for ([_][]const u8{ "a.c", "a.h", "a.o" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ root, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ root, name });
         defer testing.allocator.free(p);
         (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
     }
@@ -664,13 +664,13 @@ test "FileUtils.mkdir_p + touch + rm round-trip through the sandbox" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const nested = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c", .{root});
+    const nested = try testing.allocator.print("{s}/a/b/c", .{root});
     defer testing.allocator.free(nested);
     _ = try fileutils.mkdirP(ctx, null, &.{.{ .string = nested }});
     var d = try test_io.openDirAbsolute(std.Options.debug_io, nested, .{});
     d.close(std.Options.debug_io);
 
-    const file = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c/hello", .{root});
+    const file = try testing.allocator.print("{s}/a/b/c/hello", .{root});
     defer testing.allocator.free(file);
     _ = try fileutils.touch(ctx, null, &.{.{ .string = file }});
     (try test_io.openFileAbsolute(std.Options.debug_io, file, .{})).close(std.Options.debug_io);
@@ -685,9 +685,9 @@ test "FileUtils.cp copies a single file into the sandbox" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/src.txt", .{root});
+    const src = try testing.allocator.print("{s}/src.txt", .{root});
     defer testing.allocator.free(src);
-    const dst = try std.fmt.allocPrint(testing.allocator, "{s}/dst.txt", .{root});
+    const dst = try testing.allocator.print("{s}/dst.txt", .{root});
     defer testing.allocator.free(dst);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, src, .{});
@@ -714,12 +714,12 @@ test "FileUtils.cp with an array copies each file into the destination directory
     defer arena.deinit();
     const ctx = ExecCtx{ .allocator = arena.allocator(), .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
 
-    const dst_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dst", .{root});
+    const dst_dir = try testing.allocator.print("{s}/dst", .{root});
     defer testing.allocator.free(dst_dir);
 
-    const src_a = try std.fmt.allocPrint(testing.allocator, "{s}/a.txt", .{root});
+    const src_a = try testing.allocator.print("{s}/a.txt", .{root});
     defer testing.allocator.free(src_a);
-    const src_b = try std.fmt.allocPrint(testing.allocator, "{s}/b.txt", .{root});
+    const src_b = try testing.allocator.print("{s}/b.txt", .{root});
     defer testing.allocator.free(src_b);
     for ([_][]const u8{ src_a, src_b }) |p| {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{});
@@ -731,7 +731,7 @@ test "FileUtils.cp with an array copies each file into the destination directory
     _ = try fileutils.cp(ctx, null, &.{ .{ .array = &items }, .{ .string = dst_dir } });
 
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
-        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dst_dir, name });
+        const p = try testing.allocator.print("{s}/{s}", .{ dst_dir, name });
         defer testing.allocator.free(p);
         (try test_io.openFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
     }
@@ -743,11 +743,11 @@ test "FileUtils.rm_r (and rm_rf alias) delete a directory tree" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
-    const tree = try std.fmt.allocPrint(testing.allocator, "{s}/tree/a/b", .{root});
+    const tree = try testing.allocator.print("{s}/tree/a/b", .{root});
     defer testing.allocator.free(tree);
     try test_io.cwd().createDirPath(std.Options.debug_io, tree);
 
-    const root_tree = try std.fmt.allocPrint(testing.allocator, "{s}/tree", .{root});
+    const root_tree = try testing.allocator.print("{s}/tree", .{root});
     defer testing.allocator.free(root_tree);
     _ = try fileutils.rmR(ctx, null, &.{.{ .string = root_tree }});
     try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, root_tree, .{}));
@@ -762,7 +762,7 @@ test "FileUtils.rm with an array silently skips out-of-sandbox paths but removes
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const good = try std.fmt.allocPrint(testing.allocator, "{s}/good.txt", .{root});
+    const good = try testing.allocator.print("{s}/good.txt", .{root});
     defer testing.allocator.free(good);
     (try test_io.createFileAbsolute(std.Options.debug_io, good, .{})).close(std.Options.debug_io);
 
@@ -776,9 +776,9 @@ test "FileUtils.chmod with an array of paths chmods each one" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const a = try std.fmt.allocPrint(testing.allocator, "{s}/a", .{root});
+    const a = try testing.allocator.print("{s}/a", .{root});
     defer testing.allocator.free(a);
-    const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{root});
+    const b = try testing.allocator.print("{s}/b", .{root});
     defer testing.allocator.free(b);
     for ([_][]const u8{ a, b }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
@@ -793,11 +793,11 @@ test "FileUtils.ln_sf with an array symlinks each target into the dest dir" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const ctx = ExecCtx{ .allocator = arena.allocator(), .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
-    const t1 = try std.fmt.allocPrint(testing.allocator, "{s}/t1", .{root});
+    const t1 = try testing.allocator.print("{s}/t1", .{root});
     defer testing.allocator.free(t1);
-    const t2 = try std.fmt.allocPrint(testing.allocator, "{s}/t2", .{root});
+    const t2 = try testing.allocator.print("{s}/t2", .{root});
     defer testing.allocator.free(t2);
-    const dst = try std.fmt.allocPrint(testing.allocator, "{s}/links", .{root});
+    const dst = try testing.allocator.print("{s}/links", .{root});
     defer testing.allocator.free(dst);
     for ([_][]const u8{ t1, t2 }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
@@ -805,9 +805,9 @@ test "FileUtils.ln_sf with an array symlinks each target into the dest dir" {
     _ = try fileutils.lnSf(ctx, null, &.{ .{ .array = &items }, .{ .string = dst } });
 
     for ([_][]const u8{ "t1", "t2" }) |name| {
-        const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dst, name });
+        const link = try testing.allocator.print("{s}/{s}", .{ dst, name });
         defer testing.allocator.free(link);
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         _ = try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf);
     }
 }
@@ -817,9 +817,9 @@ test "FileUtils.mv renames within the sandbox" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const src = try std.fmt.allocPrint(testing.allocator, "{s}/x.txt", .{root});
+    const src = try testing.allocator.print("{s}/x.txt", .{root});
     defer testing.allocator.free(src);
-    const dst = try std.fmt.allocPrint(testing.allocator, "{s}/y.txt", .{root});
+    const dst = try testing.allocator.print("{s}/y.txt", .{root});
     defer testing.allocator.free(dst);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
     _ = try fileutils.mv(ctx, null, &.{ .{ .string = src }, .{ .string = dst } });
@@ -832,14 +832,14 @@ test "FileUtils.ln_s/ln_sf create (and force-replace) symlinks" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    const target = try testing.allocator.print("{s}/target", .{root});
     defer testing.allocator.free(target);
-    const link = try std.fmt.allocPrint(testing.allocator, "{s}/sub/link", .{root});
+    const link = try testing.allocator.print("{s}/sub/link", .{root});
     defer testing.allocator.free(link);
     (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
 
     _ = try fileutils.lnS(ctx, null, &.{ .{ .string = target }, .{ .string = link } });
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(target, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 
     // ln_sf should overwrite the existing symlink silently.
@@ -855,15 +855,15 @@ test "FileUtils.ln_sf scalar refuses an intermediate symlink outside the sandbox
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    const target = try testing.allocator.print("{s}/target", .{root});
     defer testing.allocator.free(target);
     (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
-    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    const doorway = try testing.allocator.print("{s}/door", .{root});
     defer testing.allocator.free(doorway);
     try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
-    const through = try std.fmt.allocPrint(testing.allocator, "{s}/escaped", .{doorway});
+    const through = try testing.allocator.print("{s}/escaped", .{doorway});
     defer testing.allocator.free(through);
-    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/escaped", .{outside});
+    const escaped = try testing.allocator.print("{s}/escaped", .{outside});
     defer testing.allocator.free(escaped);
 
     try testing.expectError(
@@ -881,14 +881,14 @@ test "FileUtils.ln_sf array refuses a destination symlink outside the sandbox" {
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
 
-    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    const target = try testing.allocator.print("{s}/target", .{root});
     defer testing.allocator.free(target);
     (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
-    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    const doorway = try testing.allocator.print("{s}/door", .{root});
     defer testing.allocator.free(doorway);
     try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
     const items = [_]Value{Value{ .string = target }};
-    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{outside});
+    const escaped = try testing.allocator.print("{s}/target", .{outside});
     defer testing.allocator.free(escaped);
 
     try testing.expectError(
@@ -916,13 +916,13 @@ test "FileUtils.rm scalar refuses an intermediate symlink outside the sandbox" {
     const outside = try uniqueSandbox("rm_scalar_escape_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{outside});
+    const victim = try testing.allocator.print("{s}/victim", .{outside});
     defer testing.allocator.free(victim);
     (try test_io.createFileAbsolute(std.Options.debug_io, victim, .{})).close(std.Options.debug_io);
-    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    const doorway = try testing.allocator.print("{s}/door", .{root});
     defer testing.allocator.free(doorway);
     try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
-    const through = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{doorway});
+    const through = try testing.allocator.print("{s}/victim", .{doorway});
     defer testing.allocator.free(through);
 
     try testing.expectError(
@@ -939,13 +939,13 @@ test "FileUtils.rm array skips an intermediate symlink outside the sandbox" {
     const outside = try uniqueSandbox("rm_array_escape_outside");
     defer testing.allocator.free(outside);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{outside});
+    const victim = try testing.allocator.print("{s}/victim", .{outside});
     defer testing.allocator.free(victim);
     (try test_io.createFileAbsolute(std.Options.debug_io, victim, .{})).close(std.Options.debug_io);
-    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    const doorway = try testing.allocator.print("{s}/door", .{root});
     defer testing.allocator.free(doorway);
     try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
-    const through = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{doorway});
+    const through = try testing.allocator.print("{s}/victim", .{doorway});
     defer testing.allocator.free(through);
     const items = [_]Value{Value{ .string = through }};
 
@@ -958,7 +958,7 @@ test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    const path = try testing.allocator.print("{s}/f", .{root});
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
     const v = try fileutils.chmod(ctx, null, &.{ .{ .string = "0755" }, .{ .string = path } });
@@ -973,7 +973,7 @@ test "FileUtils.chmod masks an out-of-i32-range mode instead of aborting" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    const path = try testing.allocator.print("{s}/f", .{root});
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
     const v = try fileutils.chmod(ctx, null, &.{ .{ .int = 9999999999 }, .{ .string = path } });
@@ -985,7 +985,7 @@ test "FileUtils.chmod masks a negative mode instead of aborting" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    const path = try testing.allocator.print("{s}/f", .{root});
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
     const v = try fileutils.chmod(ctx, null, &.{ .{ .int = -1 }, .{ .string = path } });
@@ -997,7 +997,7 @@ test "FileUtils.chmod masks high non-permission bits down to 0o7777" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    const path = try testing.allocator.print("{s}/f", .{root});
     defer testing.allocator.free(path);
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
     // 70000 fits i32 but exceeds mode_t; 70000 & 0o7777 == 0o560.
@@ -1095,7 +1095,7 @@ const FenceScratch = struct {
     fn init(tag: []const u8) !FenceScratch {
         const io = std.Options.debug_io;
         const home = test_io.getenv("HOME") orelse return error.SkipZigTest;
-        const raw = try std.fmt.allocPrint(testing.allocator, "{s}/.cache/malt_fence_{s}_{d}_{d}", .{
+        const raw = try testing.allocator.print("{s}/.cache/malt_fence_{s}_{d}_{d}", .{
             home, tag, std.c.getpid(), fence_seq.fetchAdd(1, .monotonic),
         });
         defer testing.allocator.free(raw);
@@ -1121,7 +1121,7 @@ const FenceScratch = struct {
 };
 
 test "system: a write outside the keg/prefix is blocked by the fence, not the argv lint" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     var scratch = try FenceScratch.init("fence_outside");
@@ -1131,10 +1131,10 @@ test "system: a write outside the keg/prefix is blocked by the fence, not the ar
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const prefix = try std.fmt.allocPrint(a, "{s}/opt/malt", .{base});
-    const cellar = try std.fmt.allocPrint(a, "{s}/Cellar/foo/1.0", .{prefix});
+    const prefix = try a.print("{s}/opt/malt", .{base});
+    const cellar = try a.print("{s}/Cellar/foo/1.0", .{prefix});
     // Sibling of the prefix: outside both the keg and every blessed subtree.
-    const outside = try std.fmt.allocPrint(a, "{s}/pwned", .{base});
+    const outside = try a.print("{s}/pwned", .{base});
 
     var lio = LiveIo.init();
     defer lio.deinit();
@@ -1174,7 +1174,7 @@ test "system: a write outside the keg/prefix is blocked by the fence, not the ar
 }
 
 test "system: a write into the keg still succeeds under the fence (no over-confinement)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
     var scratch = try FenceScratch.init("fence_inside");
@@ -1184,10 +1184,10 @@ test "system: a write into the keg still succeeds under the fence (no over-confi
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const prefix = try std.fmt.allocPrint(a, "{s}/opt/malt", .{base});
-    const cellar = try std.fmt.allocPrint(a, "{s}/Cellar/foo/1.0", .{prefix});
+    const prefix = try a.print("{s}/opt/malt", .{base});
+    const cellar = try a.print("{s}/Cellar/foo/1.0", .{prefix});
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cellar);
-    const inside = try std.fmt.allocPrint(a, "{s}/marker", .{cellar});
+    const inside = try a.print("{s}/marker", .{cellar});
 
     var lio = LiveIo.init();
     defer lio.deinit();
@@ -1330,7 +1330,7 @@ test "safePopenRead captures stdout and chomps trailing newline" {
 
 test "safePopenRead does not pass parent credentials to the child" {
     try test_io.skipIfNoSubprocess();
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
@@ -1344,7 +1344,7 @@ test "safePopenRead does not pass parent credentials to the child" {
         null,
         &.{.{ .string = "/usr/bin/env" }},
     );
-    try testing.expect(std.mem.indexOf(u8, got.string, "private-child-token") == null);
+    try testing.expect(std.mem.find(u8, got.string, "private-child-token") == null);
 }
 
 // ---------------------------------------------------------------------------

@@ -128,7 +128,7 @@ test "compute at max u16 dimensions stays in bounds and tiles exactly" {
 test "the too-small fallback names the required minimum" {
     var buf: [4096]u8 = undefined;
     const out = layout.render(&buf, .{ .rows = &.{} }, 200, 100 - 99); // 200x1, below min_rows
-    try testing.expect(std.mem.indexOf(u8, out, "too small") != null);
+    try testing.expect(std.mem.find(u8, out, "too small") != null);
 }
 
 test "render is deterministic: same inputs, byte-identical output" {

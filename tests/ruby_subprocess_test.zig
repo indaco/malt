@@ -27,11 +27,11 @@ test "generateWrapper emits a Ruby script containing the post_install body and p
         "  mkdir_p \"etc/mypkg\"\n",
     );
     defer testing.allocator.free(script);
-    try testing.expect(std.mem.indexOf(u8, script, "require 'pathname'") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "mkdir_p \"etc/mypkg\"") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "/opt/malt") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "mypkg") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "2.3") != null);
+    try testing.expect(std.mem.find(u8, script, "require 'pathname'") != null);
+    try testing.expect(std.mem.find(u8, script, "mkdir_p \"etc/mypkg\"") != null);
+    try testing.expect(std.mem.find(u8, script, "/opt/malt") != null);
+    try testing.expect(std.mem.find(u8, script, "mypkg") != null);
+    try testing.expect(std.mem.find(u8, script, "2.3") != null);
 }
 
 // Bodies that reach for Homebrew helpers we don't ship in FormulaStub
@@ -48,10 +48,10 @@ test "generateWrapper wraps the body in a soft-fail rescue" {
         "  raise NoMethodError\n",
     );
     defer testing.allocator.free(script);
-    try testing.expect(std.mem.indexOf(u8, script, "begin\n") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "rescue NoMethodError, NameError, NotImplementedError") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "post_install: partial -") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "exit 0") != null);
+    try testing.expect(std.mem.find(u8, script, "begin\n") != null);
+    try testing.expect(std.mem.find(u8, script, "rescue NoMethodError, NameError, NotImplementedError") != null);
+    try testing.expect(std.mem.find(u8, script, "post_install: partial -") != null);
+    try testing.expect(std.mem.find(u8, script, "exit 0") != null);
 }
 
 // Injection regression — every disallowed byte in any of prefix /
@@ -131,7 +131,7 @@ test "generateWrapper accepts the @-versioned name format (llvm@21)" {
         "ohai 'ok'\n",
     );
     defer testing.allocator.free(script);
-    try testing.expect(std.mem.indexOf(u8, script, "llvm@21") != null);
+    try testing.expect(std.mem.find(u8, script, "llvm@21") != null);
 }
 
 test "generateWrapper rejects empty name" {

@@ -116,16 +116,16 @@ test "render dims the label and shows the value on its row" {
     };
     render(&f, &fields, .{ .row = 3, .col = 1, .width = 40, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Tap") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "homebrew/core") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Pinned") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "yes") != null);
+    try testing.expect(std.mem.find(u8, out, "Tap") != null);
+    try testing.expect(std.mem.find(u8, out, "homebrew/core") != null);
+    try testing.expect(std.mem.find(u8, out, "Pinned") != null);
+    try testing.expect(std.mem.find(u8, out, "yes") != null);
     // The label is dimmed (muted role == dim on the basic tier under test).
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "─") != null); // the separator rule
+    try testing.expect(std.mem.find(u8, out, color.Style.dim.code()) != null);
+    try testing.expect(std.mem.find(u8, out, "─") != null); // the separator rule
     // The rule is on the pane's first row; the fields follow below it.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H") != null); // first field row
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H") != null); // second field row
+    try testing.expect(std.mem.find(u8, out, "\x1b[4;1H") != null); // first field row
+    try testing.expect(std.mem.find(u8, out, "\x1b[5;1H") != null); // second field row
 }
 
 test "render wraps a long value across rows instead of cutting it off" {
@@ -134,8 +134,8 @@ test "render wraps a long value across rows instead of cutting it off" {
     const fields = [_]Field{.{ .label = "Detail", .value = "the prefix bin dir is not on PATH so installed commands will not be found" }};
     render(&f, &fields, .{ .row = 1, .col = 1, .width = 24, .height = 10 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "found") != null); // the tail survives on a wrapped row
-    try testing.expect(std.mem.indexOf(u8, out, ";9H") != null); // a continuation row aligned under the value
+    try testing.expect(std.mem.find(u8, out, "found") != null); // the tail survives on a wrapped row
+    try testing.expect(std.mem.find(u8, out, ";9H") != null); // a continuation row aligned under the value
 }
 
 test "neededRows grows with a wrapped value and counts at least one row per field" {
@@ -164,9 +164,9 @@ test "render clips fields past the pane height" {
     };
     render(&f, &fields, .{ .row = 1, .col = 1, .width = 40, .height = 3 }); // separator + 2 field rows
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "alpha") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "beta") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "gamma") == null); // third field clipped past the height
+    try testing.expect(std.mem.find(u8, out, "alpha") != null);
+    try testing.expect(std.mem.find(u8, out, "beta") != null);
+    try testing.expect(std.mem.find(u8, out, "gamma") == null); // third field clipped past the height
 }
 
 test "render hard-breaks a single word longer than the line so its tail survives" {
@@ -177,8 +177,8 @@ test "render hard-breaks a single word longer than the line so its tail survives
     const fields = [_]Field{.{ .label = "Detail", .value = "/tmp/malt-test/bin/a/very/long/path/with/no/spaces/anywhere/at/all" }};
     render(&f, &fields, .{ .row = 1, .col = 1, .width = 20, .height = 8 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "all") != null); // the tail is reached
-    try testing.expect(std.mem.indexOf(u8, out, ";9H") != null); // wrapped onto an aligned continuation row
+    try testing.expect(std.mem.find(u8, out, "all") != null); // the tail is reached
+    try testing.expect(std.mem.find(u8, out, ";9H") != null); // wrapped onto an aligned continuation row
 }
 
 test "render and neededRows survive a pane narrower than the label" {
@@ -195,6 +195,6 @@ test "render of an embedded newline value cannot inject a frame line" {
     const fields = [_]Field{.{ .label = "X", .value = "a\nb" }};
     render(&f, &fields, .{ .row = 1, .col = 1, .width = 40, .height = 4 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null); // no raw newline in the frame
-    try testing.expect(std.mem.indexOf(u8, out, "ab") != null); // the newline collapsed to inert text
+    try testing.expect(std.mem.findScalar(u8, out, '\n') == null); // no raw newline in the frame
+    try testing.expect(std.mem.find(u8, out, "ab") != null); // the newline collapsed to inert text
 }

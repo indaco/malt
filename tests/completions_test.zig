@@ -48,7 +48,7 @@ const all_commands = [_][]const u8{
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    if (std.mem.indexOf(u8, haystack, needle) == null) {
+    if (std.mem.find(u8, haystack, needle) == null) {
         std.debug.print("expected script to contain '{s}'\n", .{needle});
         return error.MissingSubstring;
     }
@@ -277,7 +277,7 @@ test "all install, migrate, and upgrade completions expose --use-system-ruby" {
     inline for (.{ completions.bash_script, completions.zsh_script, completions.fish_script }) |script| {
         var count: usize = 0;
         var pos: usize = 0;
-        while (std.mem.indexOfPos(u8, script, pos, "use-system-ruby")) |i| {
+        while (std.mem.findPos(u8, script, pos, "use-system-ruby")) |i| {
             count += 1;
             pos = i + 1;
         }
@@ -291,9 +291,9 @@ test "all install, migrate, and upgrade completions expose --use-system-ruby" {
 /// whole script is satisfied by `backup --services` and proves nothing about
 /// `bundle`.
 fn sectionAfter(script: []const u8, start: []const u8, end: []const u8) ![]const u8 {
-    const s = std.mem.indexOf(u8, script, start) orelse return error.MissingSectionStart;
+    const s = std.mem.find(u8, script, start) orelse return error.MissingSectionStart;
     const rest = script[s + start.len ..];
-    const e = std.mem.indexOf(u8, rest, end) orelse return error.MissingSectionEnd;
+    const e = std.mem.find(u8, rest, end) orelse return error.MissingSectionEnd;
     return rest[0..e];
 }
 
@@ -312,9 +312,9 @@ test "bundle completions advertise only flags bundle.zig parses" {
     // --from-installed was advertised for a mode that does not exist: `bundle
     // create` always populates from installed, so the flag could never change
     // anything. Its absence is the assertion.
-    try testing.expect(std.mem.indexOf(u8, completions.bash_script, "from-installed") == null);
-    try testing.expect(std.mem.indexOf(u8, completions.zsh_script, "from-installed") == null);
-    try testing.expect(std.mem.indexOf(u8, completions.fish_script, "from-installed") == null);
+    try testing.expect(std.mem.find(u8, completions.bash_script, "from-installed") == null);
+    try testing.expect(std.mem.find(u8, completions.zsh_script, "from-installed") == null);
+    try testing.expect(std.mem.find(u8, completions.fish_script, "from-installed") == null);
 }
 
 test "all bundle completions expose --services for create and export" {
@@ -383,7 +383,7 @@ test "fish ls alias completes the same flags as list" {
     // the short form must not silently lose --tap/--size/--linked.
     for ([_][]const u8{ "versions", "formula", "cask", "pinned", "tap", "json", "size", "linked" }) |flag| {
         var buf: [64]u8 = undefined;
-        const needle = try std.fmt.bufPrint(&buf, "__malt_using_command ls'   -l {s}", .{flag});
+        const needle = try std.mem.print(&buf, "__malt_using_command ls'   -l {s}", .{flag});
         try expectContains(completions.fish_script, needle);
     }
 }
@@ -407,15 +407,15 @@ test "no shell advertises the removed phantom flags" {
     // uninstall --zap, services --system and upgrade --all were offered by the
     // shells but read by no parser. Their absence is the assertion.
     inline for (.{ completions.bash_script, completions.zsh_script, completions.fish_script }) |script| {
-        try testing.expect(std.mem.indexOf(u8, script, "zap") == null);
-        try testing.expect(std.mem.indexOf(u8, script, "--system") == null);
-        try testing.expect(std.mem.indexOf(u8, script, "-l system") == null);
+        try testing.expect(std.mem.find(u8, script, "zap") == null);
+        try testing.expect(std.mem.find(u8, script, "--system") == null);
+        try testing.expect(std.mem.find(u8, script, "-l system") == null);
     }
     // `--all` is scoped: search, tap and link keep their real ones.
     // Whole-token match: `--allow-unpinned` is a real, different flag.
     try testing.expect(!hasFlagToken(try bashFlagsFor("upgrade)"), "--all"));
     try expectNotContains(try zshCaseFor("                upgrade)"), "'--all[");
-    try testing.expect(std.mem.indexOf(u8, completions.fish_script, "__malt_using_command upgrade' -l all ") == null);
+    try testing.expect(std.mem.find(u8, completions.fish_script, "__malt_using_command upgrade' -l all ") == null);
     try expectContains(try bashFlagsFor("search)"), "--all");
 }
 
@@ -426,7 +426,7 @@ fn hasFlagToken(haystack: []const u8, flag: []const u8) bool {
 }
 
 fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
-    if (std.mem.indexOf(u8, haystack, needle) != null) {
+    if (std.mem.find(u8, haystack, needle) != null) {
         std.debug.print("expected section to NOT contain '{s}'\n", .{needle});
         return error.UnexpectedSubstring;
     }
@@ -447,8 +447,8 @@ test "all uninstall completions expose brew's kind flags on both verbs" {
 fn fishHasLong(verb: []const u8, long: []const u8) bool {
     var lines = std.mem.splitScalar(u8, completions.fish_script, '\n');
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "__malt_using_command ") == null) continue;
-        const after = line[std.mem.indexOf(u8, line, "__malt_using_command ").? + "__malt_using_command ".len ..];
+        if (std.mem.find(u8, line, "__malt_using_command ") == null) continue;
+        const after = line[std.mem.find(u8, line, "__malt_using_command ").? + "__malt_using_command ".len ..];
         if (!std.mem.startsWith(u8, after, verb) or after.len <= verb.len or after[verb.len] != '\'') continue;
         var it = std.mem.tokenizeScalar(u8, after, ' ');
         while (it.next()) |tok| if (std.mem.eql(u8, tok, "-l")) {
@@ -474,7 +474,7 @@ test "pin, unpin and rollback completions expose brew's kind flags in every shel
 
 test "--version is offered only before a subcommand, where main accepts it" {
     // After a subcommand the parsers refuse it as an unknown flag.
-    try testing.expect(std.mem.indexOf(u8, completions.bash_script, "--help -h --version\"") == null);
+    try testing.expect(std.mem.find(u8, completions.bash_script, "--help -h --version\"") == null);
     try expectContains(completions.bash_script, "\"$global_flags --version\"");
     try expectContains(completions.fish_script, "-n __malt_needs_command -l version");
 }
