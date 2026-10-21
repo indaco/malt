@@ -11,7 +11,8 @@
 #      and feeds it back to recordKeg + Linker.link).
 #   3. install the dep directly; assert promotion to install_reason=
 #      'direct', bin_isolated cleared, bin link materialised.
-#   4. uninstall everything; assert links table is empty for both.
+#   4. uninstall both; assert no link row still points into either keg.
+#      Other deps of the parent stay installed, so their rows remain.
 #
 # Pick: `cmark` is a tiny formula whose runtime deps live entirely
 # in `cmake` (build-only) — too narrow. Use `coreutils` which depends
@@ -102,14 +103,14 @@ dep_isolated=$(sqlite3 "$DB" "SELECT bin_isolated FROM kegs WHERE name='$DEP';" 
 [[ "$dep_isolated" == "0" ]] || fail "$DEP bin_isolated=$dep_isolated after promotion (expected 0)"
 pass "$DEP bin_isolated cleared on promotion"
 
-# ── Step 4: uninstall everything; assert links clean ───────────────
+# ── Step 4: uninstall both; assert their links are gone ───────────
 printf '▸ malt uninstall %s %s\n' "$PARENT" "$DEP"
 "$BIN" uninstall --quiet --force "$PARENT" || fail "uninstall $PARENT failed"
 "$BIN" uninstall --quiet --force "$DEP" || fail "uninstall $DEP failed"
 
-orphan_links=$(sqlite3 "$DB" "SELECT COUNT(*) FROM links;" 2>/dev/null || echo "0")
-[[ "$orphan_links" == "0" ]] || fail "links table not empty after uninstall ($orphan_links rows)"
-pass "links table is empty post-uninstall"
+orphan_links=$(sqlite3 "$DB" "SELECT COUNT(*) FROM links WHERE keg_id NOT IN (SELECT id FROM kegs) OR target LIKE '%/Cellar/$PARENT/%' OR target LIKE '%/Cellar/$DEP/%';" 2>/dev/null || echo "0")
+[[ "$orphan_links" == "0" ]] || fail "$orphan_links link rows still point into $PARENT or $DEP after uninstall"
+pass "no link rows for $PARENT or $DEP post-uninstall"
 
 orphan_kegs=$(sqlite3 "$DB" "SELECT COUNT(*) FROM kegs WHERE name IN ('$PARENT', '$DEP');" 2>/dev/null || echo "0")
 [[ "$orphan_kegs" == "0" ]] || fail "kegs table still carries $PARENT or $DEP rows ($orphan_kegs)"
