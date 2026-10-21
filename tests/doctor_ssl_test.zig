@@ -101,6 +101,7 @@ test "ca-certificates installed + cert.pem present: a clean ok row" {
     const prefix = try makePrefix("linked", true, true);
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);

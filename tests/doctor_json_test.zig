@@ -433,6 +433,10 @@ test "ca-certificates installed and linked: an ok ssl_ca_bundle finding" {
     try s.initSchema();
     try linkCaCerts(allocator, s.path);
 
+    const opt = try std.fmt.allocPrint(allocator, "{s}/opt/openssl@3", .{s.path});
+    defer allocator.free(opt);
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt);
+
     const dir = try std.fmt.allocPrint(allocator, "{s}/etc/openssl@3", .{s.path});
     defer allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);

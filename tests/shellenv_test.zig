@@ -227,6 +227,7 @@ test "findCertFile finds the bundle of an openssl@4-only prefix" {
     const prefix = try certPrefix("v4", &.{"openssl@4"});
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@4");
     try expectFound(prefix, "openssl@4");
 }
 
@@ -234,14 +235,8 @@ test "findCertFile finds the bundle of an openssl@3-only prefix" {
     const prefix = try certPrefix("v3", &.{"openssl@3"});
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
     try expectFound(prefix, "openssl@3");
-}
-
-test "findCertFile prefers openssl@4 when both majors are present" {
-    const prefix = try certPrefix("both", &.{ "openssl@3", "openssl@4" });
-    defer testing.allocator.free(prefix);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    try expectFound(prefix, "openssl@4");
 }
 
 test "findCertFile returns null when no openssl keg has a bundle" {
@@ -258,6 +253,7 @@ test "findCertFile skips a dangling openssl@4 link and falls back to openssl@3" 
     const prefix = try certPrefix("dangling", &.{"openssl@3"});
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@4", .{prefix});
     defer testing.allocator.free(dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
@@ -430,12 +426,37 @@ test "findCertFile exports nothing when no installed or leftover bundle resolves
 }
 
 test "findCertFile prefers openssl@4 among installed majors" {
-    // The "both majors are present" test has no opt/ dirs, so it never
-    // reaches the installed-major loop that a real prefix goes through.
     const prefix = try certPrefix("both_installed", &.{ "openssl@3", "openssl@4" });
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try mkdirIn(prefix, "/opt/openssl@3");
     try mkdirIn(prefix, "/opt/openssl@4");
     try expectFound(prefix, "openssl@4");
+}
+
+test "findCertFile ignores a plain-file leftover when no major is installed" {
+    // The copy can hold frozen roots and doctor draws no row for it.
+    const prefix = try certPrefix("nomajor_plain", &.{"openssl@3"});
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
+}
+
+test "findCertFile ignores an orphaned leftover link when no major is installed" {
+    const prefix = try linkedLeftover("nomajor_orphan", "openssl@3");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/ca-certificates", .{prefix});
+    defer testing.allocator.free(opt);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, opt);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
+}
+
+test "findCertFile accepts a leftover link into an installed ca-certificates when no major is installed" {
+    const prefix = try linkedLeftover("nomajor_live", "openssl@3");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try expectFound(prefix, "openssl@3");
 }

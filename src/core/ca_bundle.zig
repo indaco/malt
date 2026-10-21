@@ -287,20 +287,16 @@ fn linksToCaCertificates(io: std.Io, raw_prefix: []const u8, path: []const u8) b
 }
 
 /// The bundle of the newest installed OpenSSL major that has one. Else a
-/// leftover bundle: every major reads SSL_CERT_FILE. With a major installed,
-/// doctor can miss a stale copy, so only a link to an installed
-/// ca-certificates counts.
+/// leftover bundle: every major reads SSL_CERT_FILE. A stale copy can go
+/// unnoticed, so only a link to an installed ca-certificates counts.
 pub fn findCertFile(io: std.Io, buf: []u8, prefix: []const u8) ?[]const u8 {
-    var any_installed = false;
     for (openssl_kegs) |keg| {
         if (!isInstalled(io, buf, prefix, keg)) continue;
-        any_installed = true;
         if (certFile(io, buf, prefix, keg)) |path| return path;
     }
-    const ca_installed = any_installed and isInstalled(io, buf, prefix, "ca-certificates");
+    const ca_installed = isInstalled(io, buf, prefix, "ca-certificates");
     for (openssl_kegs) |keg| {
         const path = certFile(io, buf, prefix, keg) orelse continue;
-        if (!any_installed) return path;
         if (ca_installed and linksToCaCertificates(io, prefix, path)) return path;
     }
     return null;

@@ -1477,8 +1477,9 @@ pub fn formatSslCertRemedy(buf: []u8, prefix: []const u8, keg: []const u8) ?[]co
 
 /// The OpenSSL keg whose bundle is missing, or null when none is. Each
 /// installed major reads only its own etc dir, so one linked major does not
-/// cover another. With no major installed, any bundle will do; the warning
-/// then names the newest major, which a fresh closure pulls in.
+/// cover another. With no major installed, a leftover link into
+/// ca-certificates will do; the warning then names the newest major, which a
+/// fresh closure pulls in.
 fn unlinkedOpensslKeg(ctx: CheckCtx) ?[]const u8 {
     var buf: [prefix_path.path_buf_len]u8 = undefined;
     var any_installed = false;
