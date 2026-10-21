@@ -259,3 +259,15 @@ test "both majors installed, only openssl@4 linked: warns about openssl@3" {
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
     try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
 }
+
+test "no major installed with only a plain-file leftover: warns about openssl@4" {
+    // shellenv no longer exports the copy, so doctor must not call it fine.
+    const prefix = try makePrefix("nomajor_plain", true, true);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+}
