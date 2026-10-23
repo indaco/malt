@@ -51,9 +51,12 @@ kegs=$(sqlite3 "$TUI_PREFIX/db/malt.db" 'SELECT COUNT(*) FROM kegs;')
 # Slow input (one key per 30 ms) outlasting the 5 s drain budget: the prompt is
 # cancelled, the keg stays, and the banner survives until input has been quiet.
 # A resize repaints, so each step can assert on the screen.
+# A driver stall near the 300 ms quiet window looks like the user stopped
+# typing, and then a confirm is correct, so that run proves nothing: retry it.
 CAP2="$TUI_PREFIX/cap2.bin"
-out=$(
-  tui_pty_drive "$CAP2" 90 24 <<ACT
+for attempt in 1 2 3; do
+  out=$(
+    tui_pty_drive "$CAP2" 90 24 <<ACT
 settle 0.6
 send 2
 settle 0.8
@@ -70,7 +73,14 @@ settle 0.8
 send q
 quitwait 1.5
 ACT
-)
+  )
+  gap=$(echo "$out" | sed -n 's/^TRICKLE_MAX_GAP=//p')
+  [ -n "$gap" ] || fail "the driver did not report the trickle gap ($out)"
+  awk -v g="$gap" 'BEGIN { exit !(g < 0.25) }' && break
+  [ "$attempt" = 3 ] && fail "the driver stalled on every attempt (last gap ${gap}s)"
+  echo "tui-uninstall-prompt-paste: driver stalled ${gap}s between keys, retrying" >&2
+  [ "$(tui_pty_keg_count)" = 1 ] || tui_pty_seed_keg_real solopkg
+done
 echo "$out" | grep -q "EXIT_STATUS=0" || fail "mt tui did not exit 0 after the trickle ($out)"
 kegs=$(sqlite3 "$TUI_PREFIX/db/malt.db" 'SELECT COUNT(*) FROM kegs;')
 [ "$kegs" = 1 ] || fail "slow input confirmed the prompt (keg count $kegs)"

@@ -14,7 +14,8 @@
 #   mark LABEL        write "\n@@LABEL@@\n" into the capture (phase separator)
 #   send BYTES        write BYTES to the pty (\t \n \r \e \xHH escapes honoured)
 #   put BYTES         like send, but returns at once (no trailing settle)
-#   trickle SECS DELAY BYTES  send BYTES every DELAY seconds for SECS
+#   trickle SECS DELAY BYTES  send BYTES every DELAY seconds for SECS;
+#                     prints "TRICKLE_MAX_GAP=<secs>", the longest gap between sends
 #   pause SECS        keep capturing for exactly SECS
 #   settle [secs]     read+capture until output goes idle (default 0.6s window)
 #   resize COLS ROWS  TIOCSWINSZ the pty; the kernel delivers SIGWINCH
@@ -126,10 +127,16 @@ while (my $line = <STDIN>) {
   } elsif ($op eq 'trickle') {
     my ($secs, $delay, $bytes) = split /\s+/, $rest, 3;
     my $end = time + $secs;
+    my ($prev, $gap) = (undef, 0);
     while (time < $end) {
+      my $now = time;
+      $gap = $now - $prev if defined $prev && $now - $prev > $gap;
+      $prev = $now;
       send_bytes(unescape($bytes));
       drain($delay, 99);
     }
+    # A stalled runner can open a quiet window the app reads as "input stopped".
+    print "TRICKLE_MAX_GAP=$gap\n";
   } elsif ($op eq 'pause') {
     drain($rest, 99);
   } elsif ($op eq 'settle') {

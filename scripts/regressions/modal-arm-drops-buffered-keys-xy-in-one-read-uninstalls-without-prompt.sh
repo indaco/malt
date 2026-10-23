@@ -53,7 +53,7 @@ run_with_timeout() {
 cd "$root"
 zig build >/dev/null
 rc=0
-MT_BIN="$root/zig-out/bin/malt" run_with_timeout 60 scripts/e2e/tui_uninstall_prompt_before_paste.sh || rc=$?
+MT_BIN="$root/zig-out/bin/malt" run_with_timeout 90 scripts/e2e/tui_uninstall_prompt_before_paste.sh || rc=$?
 case "$rc" in
 0) echo "ok: a key that arms the prompt drops the rest of the read" ;;
 2)
