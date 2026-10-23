@@ -190,6 +190,7 @@ fn resolveTrustedCosign(
     const path_env = std.process.Environ.getPosix(environ, "PATH") orelse return error.CosignNotFound;
     var it = std.mem.tokenizeScalar(u8, path_env, ':');
     var probe: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var saw_untrusted = false;
     while (it.next()) |dir| {
         const cand = std.mem.print(&probe, "{s}/{s}", .{ dir, bin }) catch continue;
         // Mere existence is the wrong test: execvp walks past an entry it
@@ -203,10 +204,15 @@ fn resolveTrustedCosign(
         // it cannot exec. Safe because the spawn runs whatever this walk
         // returns - a skipped candidate can never be the one that executes.
         const n = std.Io.Dir.cwd().realPathFile(io, cand, out) catch continue;
-        if (resolvedInsidePrefix(out[0..n], prefix_real)) return error.CosignUntrusted;
+        // Skip, don't stop: `<prefix>/bin` usually leads PATH, and a cosign
+        // malt installed there must not hide a system-wide one later on.
+        if (resolvedInsidePrefix(out[0..n], prefix_real)) {
+            saw_untrusted = true;
+            continue;
+        }
         return out[0..n];
     }
-    return error.CosignNotFound;
+    return if (saw_untrusted) error.CosignUntrusted else error.CosignNotFound;
 }
 
 /// Shell out to `cosign verify-blob` with the same flags `install.sh` uses.
@@ -434,6 +440,43 @@ test "an empty prefix disables the guard and passes the name through" {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const got = try resolveTrustedCosign(std.Options.debug_io, "cosign", "", .empty, &buf);
     try std.testing.expectEqualStrings("cosign", got);
+}
+
+test "a prefix cosign earlier on PATH does not hide a trusted one after it" {
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+
+    // The common layout: `<prefix>/bin` leads PATH and malt itself installed
+    // cosign there, while a system-wide cosign sits later. Refusing at the
+    // first hit would block `mt version update` with a usable verifier present.
+    const root = try a.print("/tmp/malt_cosign_skip_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    const prefix = try a.print("{s}/prefix", .{root});
+    defer a.free(prefix);
+    const prefix_bin = try a.print("{s}/bin", .{prefix});
+    defer a.free(prefix_bin);
+    const system_bin = try a.print("{s}/system", .{root});
+    defer a.free(system_bin);
+
+    for ([_][]const u8{ prefix_bin, system_bin }) |dir| {
+        try std.Io.Dir.cwd().createDirPath(io, dir);
+        const p = try a.print("{s}/cosign", .{dir});
+        defer a.free(p);
+        const f = try std.Io.Dir.createFileAbsolute(io, p, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "placeholder\n");
+        try f.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
+    }
+
+    const path_val = try a.printSentinel("PATH={s}:{s}", .{ prefix_bin, system_bin }, 0);
+    defer a.free(path_val);
+    const entries = [_:null]?[*:0]const u8{path_val.ptr};
+
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const got = try resolveTrustedCosign(io, "cosign", prefix, .{ .block = .{ .slice = &entries } }, &buf);
+    try std.testing.expect(std.mem.endsWith(u8, got, "/system/cosign"));
 }
 
 test "a PATH entry symlinked into the prefix is refused" {
