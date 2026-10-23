@@ -4,6 +4,199 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.25.3 - 2026-10-23
+
+### Highlights
+
+v0.25.3 is a fix release: OpenSSL upgrades install cleanly and keep HTTPS working, and the dashboard responds correctly to your keys, terminal size and signals.
+
+- **Smooth OpenSSL upgrades.** `mt install openssl@4` now installs over the links that `openssl@3` left, and a tap or local formula does not take a link another package owns. `mt shellenv` exports a CA bundle only while it links into an installed `ca-certificates`.
+- **No uninstall without a prompt.** The Installed tab always shows the uninstall prompt before a key can answer it, at any terminal size. A pasted `x` cannot remove a package without a prompt.
+- **A dashboard you can trust.** The cursor moves on the first Up after you scroll past the end of a list, and prompts and header counts fit on narrow and ultrawide terminals. A terminal resize does not end the session or stop a running install, and a killed command restores echo and line editing.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- get the regression suite green again after upstream changes ([326efc8ba](https://github.com/indaco/malt/commit/326efc8ba)) ([#1219](https://github.com/indaco/malt/pull/1219))
+- **ssl:** stop exporting a stale CA bundle after every OpenSSL is removed ([435451378](https://github.com/indaco/malt/commit/435451378)) ([#1218](https://github.com/indaco/malt/pull/1218))
+- **install:** stop tap and local formulas from taking links another package owns ([d89d35978](https://github.com/indaco/malt/commit/d89d35978)) ([#1217](https://github.com/indaco/malt/pull/1217))
+- **install:** let a formula take over the links its keg-only predecessor left behind ([b55ef6a58](https://github.com/indaco/malt/commit/b55ef6a58)) ([#1216](https://github.com/indaco/malt/pull/1216))
+- **ssl:** keep SSL_CERT_FILE set when only a leftover CA bundle resolves ([4499300b0](https://github.com/indaco/malt/commit/4499300b0)) ([#1215](https://github.com/indaco/malt/pull/1215))
+- **bench:** publish timings for the release the table names ([dbc7bde5d](https://github.com/indaco/malt/commit/dbc7bde5d)) ([#1210](https://github.com/indaco/malt/pull/1210))
+- **update:** keep the version notice and dashboard on the shared cache resolver ([6b4861f26](https://github.com/indaco/malt/commit/6b4861f26)) ([#1207](https://github.com/indaco/malt/pull/1207))
+- **tui:** keep the header counts intact on ultrawide terminals ([c0c886c72](https://github.com/indaco/malt/commit/c0c886c72)) ([#1206](https://github.com/indaco/malt/pull/1206))
+- **tui:** retry a tab's background refresh when it could not start ([461c84c6f](https://github.com/indaco/malt/commit/461c84c6f)) ([#1205](https://github.com/indaco/malt/pull/1205))
+- **tui:** show the whole uninstall prompt in the Installed list on narrow terminals ([87518b37b](https://github.com/indaco/malt/commit/87518b37b)) ([#1204](https://github.com/indaco/malt/pull/1204))
+- **tui:** show the uninstall prompt before a buffered key can confirm it ([416c26384](https://github.com/indaco/malt/commit/416c26384)) ([#1203](https://github.com/indaco/malt/pull/1203))
+- **tui:** show an error that arrived while the uninstall prompt hid it ([6963afa11](https://github.com/indaco/malt/commit/6963afa11)) ([#1201](https://github.com/indaco/malt/pull/1201))
+- **tui:** keep the Installed uninstall prompt visible at any terminal size ([636389759](https://github.com/indaco/malt/commit/636389759)) ([#1200](https://github.com/indaco/malt/pull/1200))
+- **ui:** restore the terminal when a command is killed during background colour detection ([d6288b222](https://github.com/indaco/malt/commit/d6288b222)) ([#1199](https://github.com/indaco/malt/pull/1199))
+- keep the TUI and post-install steps running when the terminal is resized ([f48c88c03](https://github.com/indaco/malt/commit/f48c88c03)) ([#1198](https://github.com/indaco/malt/pull/1198))
+- **tui:** move the cursor on the first Up after scrolling past the end of a list ([b81dad24f](https://github.com/indaco/malt/commit/b81dad24f)) ([#1197](https://github.com/indaco/malt/pull/1197))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-10-19 ([c88d311d7](https://github.com/indaco/malt/commit/c88d311d7)) ([#1212](https://github.com/indaco/malt/pull/1212))
+- **bench:** explain the verify-before-parse cost next to the results ([0f0947553](https://github.com/indaco/malt/commit/0f0947553)) ([#1214](https://github.com/indaco/malt/pull/1214))
+- **architecture:** describe the verify-before-parse download pipeline ([893e60223](https://github.com/indaco/malt/commit/893e60223)) ([#1211](https://github.com/indaco/malt/pull/1211))
+- **benchmark:** update results 2026-10-12 ([1c78e982c](https://github.com/indaco/malt/commit/1c78e982c)) ([#1195](https://github.com/indaco/malt/pull/1195))
+
+### ✅ Tests
+
+- make resize-interruption tests fail when no signal hits the blocked call ([fab9a29cc](https://github.com/indaco/malt/commit/fab9a29cc)) ([#1213](https://github.com/indaco/malt/pull/1213))
+
+### 🏡 Chores
+
+- build malt with Zig 0.17 ([4d08bfeb3](https://github.com/indaco/malt/commit/4d08bfeb3)) ([#1220](https://github.com/indaco/malt/pull/1220))
+
+### 🤖 CI
+
+- keep the harness regression job inside its time limit ([af4e07ff0](https://github.com/indaco/malt/commit/af4e07ff0)) ([#1208](https://github.com/indaco/malt/pull/1208))
+- run every macOS job on Tahoe so bottle-backed checks keep working ([46f858e3c](https://github.com/indaco/malt/commit/46f858e3c)) ([#1196](https://github.com/indaco/malt/pull/1196))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
+## v0.25.2 - 2026-10-11
+
+### Highlights
+
+v0.25.2 is a hardening release: malt refuses incorrect tap requests, reports failed runs as failures, and does not change a newer malt's database.
+
+- **Correct tap commands.** `mt tap` and `mt untap` refuse a mistyped tap or an incorrect flag set. Like brew, `mt untap` refuses a tap that installed packages use, unless you add `--force`.
+- **Honest failures.** `mt install` fails when memory runs out, instead of linking a formula without its dependencies. An interrupted `mt purge` reports `"status":"error"`, `mt tap` reports an unreadable database, and `mt doctor` warns when it cannot audit the full prefix.
+- **Safe downgrades.** An older malt does not change a newer malt's database when it refuses it.
+- **Fewer surprises.** `mt reinstall` refuses the run if a named package is not installed. `mt services <sub> --help` shows help
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **ssl:** keep HTTPS setup working for prefixes on openssl@4 ([a5677f25a](https://github.com/indaco/malt/commit/a5677f25a)) ([#1194](https://github.com/indaco/malt/pull/1194))
+- **info:** report a cask type when an unknown name is looked up with --cask --json ([5f74d99f4](https://github.com/indaco/malt/commit/5f74d99f4)) ([#1191](https://github.com/indaco/malt/pull/1191))
+- **reinstall:** refuse every named package that is not installed, not only the first ([a68460697](https://github.com/indaco/malt/commit/a68460697)) ([#1190](https://github.com/indaco/malt/pull/1190))
+- **search:** show installed matches when run with --offline ([6209221fd](https://github.com/indaco/malt/commit/6209221fd)) ([#1189](https://github.com/indaco/malt/pull/1189))
+- **services:** show help for services subcommands instead of running them ([8839de8c8](https://github.com/indaco/malt/commit/8839de8c8)) ([#1188](https://github.com/indaco/malt/pull/1188))
+- **doctor:** warn instead of reporting a clean prefix when part of it cannot be audited ([a7d9c72ba](https://github.com/indaco/malt/commit/a7d9c72ba)) ([#1187](https://github.com/indaco/malt/pull/1187))
+- **purge:** report an interrupted or failed run as an error in its JSON output instead of ok ([485ad84fd](https://github.com/indaco/malt/commit/485ad84fd)) ([#1186](https://github.com/indaco/malt/pull/1186))
+- **tap:** report an unreadable database instead of listing no taps ([05dc40e0b](https://github.com/indaco/malt/commit/05dc40e0b)) ([#1185](https://github.com/indaco/malt/pull/1185))
+- **db:** leave a newer malt's database untouched when refusing it ([6ca0416ca](https://github.com/indaco/malt/commit/6ca0416ca)) ([#1184](https://github.com/indaco/malt/pull/1184))
+- **fs:** keep test builds off the live install when MALT_PREFIX is lost ([e42a35102](https://github.com/indaco/malt/commit/e42a35102)) ([#1182](https://github.com/indaco/malt/pull/1182))
+- **deps:** fail the install instead of dropping dependencies when memory runs out ([25ed8124a](https://github.com/indaco/malt/commit/25ed8124a)) ([#1181](https://github.com/indaco/malt/pull/1181))
+- **deps:** fail cleanly on allocation failure instead of listing a dependency twice or crashing ([48efe1974](https://github.com/indaco/malt/commit/48efe1974)) ([#1180](https://github.com/indaco/malt/pull/1180))
+- **tap:** refuse untap and refresh on unknown or in-use taps ([9de0d6454](https://github.com/indaco/malt/commit/9de0d6454)) ([#1178](https://github.com/indaco/malt/pull/1178))
+- **tap:** refuse tap commands that would silently act on the wrong taps ([419674a36](https://github.com/indaco/malt/commit/419674a36)) ([#1177](https://github.com/indaco/malt/pull/1177))
+
+### 📖 Documentation
+
+- make the docs easier to read and translate ([d4b345a83](https://github.com/indaco/malt/commit/d4b345a83)) ([#1183](https://github.com/indaco/malt/pull/1183))
+
+### ✅ Tests
+
+- **fs:** keep test builds out of the developer's cache when MALT_CACHE is inherited ([d5bff465b](https://github.com/indaco/malt/commit/d5bff465b)) ([#1193](https://github.com/indaco/malt/pull/1193))
+- **build:** keep test runs out of the developer's malt cache ([3a66c8afd](https://github.com/indaco/malt/commit/3a66c8afd)) ([#1192](https://github.com/indaco/malt/pull/1192))
+- **tap:** guard that tap mutations fail loudly on an unusable database ([2fcac44de](https://github.com/indaco/malt/commit/2fcac44de)) ([#1179](https://github.com/indaco/malt/pull/1179))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.25.1 - 2026-10-07
+
+### Highlights
+
+v0.25.1 is a hardening release: malt only installs bottles your macOS can run, a mistyped flag stops the command instead of being ignored, and failures no longer exit 0.
+
+- **Bottles that run on your Mac.** `mt install`, `upgrade` and `outdated` only pick a bottle your macOS can load, and say none is available instead of installing binaries that will not launch; `mt doctor` flags kegs already poured from a too-new bottle.
+- **A typo stops the command.** An unknown or brew-style flag on `install`, `upgrade`, `outdated` and other commands now exits with `Unknown flag` instead of being silently ignored.
+- **Failures you can see.** `mt upgrade` exits non-zero on an unreadable package database or a too-long `MALT_PREFIX` instead of reporting success, and a damaged install record no longer crashes `link`, `cleanup` or `list`.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **doctor:** flag kegs poured from a bottle this macOS cannot load ([cc89bd27a](https://github.com/indaco/malt/commit/cc89bd27a)) ([#1174](https://github.com/indaco/malt/pull/1174))
+- **install:** never pour a bottle built for a newer macOS than the host ([cdb497cca](https://github.com/indaco/malt/commit/cdb497cca)) ([#1173](https://github.com/indaco/malt/pull/1173))
+- **ci:** restore the relocation-logic pin so main's lint passes ([5b18e59ba](https://github.com/indaco/malt/commit/5b18e59ba)) ([#1172](https://github.com/indaco/malt/pull/1172))
+- stop a damaged install record from crashing link, install, cleanup and list ([f896c7531](https://github.com/indaco/malt/commit/f896c7531)) ([#1171](https://github.com/indaco/malt/pull/1171))
+- **cli:** keep --dry-run from creating or migrating the install database ([11bfef90f](https://github.com/indaco/malt/commit/11bfef90f)) ([#1170](https://github.com/indaco/malt/pull/1170))
+- **bench:** measure complete, usable installs on a supported runner ([e4056d395](https://github.com/indaco/malt/commit/e4056d395)) ([#1168](https://github.com/indaco/malt/pull/1168))
+- **upgrade:** fail loud on a long install prefix instead of exiting successfully ([fb8adb074](https://github.com/indaco/malt/commit/fb8adb074)) ([#1167](https://github.com/indaco/malt/pull/1167))
+- **upgrade:** report an unreadable package database instead of claiming nothing is installed ([42b097920](https://github.com/indaco/malt/commit/42b097920)) ([#1166](https://github.com/indaco/malt/pull/1166))
+- **update:** make `--dry-run update` a preview instead of wiping the API cache ([64e721da3](https://github.com/indaco/malt/commit/64e721da3)) ([#1164](https://github.com/indaco/malt/pull/1164))
+- **cli:** refuse unknown flags on outdated, deps, info, search, uses, which and vulns instead of answering without them ([41b6bc96e](https://github.com/indaco/malt/commit/41b6bc96e)) ([#1162](https://github.com/indaco/malt/pull/1162))
+- **cli:** refuse unknown flags on upgrade, version update, install, link, migrate and update instead of running without them ([e0b222d84](https://github.com/indaco/malt/commit/e0b222d84)) ([#1161](https://github.com/indaco/malt/pull/1161))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-10-06 ([823bda172](https://github.com/indaco/malt/commit/823bda172)) ([#1169](https://github.com/indaco/malt/pull/1169))
+- **benchmark:** update results 2026-10-05 ([3f4a5e531](https://github.com/indaco/malt/commit/3f4a5e531)) ([#1165](https://github.com/indaco/malt/pull/1165))
+
+### ✅ Tests
+
+- **regressions:** give the dry-run snapshot fixture a pourable bottle ([943c313fe](https://github.com/indaco/malt/commit/943c313fe)) ([#1176](https://github.com/indaco/malt/pull/1176))
+- **regressions:** resolve the zig clonefail fixtures from zig's live dependency tree ([4c873fa53](https://github.com/indaco/malt/commit/4c873fa53)) ([#1163](https://github.com/indaco/malt/pull/1163))
+
+### 🤖 CI
+
+- **cask:** stop the deprecated postflight warning on every brew command ([898f60068](https://github.com/indaco/malt/commit/898f60068)) ([#1175](https://github.com/indaco/malt/pull/1175))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.25.0 - 2026-10-01
 
 ### Highlights
