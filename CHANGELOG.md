@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.25.4 - 2026-10-23
+
+### Highlights
+
+v0.25.4 is a fix release: `mt version update` works again when you also installed cosign with malt.
+
+- **Self-update finds your system cosign.** If malt's own cosign comes first on PATH, `mt version update` now uses the next trusted cosign on PATH, for example the Homebrew copy. Before, the update stopped at malt's copy and failed.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+> [!NOTE]
+> **Standalone installs upgrading from v0.25.3 or earlier with malt's own cosign installed.** The old binary verifies the update and uses the first `cosign` on your `PATH`. If that copy is inside the malt prefix, `mt version update` stops with this error:
+>
+> ```text
+> ✗ Refusing to verify with a cosign found inside the malt prefix.
+> ```
+>
+> To continue, put your system cosign first on `PATH` for this one command:
+>
+> ```bash
+> PATH=/opt/homebrew/bin:$PATH mt version update
+> ```
+>
+> If your system cosign is not in `/opt/homebrew/bin`, use its directory instead. To find it, run `which -a cosign`. The signature and checksum checks stay on. Starting with v0.25.4, malt skips its own cosign and finds the system copy without this step.
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **update:** let self-update use a system cosign when malt's own copy leads PATH ([a25127686](https://github.com/indaco/malt/commit/a25127686)) ([#1224](https://github.com/indaco/malt/pull/1224))
+
+### ✅ Tests
+
+- stop a stalled CI runner from failing the slow-input uninstall e2e ([3d7c6dd14](https://github.com/indaco/malt/commit/3d7c6dd14)) ([#1223](https://github.com/indaco/malt/pull/1223))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.25.3 - 2026-10-23
 
 ### Highlights
