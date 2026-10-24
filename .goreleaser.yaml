@@ -90,14 +90,12 @@ homebrew_casks:
     manpages:
       - share/man/man1/malt.1
 
-    # Raw-Ruby hooks render the deprecated `postflight` stanza; goreleaser
-    # can't emit `postflight_steps` natively yet, so inject it directly.
-    custom_block: |
-      postflight_steps do
-        on_macos do
-          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/malt"]
-        end
-      end
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/malt"]
+          end
 
     # The cask drops the binaries but cannot create malt's install prefix:
     # it lives under root-owned /opt, so it needs one privileged step the
