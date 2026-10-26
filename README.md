@@ -459,7 +459,7 @@ mt doctor --post-install-status          # which post-install work runs natively
 
 </details>
 
-`--fix` repairs only the **safe** classes. A safe repair is reversible and does not change user data. The safe classes are stale advisory locks (the recorded PID is dead), broken symlinks under `bin/`, `lib/`, `include/`, `share/`, and `sbin/`, and orphaned store entries. For dangerous classes, malt shows only a manual repair hint. These classes are a corrupt DB, missing kegs, missing prefix directories, weak permissions, and unpatched relocation placeholders.
+`--fix` repairs only the **safe** classes. A safe repair is reversible and does not change user data. The safe classes are stale advisory locks (the recorded PID is dead), broken symlinks under `bin/`, `sbin/`, `lib/`, `include/`, `share/`, `etc/`, and the direct links in `opt/`, and orphaned store entries. For dangerous classes, malt shows only a manual repair hint. These classes are a corrupt DB, missing kegs, missing prefix directories, weak permissions, and unpatched relocation placeholders.
 
 Use `mt purge` for housekeeping or for a full wipe. You must give a scope flag.
 

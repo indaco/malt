@@ -100,6 +100,22 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
 
 // ── Tier: --unused-deps (was `autoremove`) ──────────────────────────────────
 
+/// unlink() cannot see `opt/<name>` (no `links` row). Remove it when it dangles
+/// or points into the keg just removed; keep it when another keg can own it.
+fn removeOptLink(io: std.Io, prefix: []const u8, name: []const u8, keg_path: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const path = std.mem.print(&buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
+    const cwd = std.Io.Dir.cwd();
+    _ = cwd.statFile(io, path, .{}) catch |e| {
+        if (linker_mod.isDanglingLinkError(e)) cwd.deleteFile(io, path) catch {};
+        return;
+    };
+    // A failed Cellar removal leaves the keg dir, so the link still resolves.
+    var target_buf: [512]u8 = undefined;
+    const n = cwd.readLink(io, path, &target_buf) catch return;
+    if (keg_path.len > 0 and std.mem.eql(u8, target_buf[0..n], keg_path)) cwd.deleteFile(io, path) catch {};
+}
+
 pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     var rep = report.Reporter.init("unused-deps", dry_run);
@@ -234,6 +250,12 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 // Parent dir may be non-empty (sibling versions still installed).
                 if (parent_path.len > 0) std.Io.Dir.deleteDirAbsolute(io, parent_path) catch {};
             }
+            var keg_buf: [512]u8 = undefined;
+            const keg_path = if (pkg_version.len > 0)
+                std.mem.print(&keg_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch ""
+            else
+                "";
+            removeOptLink(io, prefix, name, keg_path);
             var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch continue;
             defer del.finalize();
             del.bindInt(1, keg_id) catch continue;
@@ -2215,4 +2237,32 @@ test "cache prune and downloads sweep reach files under a cache dir past 512 byt
     // A negative window ages every file, so no back-dating is needed.
     pruneCacheRecursive(io, cache, -1, false, &result, &rep);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, old, .{}));
+}
+
+test "removeOptLink drops a link into the removed keg and keeps one into another keg" {
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try std.mem.print(&base_buf, "/tmp/mt_scopes_optlink_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    var a_buf: [160]u8 = undefined;
+    var b_buf: [160]u8 = undefined;
+    const keg = try std.mem.print(&a_buf, "{s}/Cellar/depx/1.0", .{base});
+    const other = try std.mem.print(&b_buf, "{s}/Cellar/depx/2.0", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try std.Io.Dir.cwd().createDirPath(io, other);
+    var opt_buf: [160]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(io, try std.mem.print(&opt_buf, "{s}/opt", .{base}));
+    const link = try std.mem.print(&opt_buf, "{s}/opt/depx", .{base});
+
+    // Removal failed: the keg dir survives, so the link still resolves.
+    try std.Io.Dir.symLinkAbsolute(io, keg, link, .{});
+    removeOptLink(io, base, "depx", keg);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().readLink(io, link, &a_buf));
+
+    try std.Io.Dir.symLinkAbsolute(io, other, link, .{});
+    removeOptLink(io, base, "depx", keg);
+    const n = try std.Io.Dir.cwd().readLink(io, link, &a_buf);
+    try testing.expectEqualStrings(other, a_buf[0..n]);
 }

@@ -583,6 +583,140 @@ test "--unused-deps --dry-run iterates kegs whose install_reason is dep" {
     try purge.execute(&ctx, allocator, &.{"--unused-deps"});
 }
 
+/// Seeds an orphan `depx` keg row and Cellar dir; returns the Cellar path.
+fn seedOrphanDep(allocator: std.mem.Allocator, prefix: ScratchPrefix, version: []const u8) ![]u8 {
+    const cellar_path = try allocator.print("{s}/Cellar/depx/{s}", .{ prefix.path, version });
+    errdefer allocator.free(cellar_path);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
+        \\VALUES ('depx', 'depx', ?2, 0, '', ?1, 'dependency');
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, cellar_path);
+    try stmt.bindText(2, version);
+    _ = try stmt.step();
+
+    try writeFileAt(allocator, &.{ prefix.path, "Cellar", "depx", version, "marker" }, "x");
+    try makeDirAt(allocator, &.{ prefix.path, "opt" });
+    return cellar_path;
+}
+
+fn runUnusedDepsQuiet(allocator: std.mem.Allocator, dry_run: bool) !void {
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(dry_run);
+    output.setNdjson(false);
+    output.setQuiet(true);
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, if (dry_run) &.{"--unused-deps"} else &.{ "--unused-deps", "--yes" });
+}
+
+/// Reads `opt/depx`; null when the link is gone.
+fn readOptDepx(allocator: std.mem.Allocator, prefix: ScratchPrefix) !?[]u8 {
+    const opt_path = try allocator.print("{s}/opt/depx", .{prefix.path});
+    defer allocator.free(opt_path);
+    var buf: [512]u8 = undefined;
+    const n = std.Io.Dir.readLinkAbsolute(std.Options.debug_io, opt_path, &buf) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    return try allocator.dupe(u8, buf[0..n]);
+}
+
+fn plantOptDepx(allocator: std.mem.Allocator, prefix: ScratchPrefix, target: []const u8) !void {
+    const opt_path = try allocator.print("{s}/opt/depx", .{prefix.path});
+    defer allocator.free(opt_path);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, target, opt_path, .{});
+}
+
+test "--unused-deps --yes removes the orphan's opt link" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "unused_deps_opt");
+    defer prefix.deinit(allocator);
+    const cellar_path = try seedOrphanDep(allocator, prefix, "1.0");
+    defer allocator.free(cellar_path);
+    try plantOptDepx(allocator, prefix, cellar_path);
+
+    try runUnusedDepsQuiet(allocator, false);
+
+    // The Cellar dir going away is what makes the link dangle.
+    try testing.expect((try readOptDepx(allocator, prefix)) == null);
+}
+
+test "--unused-deps --yes keeps an opt link that resolves to another keg" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "unused_deps_opt_live");
+    defer prefix.deinit(allocator);
+    const cellar_path = try seedOrphanDep(allocator, prefix, "1.0");
+    defer allocator.free(cellar_path);
+    const other = try allocator.print("{s}/Cellar/depx/2.0", .{prefix.path});
+    defer allocator.free(other);
+    try makeDirAt(allocator, &.{ prefix.path, "Cellar", "depx", "2.0" });
+    try plantOptDepx(allocator, prefix, other);
+
+    try runUnusedDepsQuiet(allocator, false);
+
+    const target = (try readOptDepx(allocator, prefix)).?;
+    defer allocator.free(target);
+    try testing.expectEqualStrings(other, target);
+}
+
+test "--unused-deps --yes keeps an opt link it cannot stat" {
+    // A self-loop fails with an error other than FileNotFound: "can't tell" keeps it.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "unused_deps_opt_loop");
+    defer prefix.deinit(allocator);
+    const cellar_path = try seedOrphanDep(allocator, prefix, "1.0");
+    defer allocator.free(cellar_path);
+    const self = try allocator.print("{s}/opt/depx", .{prefix.path});
+    defer allocator.free(self);
+    try plantOptDepx(allocator, prefix, self);
+
+    try runUnusedDepsQuiet(allocator, false);
+
+    const target = (try readOptDepx(allocator, prefix)).?;
+    defer allocator.free(target);
+    try testing.expectEqualStrings(self, target);
+}
+
+test "--unused-deps --yes drops the opt link of a keg whose Cellar removal failed" {
+    // A `..` in the version makes cellar remove refuse, so the keg dir and the
+    // link into it both survive until the purge step handles the link.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "unused_deps_opt_stuck");
+    defer prefix.deinit(allocator);
+    const cellar_path = try seedOrphanDep(allocator, prefix, "1..0");
+    defer allocator.free(cellar_path);
+    try plantOptDepx(allocator, prefix, cellar_path);
+
+    try runUnusedDepsQuiet(allocator, false);
+
+    try testing.expect((try readOptDepx(allocator, prefix)) == null);
+}
+
+test "--unused-deps --dry-run leaves the opt link" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "unused_deps_opt_dry");
+    defer prefix.deinit(allocator);
+    const cellar_path = try seedOrphanDep(allocator, prefix, "1.0");
+    defer allocator.free(cellar_path);
+    try plantOptDepx(allocator, prefix, cellar_path);
+
+    try runUnusedDepsQuiet(allocator, true);
+
+    const target = (try readOptDepx(allocator, prefix)).?;
+    defer allocator.free(target);
+    try testing.expectEqualStrings(cellar_path, target);
+}
+
 // --- --cache=<days> -----------------------------------------------------
 
 test "--cache=0 --dry-run sweeps every cache file regardless of mtime" {

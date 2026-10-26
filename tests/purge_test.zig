@@ -431,19 +431,22 @@ test "--broken-symlinks removes dangling prefix links and keeps live ones" {
     try plantLinks(prefix, "share/man/man1", anchor);
     try plantLinks(prefix, "etc", anchor);
 
+    // `opt/<name>` is not a linker target but a dangling one is still residue.
+    try plantLinks(prefix, "opt", anchor);
+
     const ctx = malt.app_ctx.AppCtx{ .io = std.Options.debug_io, .environ = .empty };
     const dry = try malt.purge.runBrokenSymlinks(&ctx, prefix, true);
-    try testing.expectEqual(@as(u32, 3), dry.removed);
+    try testing.expectEqual(@as(u32, 4), dry.removed);
     // Dry run reports without touching anything.
     try testing.expect(linkExists(prefix, "bin/dead"));
     try testing.expect(linkExists(prefix, "etc/dead"));
 
     const applied = try malt.purge.runBrokenSymlinks(&ctx, prefix, false);
-    try testing.expectEqual(@as(u32, 3), applied.removed);
-    for ([_][]const u8{ "bin/dead", "share/man/man1/dead", "etc/dead" }) |gone| {
+    try testing.expectEqual(@as(u32, 4), applied.removed);
+    for ([_][]const u8{ "bin/dead", "share/man/man1/dead", "etc/dead", "opt/dead" }) |gone| {
         try testing.expect(!linkExists(prefix, gone));
     }
-    for ([_][]const u8{ "bin/alive", "share/man/man1/alive", "etc/alive" }) |kept| {
+    for ([_][]const u8{ "bin/alive", "share/man/man1/alive", "etc/alive", "opt/alive" }) |kept| {
         try testing.expect(linkExists(prefix, kept));
     }
 
