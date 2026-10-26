@@ -108,8 +108,8 @@ fn pinnedHolds(row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
 /// What a per-package upgrade decided. Returned rather than reported as a
 /// side effect, so a caller can fold it into a counter, a progress line, or
 /// a cache prune without the upgrade functions knowing which. Failures stay
-/// on the error channel — `error.Aborted` / `error.AppRunning` — so the
-/// exit-code split survives untouched.
+/// on the error channel (`error.Aborted`), so the exit code survives
+/// untouched.
 const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned, local, unsupported };
 
 /// Aggregate counters for a bulk `mt upgrade` run, folded from the
@@ -491,8 +491,6 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
     // item used to exit 0, hiding the failure from CI. We aggregate here
     // and surface error.Aborted so main.zig maps it to a non-zero exit.
     var any_failed = false;
-    var app_running = false; // a named cask refused because its app is live
-    var other_failed = false; // any failure that is not the app-running refusal
     var any_upgraded = false; // at least one keg actually moved — gates the prune
 
     if (names.items.len == 0) {
@@ -530,10 +528,7 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
             break :blk .empty;
         };
         defer c_plan.deinit(allocator);
-        if (f_err != null or c_err != null) {
-            any_failed = true;
-            other_failed = true;
-        }
+        if (f_err != null or c_err != null) any_failed = true;
 
         const checking = f_plan.rows.len + c_plan.rows.len;
         if (checking > 0) output.info("Checking {d} packages...", .{checking});
@@ -580,7 +575,6 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
                 else
                     output.err("Could not read the package database for formula {s}: {s}. If {s} is a cask, pass --cask.", .{ name, db.errMsg(), name });
                 any_failed = true;
-                other_failed = true;
                 continue;
             });
             // `--formula` takes this arm even on a miss, which refuses the name.
@@ -588,16 +582,14 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
                 if (shadowsCask(&db, name, formula_only)) help.warnTreatedAsFormula(name);
                 const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
                     any_failed = true;
-                    other_failed = true;
                     continue;
                 };
                 if (outcome == .upgraded) any_upgraded = true;
                 continue;
             }
             // Not a formula (or --cask): try cask
-            const outcome = upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, false, null) catch |e| {
+            const outcome = upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, false, null) catch {
                 any_failed = true;
-                if (e == error.AppRunning) app_running = true else other_failed = true;
                 continue;
             };
             if (outcome == .upgraded) any_upgraded = true;
@@ -616,13 +608,7 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
     // dry-run guard and never reaches `.upgraded`, so a dry-run cannot set this.
     if (any_upgraded) outdated_mod.pruneSnapshot(ctx.io, allocator, &db, cache_dir);
 
-    // A batch whose only failure was a live cask app exits with the dedicated
-    // code so the TUI can footer the real cause; any other failure (even mixed
-    // in) stays the generic abort.
-    if (any_failed) {
-        if (app_running and !other_failed) return error.AppRunning;
-        return error.Aborted;
-    }
+    if (any_failed) return error.Aborted;
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,7 +1336,7 @@ fn upgradeTapFormula(
 /// attempt failed". The probe loop in `upgradeTapCaskFallback` continues
 /// on either — the pre-routed call from `upgradeCask` continues only on
 /// the latter (a 404 against a recorded `casks.tap` is user-facing).
-const TapRouteError = error{ NotInTap, Aborted, AppRunning };
+const TapRouteError = error{ NotInTap, Aborted };
 
 /// A `:no_check` recipe is named here: as `NotInTap` the caller would call
 /// the cask gone from a tap that still ships it. An unpinned digest is
@@ -1532,10 +1518,6 @@ fn upgradeRoutedTapCask(
 
     installer.uninstall(token) catch |un_err| {
         db.rollback();
-        if (un_err == error.AppRunning) {
-            output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
-            return error.AppRunning;
-        }
         output.err("Failed to remove old version of {s}: {s}", .{ token, @errorName(un_err) });
         return error.Aborted;
     };
@@ -1597,7 +1579,7 @@ fn upgradeTapCaskFallback(
     force: bool,
     bulk: bool,
     sink: ?*EntrySink,
-) error{AppRunning}!?Outcome {
+) ?Outcome {
     const taps = tap_mod.list(allocator, db) catch return null;
     defer {
         for (taps) |t| {
@@ -1612,13 +1594,9 @@ fn upgradeTapCaskFallback(
     for (taps) |t| {
         if (install_args_mod.isCoreTap(t.name)) continue;
 
-        const outcome = upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, bulk, sink) catch |e| switch (e) {
-            // Either "tap doesn't own this token" or "something went
-            // wrong with this tap" — neither is fatal to the probe.
-            error.NotInTap, error.Aborted => continue,
-            // The owning tap was found and refused: propagate, don't keep probing.
-            error.AppRunning => return error.AppRunning,
-        };
+        // Either "tap doesn't own this token" or "something went
+        // wrong with this tap" — neither is fatal to the probe.
+        const outcome = upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, bulk, sink) catch continue;
 
         // The owning tap is now known. recordInstall sets `casks.tap`
         // automatically for the install branch; backfillCaskTap covers
@@ -1856,7 +1834,6 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
                     output.err("Cask {s} is no longer in tap {s}", .{ token, tap_label });
                     return error.Aborted;
                 },
-                error.AppRunning => return error.AppRunning, // already explained; keep the distinct code
                 error.Aborted => return error.Aborted,
             };
         }
@@ -1867,7 +1844,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // third-party tap if the core API 404s — the probe also backfills
     // `casks.tap` for the next invocation.
     const cask_json = api.fetchCask(token) catch {
-        if (try upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, bulk, sink)) |o| return o;
+        if (upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, bulk, sink)) |o| return o;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -1991,10 +1968,6 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     installer.uninstall(token) catch |un_err| {
         db.rollback();
-        if (un_err == error.AppRunning) {
-            output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
-            return error.AppRunning;
-        }
         output.err(
             "Failed to remove old version of {s}: {s}",
             .{ token, @errorName(un_err) },
@@ -2275,8 +2248,8 @@ test "Tally.fold routes each outcome to its own counter" {
 
 test "Tally.fold never invents a failure — that stays on the error channel" {
     // There is deliberately no `.failed` outcome: a failed upgrade returns an
-    // error, which is what keeps error.AppRunning distinct from error.Aborted
-    // for the exit code. Only the loops count failures, from the error arm.
+    // error, which is what sets the exit code. Only the loops count failures,
+    // from the error arm.
     var t: Tally = .{};
     inline for (.{ .upgraded, .would_upgrade, .up_to_date, .pinned }) |o| t.fold(o);
     try std.testing.expectEqual(@as(usize, 0), t.failed);

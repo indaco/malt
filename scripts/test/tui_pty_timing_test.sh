@@ -4,6 +4,11 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# exit 2 = the e2e "cannot run here" signal, as in scripts/lib/tui_pty.sh
+if ! /usr/bin/perl -MIO::Pty -e 1 >/dev/null 2>&1; then
+  echo "SKIP: /usr/bin/perl has no IO::Pty to drive the pty" >&2
+  exit 2
+fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -44,8 +49,14 @@ quitwait 1.5
 ACTIONS
 )
 
-grep -q READY "$TMP/cap"
-grep -q '^EXIT_STATUS=0$' <<<"$out"
+grep -q READY "$TMP/cap" || {
+  echo "FAIL: the pty child never printed READY" >&2
+  exit 1
+}
+grep -q '^EXIT_STATUS=0$' <<<"$out" || {
+  echo "FAIL: the pty child did not exit 0" >&2
+  exit 1
+}
 gap=$(sed -n 's/^TRICKLE_MAX_GAP=//p' <<<"$out")
 if ! awk -v g="$gap" 'BEGIN { exit !(g != "" && g < 0.25) }'; then
   echo "FAIL: completed PTY writes introduced a quiet window (${gap}s)" >&2

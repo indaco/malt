@@ -409,8 +409,7 @@ fn foldUpgradePass(allocator: std.mem.Allocator, mt_path: []const u8, s: *State,
             shared.banner.set(upgrade_fail_op, @errorName(err));
         shared.markStaleAfter(.outdated); // Installed sizes/versions changed too
     } else {
-        var dbuf: [96]u8 = undefined;
-        shared.banner.set(upgrade_fail_op, failDetail(&dbuf, s, kind, code));
+        shared.banner.set(upgrade_fail_op, "ChildFailed");
     }
     // Passes are independent: run the cask pass after the formula one regardless of
     // the formula outcome, so a failed formula pass still lets checked casks upgrade.
@@ -419,24 +418,6 @@ fn foldUpgradePass(allocator: std.mem.Allocator, mt_path: []const u8, s: *State,
     }
     s.pending_kind = null;
     return .none;
-}
-
-/// The exit code `mt upgrade` returns when it refused a cask because the app is
-/// still running. Mirrors `main.zig`'s `AppRunning` exit mapping — the mt→TUI
-/// process contract, like the doctor severity cap the inline runner already knows.
-const cask_app_running_exit: u8 = 3;
-
-/// Banner detail for a failed upgrade pass: on the cask app-running refusal name
-/// the live app (or "a selected app" when the pass carried several) so the banner
-/// says *why*, not an opaque "ChildFailed". `buf` backs the single-cask name.
-fn failDetail(buf: []u8, s: *const State, kind: Kind, code: u8) []const u8 {
-    if (code != cask_app_running_exit) return "ChildFailed";
-    if (countKind(s, kind) == 1) {
-        var one: [1]UpgradedRef = undefined;
-        _ = collectKind(s, kind, &one);
-        return std.mem.print(buf, "{s} is running", .{one[0].name}) catch "an app is running";
-    }
-    return "a selected app is running";
 }
 
 /// Drop the checked rows of one kind — the just-upgraded set — preserving the
@@ -959,28 +940,6 @@ test "the cores tolerate a checked slice shorter than items without trapping" {
     _ = selectedCount(&s);
     var out: [4][]const u8 = undefined;
     _ = selectedNames(&s, &out);
-}
-
-test "failDetail names the live app on the cask refusal code, else stays generic" {
-    var buf: [96]u8 = undefined;
-    const one = [_]Row{.{ .name = "flux-markdown", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" }};
-    var checked1 = [_]bool{true};
-    const s1: State = .{ .items = &one, .checked = &checked1 };
-    try testing.expectEqualStrings("flux-markdown is running", failDetail(&buf, &s1, .cask, cask_app_running_exit));
-
-    const two = [_]Row{
-        .{ .name = "a", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
-        .{ .name = "b", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
-    };
-    var checked2 = [_]bool{ true, true };
-    const s2: State = .{ .items = &two, .checked = &checked2 };
-    try testing.expectEqualStrings("a selected app is running", failDetail(&buf, &s2, .cask, cask_app_running_exit));
-
-    // Any other non-zero exit is the generic child failure, unnamed.
-    try testing.expectEqualStrings("ChildFailed", failDetail(&buf, &s1, .cask, 1));
-    // A name longer than the buffer falls back rather than truncating mid-name.
-    var tiny: [4]u8 = undefined;
-    try testing.expectEqualStrings("an app is running", failDetail(&tiny, &s1, .cask, cask_app_running_exit));
 }
 
 test "countKind and collectKind cover the checked, non-pinned rows of a kind" {

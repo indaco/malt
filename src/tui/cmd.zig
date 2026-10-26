@@ -122,7 +122,7 @@ pub const Msg = union(enum) {
     /// with no db): the tab clears to its known-zero state, no parse to fold.
     cleared,
     /// A mutation completed with this child exit code. 0 is success; a tolerated
-    /// non-zero (Doctor's severity, the cask app-running refusal) is the owning
+    /// non-zero (Doctor's severity) is the owning
     /// tab's to interpret.
     mutated: u8,
     /// A read faulted recoverably (bad exit, parse error). The interpreter has
@@ -273,7 +273,7 @@ test "Msg delivers a loaded Parsed and a mutation exit code" {
     };
     try testing.expect(loaded == .loaded);
 
-    const mutated: Msg = .{ .mutated = 3 }; // cask "app is running" refusal code
+    const mutated: Msg = .{ .mutated = 3 }; // a tolerated non-zero exit code
     try testing.expectEqual(@as(u8, 3), mutated.mutated);
 }
 

@@ -190,7 +190,7 @@ pub fn failReason(err: anyerror) []const u8 {
 test "exitError/failReason: only the newer-database exit gets a sentence, the rest keep their name" {
     try std.testing.expectEqual(error.DatabaseNewerThanMalt, spawn.exitError(spawn.schema_too_new_exit));
     try std.testing.expectEqual(error.ChildFailed, spawn.exitError(1));
-    try std.testing.expectEqual(error.ChildFailed, spawn.exitError(3)); // app-running is the upgrade pass's to name
+    try std.testing.expectEqual(error.ChildFailed, spawn.exitError(3));
     try std.testing.expectEqualStrings("database is newer than this malt — upgrade malt", failReason(error.DatabaseNewerThanMalt));
     try std.testing.expectEqualStrings("ChildFailed", failReason(error.ChildFailed));
     try std.testing.expectEqualStrings("ReadFailed", failReason(error.ReadFailed));

@@ -50,7 +50,19 @@ run_with_timeout() {
   ' "$secs" "$@"
 }
 
-run_with_timeout 15 "$root/scripts/test/tui_pty_timing_test.sh"
+trc=0
+run_with_timeout 15 "$root/scripts/test/tui_pty_timing_test.sh" || trc=$?
+case "$trc" in
+0 | 2) ;; # 2 = no pty tooling; the e2e below hits the same skip and its CI rule
+124)
+  echo "FAIL: pty timing check timed out" >&2
+  exit 1
+  ;;
+*)
+  echo "FAIL: pty timing check failed (reason above)" >&2
+  exit 1
+  ;;
+esac
 
 cd "$root"
 zig build >/dev/null

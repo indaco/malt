@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Regression: uninstalling a cask whose app is still running used
-# to abort with the opaque `UninstallFailed`. The cask installer now refuses
-# with a distinct `AppRunning` error, the CLI prints "the app is running. Quit
-# it and try again." and exits with a dedicated code, and the TUI maps that code
-# to a named footer instead of "ChildFailed".
+# Regression: a cask whose app is still running.
+# - Uninstall used to abort with the opaque `UninstallFailed`. The cask
+#   installer now refuses with a distinct `AppRunning` error.
+# - Upgrade used to refuse the running app. Core and tap upgrades now replace
+#   the bundle while its process keeps running.
 #
 # The detection needs a live process whose command line carries the bundle path
 # (so `pgrep -f` matches), which no plain CLI invocation sets up in isolation.
-# The guard is therefore a colocated integration test that stages a live process
-# and asserts `uninstall` returns `AppRunning`. This script builds the test
-# binary and judges that test by name; it exits non-zero if the guard regresses
-# or the test goes missing.
+# The guards are therefore integration tests that stage a live process. This
+# script builds the test binaries and judges each test by its full name; it
+# exits non-zero if a guard regresses or a test goes missing.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
 # No network required; finishes well under 30s once built.
@@ -55,19 +54,23 @@ FILTERS=(
   "upgrade replaces a running app and runs its stored steps"
   "a tap-routed upgrade replaces a running app and runs its stored steps"
 )
+# Match whole names: the core title is a substring of the tap title.
 for filter in "${FILTERS[@]}"; do
-  grep -Fqs -- "$filter" "$ROOT/tests/cask_flight_steps_test.zig" || {
+  grep -Fqs -- "test \"$filter\"" "$ROOT/tests/cask_flight_steps_test.zig" || {
     echo "FAIL: missing running-app upgrade test: $filter" >&2
     exit 1
   }
 done
 BIN="$ROOT/zig-out/test-bin/cask_flight_steps_test"
 if [[ ! -x "$BIN" ]]; then
-  (cd "$ROOT" && zig build test-bin -Doptimize=safe >/dev/null 2>&1) || exit 1
+  (cd "$ROOT" && zig build test-bin -Doptimize=safe >/dev/null 2>&1) || {
+    echo "FAIL: could not build the test binary (zig build test-bin)" >&2
+    exit 1
+  }
 fi
 OUT=$("$BIN" 2>&1 || true)
 for filter in "${FILTERS[@]}"; do
-  LINE=$(printf '%s\n' "$OUT" | grep -F -- "$filter" || true)
+  LINE=$(printf '%s\n' "$OUT" | grep -F -- ".test.$filter..." || true)
   if [[ "$LINE" != *OK ]]; then
     echo "FAIL: running-app upgrade test did not pass: $filter" >&2
     exit 1
