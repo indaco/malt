@@ -478,7 +478,8 @@ const max_link_depth: u8 = 16;
 /// Visit every *dangling* symlink under the prefix's linkable dirs, recursing
 /// into nested directories the way `link` creates them. Keyed off
 /// `linkable_dirs`, so what the sweep inspects cannot drift from what the
-/// linker writes. `visit` receives the open containing dir, that dir's
+/// linker writes. The direct links in `opt/` are added on purpose: linkOpt
+/// makes them. `visit` receives the open containing dir, that dir's
 /// prefix-relative path, and the entry name, so `<subdir>/<name>` is the full
 /// path while `dir.deleteFile(name)` still resolves.
 pub fn forEachBrokenLink(
@@ -490,6 +491,9 @@ pub fn forEachBrokenLink(
     for (Linker.linkable_dirs) |subdir| {
         walkLinkDir(io, prefix, subdir, 0, context, visit);
     }
+    // linkOpt makes these, not link(). Start at the depth cap so only direct
+    // links are visited: a real dir in `opt/` is not ours to walk.
+    walkLinkDir(io, prefix, "opt", max_link_depth - 1, context, visit);
 }
 
 fn walkLinkDir(
@@ -535,6 +539,45 @@ test "the broken-link sweep covers every dir the linker writes into" {
     }
     try testing.expect(has_etc);
     try testing.expectEqual(@as(usize, 6), swept.len);
+}
+
+test "the broken-link sweep reports a dangling opt link, not a live one or a nested one" {
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try std.mem.print(&base_buf, "/tmp/mt_linker_optsweep_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    var live_buf: [160]u8 = undefined;
+    const live_target = try std.mem.print(&live_buf, "{s}/real", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, live_target);
+    var opt_buf: [160]u8 = undefined;
+    const opt = try std.mem.print(&opt_buf, "{s}/opt", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, opt);
+
+    var link_buf: [160]u8 = undefined;
+    try std.Io.Dir.symLinkAbsolute(io, "/malt-test-target-that-does-not-exist", try std.mem.print(&link_buf, "{s}/gone", .{opt}), .{});
+    try std.Io.Dir.symLinkAbsolute(io, live_target, try std.mem.print(&link_buf, "{s}/live", .{opt}), .{});
+
+    const Seen = struct {
+        gone: u32 = 0,
+        other: u32 = 0,
+        fn visit(self: *@This(), _: std.Io.Dir, subdir: []const u8, name: []const u8) void {
+            if (std.mem.eql(u8, subdir, "opt") and std.mem.eql(u8, name, "gone")) {
+                self.gone += 1;
+            } else self.other += 1;
+        }
+    };
+    // A dangling link inside a real dir under `opt/` is not ours to remove.
+    var nested_buf: [160]u8 = undefined;
+    const nested = try std.mem.print(&nested_buf, "{s}/stray", .{opt});
+    try std.Io.Dir.cwd().createDirPath(io, nested);
+    try std.Io.Dir.symLinkAbsolute(io, "/malt-test-target-that-does-not-exist", try std.mem.print(&link_buf, "{s}/dead", .{nested}), .{});
+
+    var seen: Seen = .{};
+    forEachBrokenLink(io, base, &seen, Seen.visit);
+    try testing.expectEqual(@as(u32, 1), seen.gone);
+    try testing.expectEqual(@as(u32, 0), seen.other);
 }
 
 test "isUnderKeg: only a '/' after the keg path counts as inside it" {
