@@ -1370,13 +1370,6 @@ fn parseRoutedCaskRb(body: []const u8, token: []const u8, tap_label: []const u8)
     return rb_info;
 }
 
-/// The installer refuses to remove a live app, but only once its turn
-/// comes; the stored phases run before that and must not start at all.
-fn caskAppRunning(ctx: *const AppCtx, app_path: ?[]const u8) bool {
-    const p = app_path orelse return false;
-    return cask_mod.CaskInstaller.isAppRunningPub(ctx.io, p);
-}
-
 /// Upgrade a cask whose owning tap is known. Fetches the tap's
 /// `Casks/<token>.rb` once to read the new version, short-circuits when
 /// the cask is already at that version, and otherwise drives the same
@@ -1518,6 +1511,7 @@ fn upgradeRoutedTapCask(
     installer.prefetched_artifact = prefetched;
     // Keep the old version reachable: a failed install below puts it back.
     installer.retain_history = true;
+    installer.allow_running_app = true;
     // The outgoing version's own uninstall steps, read before its row goes;
     // the incoming version's phases run inside `installTapCask`.
     var flight = post_install_mod.Flight.init(allocator);
@@ -1530,17 +1524,6 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
-    // Same ordering as the core-API path: refuse before a stored step acts.
-    const row = cask_mod.lookupInstalledChecked(db, token) catch |e| {
-        db.rollback();
-        output.err("Could not read the package database for cask {s}: {s}", .{ token, cask_mod.lookupDetail(e, db) });
-        return error.Aborted;
-    };
-    if (caskAppRunning(ctx, if (row) |*r| r.appPath() else null)) {
-        db.rollback();
-        output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
-        return error.AppRunning;
-    }
     if (stored) |*s| if (!flight.runPhase(&installer, token, installed_version, s.get(.uninstall_preflight), .uninstall_preflight, install_sink_mod.terminal)) {
         db.rollback();
         return error.Aborted;
@@ -1957,6 +1940,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
     installer.retain_history = true;
+    installer.allow_running_app = true;
     var flight = post_install_mod.Flight.init(allocator);
     defer flight.deinit();
     installer.flight = flight.sink();
@@ -1989,14 +1973,6 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
-    // Before any stored step runs: the phases below mutate on the old
-    // version's behalf, and the installer's own refusal comes too late to
-    // undo them.
-    if (caskAppRunning(ctx, installed.appPath())) {
-        db.rollback();
-        output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
-        return error.AppRunning;
-    }
     if (stored) |*s| if (!flight.runPhase(&installer, token, old_version, s.get(.uninstall_preflight), .uninstall_preflight, install_sink_mod.terminal)) {
         db.rollback();
         return error.Aborted;

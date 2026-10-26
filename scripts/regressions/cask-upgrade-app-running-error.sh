@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression: upgrading (or uninstalling) a cask whose app is still running used
+# Regression: uninstalling a cask whose app is still running used
 # to abort with the opaque `UninstallFailed`. The cask installer now refuses
 # with a distinct `AppRunning` error, the CLI prints "the app is running. Quit
 # it and try again." and exits with a dedicated code, and the TUI maps that code
@@ -49,3 +49,28 @@ if [[ "$LINE" != *OK ]]; then
 fi
 
 echo "PASS: a live cask app is refused with a distinct AppRunning error"
+
+# Upgrades replace the bundle while its process keeps running, on both routes.
+FILTERS=(
+  "upgrade replaces a running app and runs its stored steps"
+  "a tap-routed upgrade replaces a running app and runs its stored steps"
+)
+for filter in "${FILTERS[@]}"; do
+  grep -Fqs -- "$filter" "$ROOT/tests/cask_flight_steps_test.zig" || {
+    echo "FAIL: missing running-app upgrade test: $filter" >&2
+    exit 1
+  }
+done
+BIN="$ROOT/zig-out/test-bin/cask_flight_steps_test"
+if [[ ! -x "$BIN" ]]; then
+  (cd "$ROOT" && zig build test-bin -Doptimize=safe >/dev/null 2>&1) || exit 1
+fi
+OUT=$("$BIN" 2>&1 || true)
+for filter in "${FILTERS[@]}"; do
+  LINE=$(printf '%s\n' "$OUT" | grep -F -- "$filter" || true)
+  if [[ "$LINE" != *OK ]]; then
+    echo "FAIL: running-app upgrade test did not pass: $filter" >&2
+    exit 1
+  fi
+done
+echo "PASS: core and tap casks upgrade while their app keeps running"

@@ -965,7 +965,7 @@ test "upgrade runs the outgoing version's uninstall steps and the new version's 
     try testing.expect(!linkExists(io, fx.p("lib/libplain.1.dylib")));
 }
 
-test "upgrade refuses a running app before any stored step can act" {
+test "upgrade replaces a running app and runs its stored steps" {
     var fx = try Fixture.init("upgrade_running");
     defer fx.deinit();
     _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
@@ -1012,18 +1012,25 @@ test "upgrade refuses a running app before any stored step can act" {
     var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/tail", "-f", exe }, .stdout = .ignore, .stderr = .ignore });
     defer child.kill(io); // kill also reaps
 
+    var tries: usize = 0;
+    while (tries < 300 and !cask.CaskInstaller.isAppRunningPub(io, old_app)) : (tries += 1) {}
+    try testing.expect(cask.CaskInstaller.isAppRunningPub(io, old_app));
+
     const prior_quiet = malt.output.isQuiet();
     malt.output.setQuiet(true);
     defer malt.output.setQuiet(prior_quiet);
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
-    try testing.expectError(error.AppRunning, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "live" }));
+    try malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "live" });
 
-    // Refused before the stored phases: the link and the row are as they were.
-    try testing.expect(linkExists(io, fx.p("lib/liblive.1.dylib")));
-    try testing.expect(!exists(io, fx.h("Library/live.pre")));
+    try testing.expect(cask.CaskInstaller.isAppRunningPub(io, old_app));
+    try testing.expect(!linkExists(io, fx.p("lib/liblive.1.dylib")));
+    try testing.expect(exists(io, fx.h("Library/live.pre")));
+    const placed = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Live.app/Contents/MacOS/bin"), 64);
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings("2.0", placed);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expectEqualStrings("1.0", (try cask.lookupInstalledChecked(&db, "live")).?.version());
+    try testing.expectEqualStrings("2.0", (try cask.lookupInstalledChecked(&db, "live")).?.version());
 }
 
 test "uninstall --dry-run runs no stored step; the real run drops the declared symlink" {
@@ -1215,13 +1222,24 @@ const plain_rb =
     \\end
 ;
 
-test "a tap-routed upgrade runs the outgoing version's stored steps around the swap" {
+test "a tap-routed upgrade replaces a running app and runs its stored steps" {
     const rig = try TapUpgradeRig.init("tap_upgrade", plain_rb, "Plain.app");
     defer rig.deinit();
     const io = rig.io();
     var fx = &rig.fx;
     _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
     defer _ = test_io.c.unsetenv("MALT_PREFIX");
+
+    const old_app = fx.p("Applications/Plain.app");
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/tail", "-f", fx.p("Applications/Plain.app/Contents/MacOS/bin") },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+    var tries: usize = 0;
+    while (tries < 300 and !cask.CaskInstaller.isAppRunningPub(io, old_app)) : (tries += 1) {}
+    try testing.expect(cask.CaskInstaller.isAppRunningPub(io, old_app));
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
@@ -1238,6 +1256,7 @@ test "a tap-routed upgrade runs the outgoing version's stored steps around the s
         return e;
     };
 
+    try testing.expect(cask.CaskInstaller.isAppRunningPub(io, old_app));
     const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.gone"), 64);
     defer testing.allocator.free(gone);
     try testing.expectEqualStrings("1.0", gone);

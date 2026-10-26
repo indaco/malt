@@ -50,6 +50,8 @@ run_with_timeout() {
   ' "$secs" "$@"
 }
 
+run_with_timeout 15 "$root/scripts/test/tui_pty_timing_test.sh"
+
 cd "$root"
 zig build >/dev/null
 rc=0

@@ -101,7 +101,7 @@ sub send_bytes {
       my $r = sysread($pty, $buf, 65536);
       last if defined $r && $r == 0;    # EOF
       print $cap $buf if $r;
-    } else {
+    } elsif (length $data) {
       sleep 0.01;
     }
   }

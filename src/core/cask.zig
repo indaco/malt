@@ -864,6 +864,8 @@ pub const CaskInstaller = struct {
     /// and cached artefacts stay, so a failed install can put the old
     /// version back and `mt rollback` can still reach it afterwards.
     retain_history: bool = false,
+    /// Upgrades replace the bundle without requiring its process to stop.
+    allow_running_app: bool = false,
     /// Where declared flight steps report. Null skips them, so callers that
     /// only stage or roll back are unaffected.
     flight: ?FlightSink = null,
@@ -1229,9 +1231,7 @@ pub const CaskInstaller = struct {
                 // manifest itself.
                 self.removeManifestedPaths(app_path);
             } else {
-                // Refuse while the app is live: removing the old bundle would
-                // yank a running app. Distinct error so the caller can say so.
-                if (isAppRunning(self.io, app_path)) return CaskError.AppRunning;
+                if (!self.allow_running_app and isAppRunning(self.io, app_path)) return CaskError.AppRunning;
 
                 // The links this cask placed, while their targets still
                 // resolve; the manifest goes with the Caskroom wipe below.
