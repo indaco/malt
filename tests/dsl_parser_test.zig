@@ -1504,3 +1504,26 @@ test "parser: corpus AST snapshot pins every primary form" {
         try testing.expectEqualStrings(c.want, aw.buffered());
     }
 }
+
+test "parser: a post_install body mixing arithmetic and negative numbers parses whole" {
+    var arena = testArena();
+    defer arena.deinit();
+    const src =
+        \\major = v.major + 1
+        \\offset = -1
+        \\size = 2 * 3 - 1
+        \\flags = [-1, 2]
+        \\opoo "x" if major < 1 + 2
+        \\y = a -1
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 6), nodes.len);
+}
+
+test "parser: a dangling operator is a parse error" {
+    var arena = testArena();
+    defer arena.deinit();
+    try testing.expectError(error.ParseError, parseSource(&arena, "x = 1 +"));
+    try testing.expectError(error.ParseError, parseSource(&arena, "x = 2 *"));
+    try testing.expectError(error.ParseError, parseSource(&arena, "x = -"));
+}

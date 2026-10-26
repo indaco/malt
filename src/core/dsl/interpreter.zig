@@ -332,6 +332,22 @@ pub const Interpreter = struct {
                 return Value{ .bool = compare(receiver_val, mc.method, args_slice[0]) };
             }
 
+            // Arithmetic runs before builtin dispatch: `+` is registered as a
+            // string builtin that would turn `1 + 2` into "12".
+            if (mc.blk == null and mc.block_pass == null and args_slice.len == 1 and isArithmeticOp(mc.method)) {
+                const result = arithmetic(receiver_val, mc.method, args_slice[0]) catch {
+                    // Logged, so the router does not count the statement as handled.
+                    self.ctx.fallback_log_writer.log(.{
+                        .formula = self.ctx.formula_name,
+                        .reason = .unsupported_node,
+                        .detail = "arithmetic on unsupported operands",
+                        .loc = loc,
+                    });
+                    return DslError.UnsupportedNode;
+                };
+                if (result) |v| return v;
+            }
+
             // Handle .select { |x| ... } and .map { |x| ... } on arrays
             if (receiver_val == .array and mc.blk != null) {
                 if (std.mem.eql(u8, mc.method, "select")) {
@@ -897,6 +913,45 @@ fn isComparisonOp(method: []const u8) bool {
     return false;
 }
 
+fn isArithmeticOp(method: []const u8) bool {
+    return std.mem.eql(u8, method, "+") or std.mem.eql(u8, method, "-") or std.mem.eql(u8, method, "*");
+}
+
+fn isStringLike(v: Value) bool {
+    return v == .string or v == .pathname;
+}
+
+fn asFloat(v: Value) ?f64 {
+    return switch (v) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => null,
+    };
+}
+
+/// `+`, `-`, `*`. Null means string `+`: the caller uses the concat builtin.
+/// Overflow and mixed kinds are unsupported, so the formula degrades.
+fn arithmetic(left: Value, op: []const u8, right: Value) DslError!?Value {
+    if (op[0] == '+' and isStringLike(left) and isStringLike(right)) return null;
+    if (left == .int and right == .int) {
+        const a = left.int;
+        const b = right.int;
+        const r = switch (op[0]) {
+            '+' => std.math.add(i64, a, b),
+            '-' => std.math.sub(i64, a, b),
+            else => std.math.mul(i64, a, b),
+        } catch return DslError.UnsupportedNode;
+        return Value{ .int = r };
+    }
+    const a = asFloat(left) orelse return DslError.UnsupportedNode;
+    const b = asFloat(right) orelse return DslError.UnsupportedNode;
+    return Value{ .float = switch (op[0]) {
+        '+' => a + b,
+        '-' => a - b,
+        else => a * b,
+    } };
+}
+
 /// Evaluate `left OP right`, degrading to `false` for cross-type or
 /// nil-operand cases so a logical guard (`unless x < 1`) doesn't crash.
 /// Matches Ruby's int/int and string/string total orders for equal types.
@@ -1028,4 +1083,58 @@ test "interpreter: self-recursive method hits the call-depth guard and degrades"
         if (std.mem.find(u8, e.detail, "recursion limit") != null) found = true;
     }
     try std.testing.expect(found);
+}
+
+fn evalSource(alloc: std.mem.Allocator, src: []const u8) !Value {
+    var flog = FallbackLog.init(alloc);
+    defer flog.deinit();
+    var ctx = try ExecContext.init(alloc, std.Options.debug_io, .empty, .{
+        .name = "t",
+        .version = "1",
+        .pkg_version = "1",
+    }, "/tmp/malt-arith-guard", &flog);
+    defer ctx.deinit();
+    var lex = lexer_mod.Lexer.init(src);
+    var p = parser_mod.Parser.init(alloc, &lex);
+    const nodes = try p.parseBlock();
+    var interp = Interpreter.init(&ctx);
+    return interp.eval(nodes[0]);
+}
+
+// If only the parser were fixed, `+` would reach string.concat and
+// `1 + 2` would be "12".
+test "interpreter: integer + integer is arithmetic, never string concat" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try std.testing.expectEqual(@as(i64, 3), (try evalSource(alloc, "1 + 2")).int);
+    try std.testing.expectEqual(@as(i64, -1), (try evalSource(alloc, "1 - 2")).int);
+    try std.testing.expectEqual(@as(i64, 6), (try evalSource(alloc, "2 * 3")).int);
+    try std.testing.expectEqual(@as(i64, 7), (try evalSource(alloc, "1 + 2 * 3")).int);
+    try std.testing.expectEqual(@as(i64, 15), (try evalSource(alloc, "\"14.2\".major + 1")).int);
+    try std.testing.expectEqual(@as(i64, 13), (try evalSource(alloc, "\"14.2\".major - 1")).int);
+    try std.testing.expectEqual(@as(f64, 3.5), (try evalSource(alloc, "1 + 2.5")).float);
+    try std.testing.expectEqual(@as(f64, 0.5), (try evalSource(alloc, "2.5 - 2")).float);
+    try std.testing.expectEqualStrings("ab", (try evalSource(alloc, "\"a\" + \"b\"")).string);
+    try std.testing.expectEqual(@as(i64, -1), (try evalSource(alloc, "[-1]")).array[0].int);
+}
+
+test "interpreter: arithmetic on unsupported operands degrades" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const bad = [_][]const u8{
+        "9223372036854775807 + 1",
+        "-9223372036854775807 - 2",
+        "9223372036854775807 * 2",
+        "1 + \"a\"",
+        "\"a\" - \"b\"",
+        "nil + 1",
+        "[1] + [2]",
+    };
+    for (bad) |src| {
+        try std.testing.expectError(DslError.UnsupportedNode, evalSource(alloc, src));
+    }
 }

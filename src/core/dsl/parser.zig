@@ -296,15 +296,46 @@ pub const Parser = struct {
         });
     }
 
-    /// Top of the chain precedence stack — shovel `<<` is Ruby's lowest
-    /// chain operator, so it consumes fully-formed tight chains on both
-    /// sides. Split out so `arr << share/"x"` parses as `arr << (share/"x")`.
-    fn parseMethodChain(self: *Parser) DslError!*const Node {
+    /// `a + b` / `a - b`. Binds tighter than `<<`, so `arr << x + 1` shovels
+    /// the sum.
+    fn parseAdditive(self: *Parser) DslError!*const Node {
+        var node = try self.parseMultiplicative();
+        while (true) {
+            const op: []const u8 = switch (self.current.kind) {
+                .plus => "+",
+                .minus => "-",
+                else => break,
+            };
+            const loc = self.currentLoc();
+            self.advanceToken();
+            const right = try self.parseMultiplicative();
+            node = try self.buildBinaryCall(node, op, right, loc);
+        }
+        return node;
+    }
+
+    /// `a * b`. `/` stays a path join in `parseTightChain`, so there is no
+    /// integer division.
+    fn parseMultiplicative(self: *Parser) DslError!*const Node {
         var node = try self.parseTightChain();
+        while (self.current.kind == .star) {
+            const loc = self.currentLoc();
+            self.advanceToken();
+            const right = try self.parseTightChain();
+            node = try self.buildBinaryCall(node, "*", right, loc);
+        }
+        return node;
+    }
+
+    /// Top of the chain precedence stack — shovel `<<` is Ruby's lowest
+    /// chain operator, so it consumes fully-formed additive expressions on
+    /// both sides. Split out so `arr << share/"x"` parses as `arr << (share/"x")`.
+    fn parseMethodChain(self: *Parser) DslError!*const Node {
+        var node = try self.parseAdditive();
         while (self.current.kind == .less_less) {
             const loc = self.currentLoc();
             self.advanceToken(); // consume <<
-            const right = try self.parseTightChain();
+            const right = try self.parseAdditive();
             const args = self.allocator.alloc(*const Node, 1) catch return DslError.OutOfMemory;
             args[0] = right;
             node = self.allocNode(.{
@@ -370,8 +401,9 @@ pub const Parser = struct {
         var block_pass: ?*const Node = null;
         if (self.current.kind == .lparen) {
             try self.parseParenArgList(&args, &block_pass);
-        } else if (self.currentLooksLikeBareArg()) {
+        } else if (self.currentLooksLikeBareArg() and self.current.kind != .minus) {
             // Bare arguments (no parens) — common for ohai, system, etc.
+            // `.minus` is excluded: after a receiver call it is subtraction.
             try self.parseBareArgList(&args, &block_pass);
         }
 
@@ -556,8 +588,29 @@ pub const Parser = struct {
             .lbracket => self.parseArrayLit(),
             .lbrace => self.parseHashLit(),
             .lparen => self.parseParenExpr(),
+            .minus => self.parseNegativeLiteral(),
             else => self.emitError("unexpected token in expression"),
         };
+    }
+
+    /// `-5` / `-2.5`. Literals only: general unary minus would need the
+    /// depth guard, and no formula needs it yet.
+    fn parseNegativeLiteral(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken(); // consume -
+        switch (self.current.kind) {
+            .integer => {
+                const val = parseIntValue(self.current.lexeme);
+                self.advanceToken();
+                return self.allocNode(.{ .loc = loc, .kind = .{ .int_literal = -val } });
+            },
+            .float_lit => {
+                const val = std.fmt.parseFloat(f64, self.current.lexeme) catch 0.0;
+                self.advanceToken();
+                return self.allocNode(.{ .loc = loc, .kind = .{ .float_literal = -val } });
+            },
+            else => return self.emitError("unexpected token in expression"),
+        }
     }
 
     fn parseDoubleQuotedString(self: *Parser) DslError!*const Node {
@@ -1696,4 +1749,86 @@ test "parser: an escaped \\#{ stays literal and never interpolates" {
     const closed = try p.parseStringInterpolation("\\#{x}", loc);
     try std.testing.expectEqual(@as(usize, 1), closed.len);
     try std.testing.expectEqualStrings("\\#{x}", closed[0].literal);
+}
+
+fn parseOne(alloc: std.mem.Allocator, src: []const u8) !*const Node {
+    var lex = Lexer.init(src);
+    var p = Parser.init(alloc, &lex);
+    const nodes = try p.parseBlock();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    return nodes[0];
+}
+
+fn expectBinary(node: *const Node, op: []const u8) !ast.MethodCall {
+    try std.testing.expect(node.kind == .method_call);
+    try std.testing.expectEqualStrings(op, node.kind.method_call.method);
+    try std.testing.expectEqual(@as(usize, 1), node.kind.method_call.args.len);
+    return node.kind.method_call;
+}
+
+// Without these levels `1 + 2` ended the statement at `1` and the stray `+`
+// failed the next one, so the whole body fell back to system Ruby.
+test "parser: arithmetic operators and negative literals parse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ok = [_][]const u8{
+        "x = 1 + 2",       "x = \"a\" + \"b\"", "x = y - 1",
+        "x = 2 * 3",       "x = -5",            "x = [-1]",
+        "x = v.major + 1", "x = -2.5",
+    };
+    for (ok) |src| _ = try parseOne(alloc, src);
+
+    // `*` binds tighter than `+`.
+    const mixed = try expectBinary(try parseOne(alloc, "1 + 2 * 3"), "+");
+    try std.testing.expectEqual(@as(i64, 1), mixed.receiver.?.kind.int_literal);
+    _ = try expectBinary(mixed.args[0], "*");
+
+    // Left-associative: `(a - b) - c`.
+    const chain = try expectBinary(try parseOne(alloc, "a - b - c"), "-");
+    _ = try expectBinary(chain.receiver.?, "-");
+
+    // `+` binds tighter than `<<` and `<`.
+    const shovel = try expectBinary(try parseOne(alloc, "arr << x + 1"), "<<");
+    _ = try expectBinary(shovel.args[0], "+");
+    const less = try expectBinary(try parseOne(alloc, "1 + 2 < 4"), "<");
+    _ = try expectBinary(less.receiver.?, "+");
+
+    // `/` stays a path join, not division.
+    const join = try expectBinary(try parseOne(alloc, "1 + a/b"), "+");
+    try std.testing.expect(join.args[0].kind == .path_join);
+
+    // Negative literals fold into one node.
+    const neg = try parseOne(alloc, "-5");
+    try std.testing.expectEqual(@as(i64, -5), neg.kind.int_literal);
+    const negf = try parseOne(alloc, "-2.5");
+    try std.testing.expectEqual(@as(f64, -2.5), negf.kind.float_literal);
+}
+
+test "parser: unary minus on a non-literal is still a parse error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lex = Lexer.init("x = -y");
+    var p = Parser.init(arena.allocator(), &lex);
+    try std.testing.expectError(DslError.ParseError, p.parseBlock());
+}
+
+// `.minus` opens a bare argument for paren-less calls, so `v.major - 1` was
+// read as `v.major(-1)`: a silent wrong answer, not an error.
+test "parser: a dotted call followed by minus is subtraction, not a bare argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cases = [_]struct { src: []const u8, op: []const u8 }{
+        .{ .src = "v.major - 1", .op = "-" },
+        .{ .src = "v.major + 1", .op = "+" },
+        .{ .src = "a.b - c.d", .op = "-" },
+    };
+    for (cases) |c| {
+        const bin = try expectBinary(try parseOne(alloc, c.src), c.op);
+        const call = bin.receiver.?.kind.method_call;
+        try std.testing.expectEqual(@as(usize, 0), call.args.len);
+    }
 }

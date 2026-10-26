@@ -3296,3 +3296,45 @@ test "interpreter: ln_s with a relative target links instead of aborting" {
     // Resolves through to the real file, so the keg is actually usable.
     try test_io.cwd().access(std.Options.debug_io, link, .{});
 }
+
+// ---------------------------------------------------------------------------
+// Arithmetic operators and negative literals reach native execution.
+// ---------------------------------------------------------------------------
+
+test "interpreter: arithmetic and negative literals evaluate natively in a body" {
+    var arena = testArena();
+    defer arena.deinit();
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
+
+    const src =
+        \\odie "1+2" unless 1 + 2 == 3
+        \\odie "a+b" unless "a" + "b" == "ab"
+        \\odie "major+1" unless "14.2".major + 1 == 15
+        \\odie "neg" unless -5 + 5 == 0
+        \\odie "prec" unless 1 + 2 * 3 == 7
+        \\odie "left" unless 10 - 3 - 2 == 5
+        \\odie "cmp" unless 1 + 2 < 4
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: overflowing or mixed-kind arithmetic is logged, not guessed" {
+    var arena = testArena();
+    defer arena.deinit();
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
+
+    var flog = dsl.FallbackLog.init(arena.allocator());
+    defer flog.deinit();
+    try runSnippetInto(&arena, "x = 9223372036854775807 + 1\ny = 1 + \"a\"", prefix, &flog);
+
+    var unsupported: usize = 0;
+    for (flog.entries()) |e| {
+        if (e.reason == .unsupported_node) unsupported += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), unsupported);
+}
