@@ -277,28 +277,6 @@ test "tapCaskArtifactKind: tar.gz formula archives stay on the keg path" {
     try testing.expect(install_rb_parse.tapCaskArtifactKind("https://example.com/tool.tar.xz", false) == null);
 }
 
-// ─── interpolateVersion ──────────────────────────────────────────────
-
-test "interpolateVersion substitutes #{version} once in the URL" {
-    var buf: [256]u8 = undefined;
-    const got = install_args.interpolateVersion(&buf, "https://example.com/v#{version}/foo-#{version}.tar.gz", "1.2.3");
-    // Only the first occurrence is replaced (matches the tap-install contract).
-    try testing.expect(std.mem.find(u8, got, "1.2.3") != null);
-}
-
-test "interpolateVersion passes through an URL without the needle" {
-    var buf: [256]u8 = undefined;
-    const got = install_args.interpolateVersion(&buf, "https://example.com/foo.tar.gz", "1.2.3");
-    try testing.expectEqualStrings("https://example.com/foo.tar.gz", got);
-}
-
-test "interpolateVersion falls back to the raw URL when the buffer is too small" {
-    var buf: [8]u8 = undefined;
-    const url = "https://example.com/v#{version}/foo.tar.gz";
-    const got = install_args.interpolateVersion(&buf, url, "1.2.3");
-    try testing.expectEqualStrings(url, got);
-}
-
 // ─── interpolateUrl ──────────────────────────────────────────────────
 
 test "interpolateUrl substitutes #{version} and #{arch} together" {

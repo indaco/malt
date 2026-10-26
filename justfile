@@ -54,6 +54,7 @@ regressions-static:
     @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh
     @./scripts/test/bench_release_resolution_test.sh
     @./scripts/regressions/test-runs-ignore-inherited-malt-cache.sh
+    @./scripts/regressions/single-url-interpolator-interpolate-version-is-dead-production-code.sh
 
 # Run unit tests + cheap static regression guards.
 [group('test')]
