@@ -11,7 +11,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 args="$root/src/cli/install/args.zig"
 fail=0
 
-if hits=$(rg -n 'fn interpolateVersion\b' "$root/src" "$root/tests"); then
+# grep, not rg: the Lint runner has no ripgrep, and a missing tool must not
+# read as "no hits".
+if hits=$(grep -rnE 'fn interpolateVersion\b' "$root/src" "$root/tests"); then
   echo "FAIL: dead interpolateVersion is back:" >&2
   echo "$hits" >&2
   fail=1
@@ -19,14 +21,14 @@ fi
 
 # One needle definition in args.zig == one interpolator. rb_parse.zig keeps
 # its own needle for validation only; it does not expand.
-n=$(rg -c -F '"#" ++ "{version}"' "$args" || true)
+n=$(grep -cF '"#" ++ "{version}"' "$args" || true)
 if [ "${n:-0}" -ne 1 ]; then
   echo "FAIL: expected 1 #{version} needle in args.zig, found ${n:-0}:" >&2
-  rg -n -F '"#" ++ "{version}"' "$args" >&2 || true
+  grep -nF '"#" ++ "{version}"' "$args" >&2 || true
   fail=1
 fi
 
-rg -q 'pub fn interpolateUrl\(' "$args" ||
+grep -qE 'pub fn interpolateUrl\(' "$args" ||
   {
     echo "FAIL: interpolateUrl missing from args.zig" >&2
     fail=1
