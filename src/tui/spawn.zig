@@ -16,7 +16,7 @@ const term = @import("term.zig");
 pub const SpawnError = error{ SpawnFailed, WaitFailed, ChildFailed, DatabaseNewerThanMalt };
 
 /// `main`'s exit for a DB newer than this malt — the mt→TUI process contract,
-/// like the doctor severity cap and the cask app-running code.
+/// like the doctor severity cap.
 pub const schema_too_new_exit: u8 = 4;
 
 /// The one refusal a read can hit that the user must act on keeps its name.
@@ -350,8 +350,7 @@ const StatusBody = struct {
 
 /// Like `runInlineReenter`, but return the child's exit code (0 = success)
 /// rather than mapping every non-zero to `ChildFailed`, so the caller can
-/// branch on a specific code — e.g. the cask "app is running" refusal — for a
-/// precise footer. Re-enters the dashboard regardless; only a terminal re-enter
+/// branch on a specific code for a precise footer. Re-enters the dashboard regardless; only a terminal re-enter
 /// fault (or a spawn/signal fault) surfaces as an error.
 pub fn runInlineReenterStatus(t: *term.Term, argv: []const []const u8) InlineError!u8 {
     return aroundReenter(TermCtrl{ .t = t }, StatusBody{ .io = t.io, .argv = argv });
