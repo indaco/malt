@@ -171,19 +171,6 @@ pub fn isAllowedArchiveUrl(url: []const u8) bool {
     return true;
 }
 
-/// Interpolate `#{version}` inside a URL. Falls back to the raw URL if
-/// the buffer is too small (bufPrint error) — the caller's SHA check
-/// will then fail fast if the server serves a different asset.
-pub fn interpolateVersion(buf: []u8, url: []const u8, version: []const u8) []const u8 {
-    const version_needle = "#" ++ "{version}";
-    if (std.mem.find(u8, url, version_needle)) |pos| {
-        const before = url[0..pos];
-        const after = url[pos + version_needle.len ..];
-        return std.mem.print(buf, "{s}{s}{s}", .{ before, version, after }) catch url;
-    }
-    return url;
-}
-
 /// Interpolate both `#{version}` and `#{arch}` inside a URL. The arch
 /// substitution is what cask DSL multi-arch downloads need — without
 /// it, the SHA-verified fetch would 404 because the server never sees
