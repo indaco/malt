@@ -955,6 +955,7 @@ fn upgradeFormula(
     service_mod.register(ctx.io, ctx.environ, allocator, db, &formula, prefix, install_sink_mod.terminal);
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
+    if (formula.caveats) |text| install_mod.printCaveats(allocator, prefix, name, text, install_sink_mod.terminal);
     return .upgraded;
 }
 
