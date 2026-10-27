@@ -130,6 +130,8 @@ pub const ResolvedRubyFormula = struct {
     /// The label of the plist a `name`-only `service do` block says the
     /// keg carries, for `registerRuby` to lift post-commit.
     shipped_label: ?[]const u8 = null,
+    /// The `.rb` text, borrowed, for its `def caveats` after install.
+    source: []const u8 = "",
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -558,6 +560,7 @@ fn installTapRb(
         .recommended = recommended,
         .service = svc.block,
         .service_declared = svc.declared,
+        .source = resp.body,
         .shipped_label = svc.shipped_label,
         .tap_registration = .{
             .url = urls.repo_url,
@@ -723,6 +726,7 @@ pub fn installLocalFormula(
         .dependencies = deps,
         .recommended = recommended,
         .service = svc.block,
+        .source = body,
         .service_declared = svc.declared,
         .shipped_label = svc.shipped_label,
         // No tap_registration — never pollute `mt tap` with a local path.
@@ -1395,6 +1399,10 @@ pub fn materializeRubyFormula(
     service_mod.registerRuby(ctx.io, ctx.environ, allocator, db, resolved.service, resolved.service_declared, resolved.shipped_label, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
+    if (rb_parse.rubyCaveatsText(allocator, resolved.source, prefix, resolved.name) catch null) |text| {
+        defer allocator.free(text);
+        install_mod.printExpandedCaveats(resolved.name, text, sink);
+    }
 }
 
 /// Commit the keg record, repoint opt, then clean up what it replaced. Opt

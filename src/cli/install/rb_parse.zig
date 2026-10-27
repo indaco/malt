@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const cask_mod = @import("../../core/cask.zig");
+const caveats_mod = @import("../../core/caveats.zig");
 
 /// Post-parse payload shared by the tap and local-file install paths.
 /// Slices point into the caller-owned `.rb` content and must outlive
@@ -2670,4 +2671,145 @@ test "parseServiceBlock: comments on the opener and the closer still delimit the
     var buf: [max_service_args][]const u8 = undefined;
     const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqual(@as(usize, 1), got.run.len);
+}
+
+/// The body of a plain `def caveats` heredoc, as written. Anything else
+/// (inline strings, built-up text, conditionals) is left alone: the scanner
+/// cannot tell what the Ruby would print.
+fn caveatsHeredoc(rb: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, rb, '\n');
+    var in_def = false;
+    var tag: ?[]const u8 = null;
+    var body_start: usize = 0;
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (tag) |t| {
+            if (std.mem.eql(u8, line, t)) return rb[body_start .. @intFromPtr(raw.ptr) - @intFromPtr(rb.ptr)];
+            continue;
+        }
+        if (!in_def) {
+            in_def = std.mem.eql(u8, line, "def caveats");
+            continue;
+        }
+        if (line.len == 0) continue;
+        if (!std.mem.startsWith(u8, line, "<<~")) return null;
+        const id = line["<<~".len..];
+        if (id.len == 0) return null;
+        for (id) |c| if (!std.ascii.isUpper(c) and c != '_') return null;
+        tag = id;
+        body_start = @intFromPtr(lines.rest().ptr) - @intFromPtr(rb.ptr);
+    }
+    return null;
+}
+
+/// Caveat text of a tap or local `.rb`, dedented like `<<~` and with the
+/// path helpers resolved. Null when absent or unreadable; text that still
+/// holds an unresolved interpolation is dropped rather than printed raw.
+/// Caller owns the result.
+pub fn rubyCaveatsText(allocator: std.mem.Allocator, rb: []const u8, prefix: []const u8, name: []const u8) std.mem.Allocator.Error!?[]u8 {
+    const raw = caveatsHeredoc(rb) orelse return null;
+
+    var indent: usize = std.math.maxInt(usize);
+    var scan = std.mem.splitScalar(u8, raw, '\n');
+    while (scan.next()) |l| {
+        const trimmed = std.mem.trimStart(u8, l, " \t");
+        if (std.mem.trim(u8, trimmed, "\r").len == 0) continue;
+        indent = @min(indent, l.len - trimmed.len);
+    }
+    if (indent == std.math.maxInt(usize)) return null;
+
+    var dedented: std.ArrayList(u8) = .empty;
+    defer dedented.deinit(allocator);
+    scan = std.mem.splitScalar(u8, raw, '\n');
+    while (scan.next()) |l| {
+        if (l.len == 0 and scan.peek() == null) break;
+        const body = std.mem.trimEnd(u8, l, "\r");
+        try dedented.appendSlice(allocator, if (body.len >= indent) body[indent..] else std.mem.trim(u8, body, " \t"));
+        try dedented.append(allocator, '\n');
+    }
+
+    const opt = try std.fmt.allocPrint(allocator, "{s}/opt/{s}", .{ prefix, name });
+    defer allocator.free(opt);
+    const opt_bin = try std.fmt.allocPrint(allocator, "{s}/bin", .{opt});
+    defer allocator.free(opt_bin);
+    const etc = try std.fmt.allocPrint(allocator, "{s}/etc", .{prefix});
+    defer allocator.free(etc);
+    const var_dir = try std.fmt.allocPrint(allocator, "{s}/var", .{prefix});
+    defer allocator.free(var_dir);
+
+    const out = try caveats_mod.expand(allocator, dedented.items, &.{
+        .{ .token = "#{HOMEBREW_PREFIX}", .value = prefix },
+        .{ .token = "#{opt_prefix}", .value = opt },
+        .{ .token = "#{opt_bin}", .value = opt_bin },
+        .{ .token = "#{etc}", .value = etc },
+        .{ .token = "#{var}", .value = var_dir },
+    });
+    if (std.mem.find(u8, out, "#{") != null) {
+        allocator.free(out);
+        return null;
+    }
+    return out;
+}
+
+test "rubyCaveatsText reads a squiggly heredoc, dedents it and expands known paths" {
+    const src =
+        \\class Foo < Formula
+        \\  def caveats
+        \\    <<~EOS
+        \\      Add this to your shell:
+        \\        source #{opt_prefix}/share/foo.sh
+        \\
+        \\      Config lives in #{HOMEBREW_PREFIX}/etc/foo
+        \\    EOS
+        \\  end
+        \\end
+    ;
+    const got = (try rubyCaveatsText(std.testing.allocator, src, "/opt/malt", "foo")).?;
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings(
+        "Add this to your shell:\n  source /opt/malt/opt/foo/share/foo.sh\n\nConfig lives in /opt/malt/etc/foo\n",
+        got,
+    );
+}
+
+test "rubyCaveatsText yields nothing for absent, unreadable or unknown-interpolation caveats" {
+    const none = [_][]const u8{
+        "class Foo < Formula\n  url \"x\"\nend\n",
+        // Not a heredoc: the scanner cannot judge what the Ruby returns.
+        "class Foo < Formula\n  def caveats\n    \"inline\"\n  end\nend\n",
+        // A conditional body may print something else at run time.
+        "class Foo < Formula\n  def caveats\n    s = +\"\"\n    s << <<~EOS\n      x\n    EOS\n    s\n  end\nend\n",
+        // Interpolation we cannot resolve must not print as raw text.
+        "class Foo < Formula\n  def caveats\n    <<~EOS\n      see #{bin}/x and #{some_method}\n    EOS\n  end\nend\n",
+        // No closing tag.
+        "class Foo < Formula\n  def caveats\n    <<~EOS\n      never closed\n  end\nend\n",
+    };
+    for (none) |src| {
+        try std.testing.expect((try rubyCaveatsText(std.testing.allocator, src, "/opt/malt", "foo")) == null);
+    }
+}
+
+test "rubyCaveatsText drops carriage returns from a CRLF file" {
+    const src = "class Foo < Formula\r\n  def caveats\r\n    <<~EOS\r\n      one\r\n      two\r\n    EOS\r\n  end\r\nend\r\n";
+    const got = (try rubyCaveatsText(std.testing.allocator, src, "/opt/malt", "foo")).?;
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("one\ntwo\n", got);
+}
+
+test "rubyCaveatsText ignores a commented def caveats" {
+    const src = "class Foo < Formula\n  # def caveats\n  #   <<~EOS\nend\n";
+    try std.testing.expect((try rubyCaveatsText(std.testing.allocator, src, "/opt/malt", "foo")) == null);
+}
+
+test "rubyCaveatsText ignores a def caveats that only appears inside another heredoc" {
+    const src =
+        \\class Foo < Formula
+        \\  def other
+        \\    <<~EOS
+        \\      def caveats
+        \\    EOS
+        \\  end
+        \\end
+    ;
+    try std.testing.expect((try rubyCaveatsText(std.testing.allocator, src, "/opt/malt", "foo")) == null);
 }
