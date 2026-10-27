@@ -479,3 +479,17 @@ test "out-of-range stop_timeout falls back to launchd default" {
         try testing.expectEqual(@as(?u32, null), formula.service.?.stop_timeout);
     }
 }
+
+test "caveats survive parseFormula and expand against a prefix through the public API" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const json =
+        \\{"name":"openjdk","versions":{"stable":"21"},"caveats":"ln -sfn $HOMEBREW_PREFIX/opt/openjdk x\ncellar $HOMEBREW_CELLAR"}
+    ;
+    var f = try formula_mod.parseFormula(a, json);
+    defer f.deinit();
+
+    const out = try formula_mod.expandCaveats(a, f.caveats.?, "/opt/malt");
+    try testing.expectEqualStrings("ln -sfn /opt/malt/opt/openjdk x\ncellar /opt/malt/Cellar", out);
+}
