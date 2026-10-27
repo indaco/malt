@@ -2386,3 +2386,42 @@ test "install --dry-run names the resolved download for a cask" {
     // The URL is what a per-OS variation changes, so the plan must show it.
     try testing.expect(std.mem.find(u8, captured.items, "would install cask plain 2.0 (dmg) from https://example.invalid/plain.dmg") != null);
 }
+
+fn caskWithCaveats(extra: []const u8, buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "{{\"token\":\"x\",\"version\":\"1\",\"url\":\"https://e.test/x.dmg\"{s}}}",
+        .{extra},
+    );
+}
+
+test "parseCask reads caveats and maps absent, empty and non-string to none" {
+    var buf: [256]u8 = undefined;
+    const cases = [_]struct { extra: []const u8, want: ?[]const u8 }{
+        .{ .extra = ",\"caveats\":\"Open it once\"", .want = "Open it once" },
+        .{ .extra = "", .want = null },
+        .{ .extra = ",\"caveats\":\"\"", .want = null },
+        .{ .extra = ",\"caveats\":null", .want = null },
+        .{ .extra = ",\"caveats\":7", .want = null },
+    };
+    for (cases) |c| {
+        var parsed = try cask.parseCask(std.testing.allocator, try caskWithCaveats(c.extra, &buf));
+        defer parsed.deinit();
+        if (c.want) |w| {
+            try std.testing.expectEqualStrings(w, parsed.caveats.?);
+        } else {
+            try std.testing.expect(parsed.caveats == null);
+        }
+    }
+}
+
+test "expandCaveats resolves the app directory and the prefix" {
+    const got = try cask.expandCaveats(
+        std.testing.allocator,
+        "run $APPDIR/X.app, then $HOMEBREW_PREFIX/bin/x; $HOME stays",
+        "/opt/malt",
+        "/Applications",
+    );
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("run /Applications/X.app, then /opt/malt/bin/x; $HOME stays", got);
+}

@@ -57,6 +57,10 @@ grep -qF "$want" <<<"$out" || fail "install: caveats not printed"
 run info "$pkg"
 grep -qF "$want" <<<"$out" || fail "installed info: caveats not printed"
 
+# Cask: its caveats name $APPDIR, which must read as the real app folder.
+run install --cask glance-chamburr
+grep -qF "$PREFIX/Applications/Glance.app" <<<"$out" || fail "cask install: caveats missing or app dir not expanded"
+
 # Control: a formula without caveats prints no caveats header.
 run info tree
 grep -qi 'caveats' <<<"$out" && fail "caveats header printed for a formula with none"
