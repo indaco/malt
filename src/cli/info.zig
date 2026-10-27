@@ -177,8 +177,55 @@ fn emitInstalledFormula(
         try writeJsonInfo(name, &stmt, history.items, deps, stdout);
     } else {
         try writeHumanInfo(name, &stmt, history.items, stdout, colorize);
+        if (isCoreTap(stmt.columnText(2))) emitInstalledCaveats(ctx, allocator, name, prefix, stdout, colorize);
     }
     return true;
+}
+
+/// The API describes core formulae only; a tap formula of the same name
+/// would show the wrong notes.
+fn isCoreTap(tap: ?[*:0]const u8) bool {
+    const t = std.mem.sliceTo(tap orelse return true, 0);
+    return t.len == 0 or std.mem.eql(u8, t, "homebrew/core");
+}
+
+/// Caveats for an installed keg come from the API: the DB keeps no formula
+/// text. Best effort - a miss, an offline run or a bad body must not spoil
+/// the info the user already got.
+fn emitInstalledCaveats(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    prefix: []const u8,
+    stdout: *std.Io.Writer,
+    colorize: bool,
+) void {
+    if (output.isQuiet()) return;
+    const cache_dir = atomic.maltCacheDir(allocator) catch return;
+    defer allocator.free(cache_dir);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+    http.offline = ctx.offline;
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
+    api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
+    const body = api.fetchFormula(name) catch return;
+    defer allocator.free(body);
+    var buf: [4096]u8 = undefined;
+    writeCaveatsFromBody(allocator, stdout, &buf, colorize, body, prefix);
+}
+
+fn writeCaveatsFromBody(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    scratch: []u8,
+    colorize: bool,
+    body: []const u8,
+    prefix: []const u8,
+) void {
+    var f = formula_mod.parseFormula(allocator, body) catch return;
+    defer f.deinit();
+    encodeFormulaCaveats(w, allocator, scratch, colorize, false, &f, prefix) catch {};
 }
 
 /// Read an installed keg's recorded runtime dependency names from the
@@ -1034,6 +1081,29 @@ test "encodeFormulaCaveats drops a line longer than the scratch buffer and keeps
     var scratch: [8]u8 = undefined;
     try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, false, &f, "/p");
     try testing.expectEqualStrings("Caveats:      \n              ok\n", aw.written());
+}
+
+test "isCoreTap accepts core and unrecorded taps and refuses a third-party tap" {
+    try testing.expect(isCoreTap(null));
+    try testing.expect(isCoreTap(""));
+    try testing.expect(isCoreTap("homebrew/core"));
+    try testing.expect(!isCoreTap("user/repo"));
+}
+
+test "writeCaveatsFromBody prints caveats and stays silent on an unreadable body" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [512]u8 = undefined;
+
+    writeCaveatsFromBody(testing.allocator, &aw.writer, &scratch, false, "{not json", "/p");
+    try testing.expectEqualStrings("", aw.written());
+
+    writeCaveatsFromBody(testing.allocator, &aw.writer, &scratch, false, "{\"name\":\"a\",\"versions\":{\"stable\":\"1\"}}", "/p");
+    try testing.expectEqualStrings("", aw.written());
+
+    const body = "{\"name\":\"a\",\"versions\":{\"stable\":\"1\"},\"caveats\":\"see $HOMEBREW_PREFIX\"}";
+    writeCaveatsFromBody(testing.allocator, &aw.writer, &scratch, false, body, "/p");
+    try testing.expectEqualStrings("Caveats:      see /p\n", aw.written());
 }
 
 test "encodeFormulaCaveats writes nothing without caveats" {

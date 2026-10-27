@@ -53,6 +53,10 @@ grep -qF '$HOMEBREW_PREFIX' <<<"$out" && fail "info: placeholder printed literal
 run install "$pkg"
 grep -qF "$want" <<<"$out" || fail "install: caveats not printed"
 
+# Installed package: the DB keeps no formula text, so info reads the API.
+run info "$pkg"
+grep -qF "$want" <<<"$out" || fail "installed info: caveats not printed"
+
 # Control: a formula without caveats prints no caveats header.
 run info tree
 grep -qi 'caveats' <<<"$out" && fail "caveats header printed for a formula with none"
