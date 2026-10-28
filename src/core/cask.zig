@@ -3706,6 +3706,43 @@ test "variation overlay copies artifacts when the variation redefines them" {
     try std.testing.expectEqualStrings("https://e/x.dmg", c.url);
 }
 
+test "variation overlay carries the variation's own container" {
+    // The variation's download is the one installed, so its declared
+    // container must classify it, not the top level's.
+    const json =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg",
+        \\ "variations":{"arm64_sonoma":{"url":"https://e/x.zip.hash","container":{"type":"zip","nested":"P.tar.gz"}},
+        \\               "sonoma":{"url":"https://e/x.zip.hash","container":{"type":"zip","nested":"P.tar.gz"}}}}
+    ;
+    var c = try parseCaskWithMajor(std.testing.allocator, json, 14);
+    defer c.deinit();
+    try std.testing.expectEqual(ArtifactType.zip, c.artifactType());
+    try std.testing.expectEqualStrings("P.tar.gz", c.nested_container.?);
+}
+
+test "a declared container type wins over the URL suffix" {
+    // Homebrew uses the declared type. The URL can name a wrapper.
+    var c = try parseCask(std.testing.allocator,
+        \\{"token":"t","version":"1","url":"https://e/x.dmg","container":{"type":"zip"}}
+    );
+    defer c.deinit();
+    try std.testing.expectEqual(ArtifactType.zip, c.artifactType());
+}
+
+test "a null or typeless container falls back to the URL suffix" {
+    // Most API casks carry `"container": null`.
+    for ([_][]const u8{
+        \\{"token":"t","version":"1","url":"https://e/x.dmg","container":null}
+        ,
+        \\{"token":"t","version":"1","url":"https://e/x.dmg","container":{"nested":"P.tar.gz"}}
+        ,
+    }) |json| {
+        var c = try parseCask(std.testing.allocator, json);
+        defer c.deinit();
+        try std.testing.expectEqual(ArtifactType.dmg, c.artifactType());
+    }
+}
+
 test "variation overlay is screened like the top-level fields" {
     const json =
         \\{"token":"t","version":"1","url":"https://e/x.dmg",
