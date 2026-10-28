@@ -1762,7 +1762,7 @@ pub fn printCaskCaveats(allocator: std.mem.Allocator, prefix: []const u8, c: *co
     printExpandedCaveats(c.token, expanded, sink);
 }
 
-fn printExpandedCaveats(name: []const u8, expanded: []const u8, sink: OutputSink) void {
+pub fn printExpandedCaveats(name: []const u8, expanded: []const u8, sink: OutputSink) void {
     sink.info("Caveats for {s}:", .{name});
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, expanded, "\n"), '\n');
     while (lines.next()) |line| sink.info("{s}", .{line});
