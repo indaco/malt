@@ -346,6 +346,17 @@ pub fn recordCaskVersion(
     _ = try stmt.step();
 }
 
+/// Set the nested archive on the history row of `(token, version)`.
+/// A reinstall of the same version keeps its row, so this also clears it.
+pub fn recordNestedContainer(db: *sqlite.Database, token: []const u8, version: []const u8, nested: ?[]const u8) sqlite.SqliteError!void {
+    var stmt = try db.prepare("UPDATE cask_versions SET nested_container = ?3 WHERE token = ?1 AND version = ?2;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    if (nested) |n| try stmt.bindText(3, n) else try stmt.bindNull(3);
+    _ = try stmt.step();
+}
+
 /// Snapshot of a single `cask_versions` row, owned by the caller.
 /// Returned by `lookupCaskVersion`. Free via `deinit`.
 pub const CaskVersion = struct {
@@ -355,6 +366,7 @@ pub const CaskVersion = struct {
     sha256: ?[]u8,
     artifact_type: []u8,
     cache_path: ?[]u8,
+    nested_container: ?[]u8,
 
     pub fn deinit(self: *CaskVersion, allocator: std.mem.Allocator) void {
         allocator.free(self.token);
@@ -363,6 +375,7 @@ pub const CaskVersion = struct {
         if (self.sha256) |s| allocator.free(s);
         allocator.free(self.artifact_type);
         if (self.cache_path) |p| allocator.free(p);
+        if (self.nested_container) |n| allocator.free(n);
     }
 };
 
@@ -409,7 +422,7 @@ pub fn lookupCaskVersion(
     version: []const u8,
 ) LookupError!?CaskVersion {
     var stmt = try db.prepare(
-        \\SELECT token, version, url, sha256, artifact_type, cache_path
+        \\SELECT token, version, url, sha256, artifact_type, cache_path, nested_container
         \\FROM cask_versions WHERE token = ?1 AND version = ?2 LIMIT 1;
     );
     defer stmt.finalize();
@@ -419,10 +432,10 @@ pub fn lookupCaskVersion(
 
     // Stage every dup in a slot tracked by `cleanup`; the cleanup runs
     // on every error path so a mid-row OOM doesn't leak the earlier dups.
-    var slots: [6]?[]u8 = @splat(null);
+    var slots: [7]?[]u8 = @splat(null);
     errdefer for (slots) |s| if (s) |buf| allocator.free(buf);
 
-    inline for (.{ 0, 1, 2, 3, 4, 5 }) |idx| {
+    inline for (.{ 0, 1, 2, 3, 4, 5, 6 }) |idx| {
         slots[idx] = try dupColumn(allocator, stmt.columnText(idx));
     }
 
@@ -438,6 +451,7 @@ pub fn lookupCaskVersion(
         .sha256 = slots[3],
         .artifact_type = slots[4].?,
         .cache_path = slots[5],
+        .nested_container = slots[6],
     };
 }
 
@@ -1094,6 +1108,9 @@ pub const CaskInstaller = struct {
             artifactTypeTag(artifact_type),
             cache_path,
         ) catch {};
+        // Without the nested name, a restore reads the ZIP as a plain app
+        // archive.
+        recordNestedContainer(self.db, cask.token, cask.version, cask.nested_container) catch {};
 
         // Clean up cache file (keep for uninstall/upgrade reference if desired)
         // We keep the cache file so reinstalls are faster.
@@ -1425,6 +1442,7 @@ pub const CaskInstaller = struct {
         defer if (bin_spec_opt) |*s| s.deinit(self.allocator);
         if (bin_spec_opt) |*s| self.binary_entries_override = s.entries;
         defer self.binary_entries_override = null;
+        synthetic.nested_container = row.nested_container;
 
         self.restoring = true;
         self.links_incomplete = false;

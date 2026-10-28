@@ -79,12 +79,8 @@ test "a declared ZIP container upgrades offline despite a hash-suffixed URL" {
     try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask bare 1.0 -> 2.0 (zip)") != null);
 }
 
-test "a ZIP installs the app inside its declared nested tarball" {
-    var fx = try Fixture.init("nested_zip_install");
-    defer fx.deinit();
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+/// Cache a Steam-shaped ZIP for `nested` 1.0 and return its cask JSON.
+fn seedNestedZipCask(fx: *Fixture, io: std.Io) ![]const u8 {
     try test_io.cwd().createDirPath(io, fx.p("source/Nested.app/Contents"));
     try test_io.cwd().createDirPath(io, fx.p("outer"));
     try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
@@ -111,11 +107,19 @@ test "a ZIP installs the app inside its declared nested tarball" {
     defer testing.allocator.free(bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    const json = try fx.arena.allocator().print(
+    return fx.arena.allocator().print(
         \\{{"token":"nested","version":"1.0","url":"https://example.invalid/app.zip.hash","sha256":"{s}",
         \\ "container":{{"type":"zip","nested":"Bootstrapper.tar.gz"}},"artifacts":[{{"app":["Nested.app"]}}]}}
     , .{std.fmt.bytesToHex(digest, .lower)});
-    var c = try cask.parseCask(testing.allocator, json);
+}
+
+test "a ZIP installs the app inside its declared nested tarball" {
+    var fx = try Fixture.init("nested_zip_install");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var c = try cask.parseCask(testing.allocator, try seedNestedZipCask(&fx, io));
     defer c.deinit();
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -129,6 +133,86 @@ test "a ZIP installs the app inside its declared nested tarball" {
     const payload = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Nested.app/Contents/payload"), 64);
     defer testing.allocator.free(payload);
     try testing.expectEqualStrings("nested app", payload);
+}
+
+test "a nested-tarball cask restores from its history after the app is removed" {
+    // A failed upgrade and `mt rollback` both rebuild the cask from history.
+    // Without the nested name, they read the ZIP as a plain app archive.
+    var fx = try Fixture.init("nested_zip_restore");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var c = try cask.parseCask(testing.allocator, try seedNestedZipCask(&fx, io));
+    defer c.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    // As on upgrade: the outgoing version's cache and history stay.
+    installer.retain_history = true;
+    installer.artifact_type_override = .zip;
+    const installed = try installer.install(&c);
+    defer testing.allocator.free(installed);
+    installer.artifact_type_override = null;
+    try cask.recordInstall(&db, &c, installed, null);
+
+    // Do as a failed upgrade does: uninstall in a transaction, roll the rows
+    // back, then restore the bundle from history.
+    try db.beginTransaction();
+    try installer.uninstall("nested");
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, fx.p("Applications/Nested.app"), .{}));
+    db.rollback();
+    // `mt cleanup` can prune any cache file. A download brings back only
+    // the archive.
+    for (cask.sidecar_extensions) |ext| {
+        test_io.cwd().deleteFile(io, try fx.arena.allocator().print("{s}{s}", .{ fx.p("cache/Cask/nested-1.0"), ext })) catch {};
+    }
+    try installer.reinstallFromHistory("nested", "1.0");
+    const payload = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Nested.app/Contents/payload"), 64);
+    defer testing.allocator.free(payload);
+    try testing.expectEqualStrings("nested app", payload);
+}
+
+test "a same-version reinstall without a nested container clears the recorded name" {
+    // A stale name would make a later restore read a plain ZIP with unzip.
+    var fx = try Fixture.init("nested_zip_reinstall_plain");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var nested = try cask.parseCask(testing.allocator, try seedNestedZipCask(&fx, io));
+    defer nested.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var installer = nestedInstaller(&fx, io, &db);
+    testing.allocator.free(try installer.install(&nested));
+    {
+        var row = (try cask.lookupCaskVersion(testing.allocator, &db, "nested", "1.0")).?;
+        defer row.deinit(testing.allocator);
+        try testing.expectEqualStrings("Bootstrapper.tar.gz", row.nested_container.?);
+    }
+
+    // The same version now ships as a plain app ZIP.
+    try test_io.cwd().deleteTree(io, fx.p("Applications/Nested.app"));
+    const zip_path = fx.p("cache/Cask/nested-1.0.zip");
+    try test_io.cwd().deleteFile(io, zip_path);
+    try malt.child.runOrFail(io, testing.allocator, &.{ "/usr/bin/ditto", "-c", "-k", "--keepParent", fx.p("source/Nested.app"), zip_path });
+    const bytes = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip_path, 1024 * 1024);
+    defer testing.allocator.free(bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var plain = try cask.parseCask(testing.allocator, try fx.arena.allocator().print(
+        \\{{"token":"nested","version":"1.0","url":"https://example.invalid/app.zip","sha256":"{s}","artifacts":[{{"app":["Nested.app"]}}]}}
+    , .{std.fmt.bytesToHex(digest, .lower)}));
+    defer plain.deinit();
+    testing.allocator.free(try installer.install(&plain));
+
+    var row = (try cask.lookupCaskVersion(testing.allocator, &db, "nested", "1.0")).?;
+    defer row.deinit(testing.allocator);
+    try testing.expect(row.nested_container == null);
 }
 
 test "parseCask rejects a nested container path outside the extracted archive" {
