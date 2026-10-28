@@ -1625,6 +1625,7 @@ fn materializeTapCask(
     }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
+    install_mod.printCaskCaveats(allocator, prefix_z, &cask, app_path, sink);
 }
 
 /// Serialize a Homebrew-cask-API-shaped JSON document so the existing

@@ -15,6 +15,7 @@ const prefix_path = @import("../fs/prefix_path.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
+const caveats_mod = @import("caveats.zig");
 const cask_variation = @import("../net/cask_variation.zig");
 const steps_mod = @import("post_install_steps.zig");
 
@@ -85,6 +86,9 @@ pub const Cask = struct {
     /// Declared `*_steps` per phase, borrowed from `parsed`; null when the
     /// cask ships none for that phase.
     flight_steps: FlightSteps = FlightSteps.initFill(null),
+    /// Notes for the user after install. Borrowed from `parsed`; raw prose,
+    /// so scrub it at output.
+    caveats: ?[]const u8 = null,
 
     parsed: std.json.Parsed(std.json.Value),
 
@@ -206,8 +210,17 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
         .os_supported = cask_variation.osSupported(requirement, macos_major),
         .os_requirement = requirement,
         .flight_steps = parseFlightSteps(obj.*),
+        .caveats = caveats_mod.blankToNull(getStr(obj.*, "caveats")),
         .parsed = parsed,
     };
+}
+
+/// Replace the path placeholders in cask caveat text with real paths.
+pub fn expandCaveats(allocator: std.mem.Allocator, text: []const u8, prefix: []const u8, app_dir: []const u8) std.mem.Allocator.Error![]u8 {
+    return caveats_mod.expand(allocator, text, &.{
+        .{ .token = "$HOMEBREW_PREFIX", .value = prefix },
+        .{ .token = "$APPDIR", .value = app_dir },
+    });
 }
 
 /// Fields a variation may replace. Copied into the top-level object one by

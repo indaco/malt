@@ -1749,6 +1749,20 @@ fn caveatsToShow(show_caveats: bool, is_dep: bool, f: *const formula_mod.Formula
 pub fn printCaveats(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, text: []const u8, sink: OutputSink) void {
     const expanded = formula_mod.expandCaveats(allocator, text, prefix) catch return;
     defer allocator.free(expanded);
+    printExpandedCaveats(name, expanded, sink);
+}
+
+/// `$APPDIR` is the folder the bundle landed in; a pkg cask has none, so it
+/// reads as the system folder.
+pub fn printCaskCaveats(allocator: std.mem.Allocator, prefix: []const u8, c: *const cask_mod.Cask, app_path: []const u8, sink: OutputSink) void {
+    const text = c.caveats orelse return;
+    const app_dir = std.Io.Dir.path.dirname(app_path) orelse "/Applications";
+    const expanded = cask_mod.expandCaveats(allocator, text, prefix, app_dir) catch return;
+    defer allocator.free(expanded);
+    printExpandedCaveats(c.token, expanded, sink);
+}
+
+fn printExpandedCaveats(name: []const u8, expanded: []const u8, sink: OutputSink) void {
     sink.info("Caveats for {s}:", .{name});
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, expanded, "\n"), '\n');
     while (lines.next()) |line| sink.info("{s}", .{line});
@@ -2042,7 +2056,7 @@ fn installCask(
     cask_mod.recordInstall(db, &cask, app_path, null) catch {
         sink.warn("Failed to record cask {s} in database", .{cask.token});
     };
-    allocator.free(app_path);
+    defer allocator.free(app_path);
 
     // After the row: the cask is installed either way, and "already
     // installed" blocks a plain re-run, so say what does retry the steps.
@@ -2051,6 +2065,7 @@ fn installCask(
     }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
+    printCaskCaveats(allocator, prefix, &cask, app_path, sink);
 }
 
 // Format the user-facing materialize-failure line. Trivial cellar tags
@@ -2743,6 +2758,37 @@ test "printCaveats writes a header then one expanded line per text line" {
     try std.testing.expectEqualStrings("first /opt/malt/x", cap.lines.items[1]);
     try std.testing.expectEqualStrings("", cap.lines.items[2]);
     try std.testing.expectEqualStrings("third", cap.lines.items[3]);
+}
+
+test "printCaskCaveats expands the app dir from the placed bundle" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = "{\"token\":\"x\",\"version\":\"1\",\"url\":\"https://e.test/x.dmg\",\"caveats\":\"open $APPDIR/X.app\"}";
+    var c = try cask_mod.parseCask(arena.allocator(), json);
+    defer c.deinit();
+
+    var cap: LineCapture = .{};
+    defer cap.deinit();
+    printCaskCaveats(std.testing.allocator, "/opt/malt", &c, "/Users/u/Applications/X.app", cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+    try std.testing.expectEqualStrings("open /Users/u/Applications/X.app", cap.lines.items[1]);
+}
+
+test "printCaskCaveats falls back to /Applications without a bundle path and prints nothing without caveats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var with = try cask_mod.parseCask(arena.allocator(), "{\"token\":\"x\",\"version\":\"1\",\"url\":\"https://e.test/x.pkg\",\"caveats\":\"at $APPDIR\"}");
+    defer with.deinit();
+    var without = try cask_mod.parseCask(arena.allocator(), "{\"token\":\"x\",\"version\":\"1\",\"url\":\"https://e.test/x.pkg\"}");
+    defer without.deinit();
+
+    var cap: LineCapture = .{};
+    defer cap.deinit();
+    printCaskCaveats(std.testing.allocator, "/opt/malt", &with, "", cap.sink());
+    try std.testing.expectEqualStrings("at /Applications", cap.lines.items[1]);
+
+    printCaskCaveats(std.testing.allocator, "/opt/malt", &without, "", cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
 }
 
 test "printCaveats ignores a trailing newline" {
