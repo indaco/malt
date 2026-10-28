@@ -1746,7 +1746,7 @@ fn caveatsToShow(show_caveats: bool, is_dep: bool, f: *const formula_mod.Formula
 }
 
 /// One sink line per text line, so each gets the same indent and scrub.
-fn printCaveats(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, text: []const u8, sink: OutputSink) void {
+pub fn printCaveats(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, text: []const u8, sink: OutputSink) void {
     const expanded = formula_mod.expandCaveats(allocator, text, prefix) catch return;
     defer allocator.free(expanded);
     sink.info("Caveats for {s}:", .{name});
