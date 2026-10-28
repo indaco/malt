@@ -121,7 +121,7 @@ This is an example of a first session:
 ```bash
 mt install jq wget ripgrep        # parallel downloads, single lock
 mt list --versions                # see what landed
-mt info ripgrep                   # version, tap, cellar path, pinned status
+mt info ripgrep                   # version, tap, cellar path, pinned status, caveats
 mt outdated                       # what has updates available
 mt upgrade ripgrep                # atomic; old version is restored on failure
 ```
@@ -402,7 +402,7 @@ mt list --versions --formula             # narrow + show versions
 mt list --pinned                         # held-back versions only
 mt list --json
 
-mt info wget                             # version, tap, cellar path, pinned status
+mt info wget                             # version, tap, cellar path, pinned status, caveats
 mt info --cask firefox                   # a bare name installed as both kinds shows the formula, with a warning
 
 mt search ripgrep                        # brew-parity: queries the Homebrew API
