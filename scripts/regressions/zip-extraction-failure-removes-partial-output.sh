@@ -8,5 +8,5 @@ cd "$ROOT"
 
 grep -Fq 'test "extractZip removes partial output when unzip cannot create an entry"' tests/archive_extract_symlink_test.zig
 zig build test-bin
-zig-out/test-bin/archive_extract_symlink_test
-zig-out/test-bin/archive_test
+env -u MALT_CACHE MALT_PREFIX=/tmp/malt-test-prefix zig-out/test-bin/archive_extract_symlink_test
+env -u MALT_CACHE MALT_PREFIX=/tmp/malt-test-prefix zig-out/test-bin/archive_test
