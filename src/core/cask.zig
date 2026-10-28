@@ -991,6 +991,11 @@ pub const CaskInstaller = struct {
     pub fn downloadOnly(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
         const artifact_type = self.artifact_type_override orelse cask.artifactType();
         if (artifact_type == .unknown) return CaskError.InstallFailed;
+        // The cached ZIP is `<token>-<version>.zip`, and the install refuses a
+        // pattern in that name. An upgrade fetches here before it removes the
+        // old version, so refuse the name now.
+        if (artifact_type == .zip and unzipReadsArchive(cask) and
+            (zipNameIsPattern(cask.token) or zipNameIsPattern(cask.version))) return CaskError.InstallFailed;
 
         var cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_dir = std.mem.print(&cache_buf, "{s}/Cask", .{self.cache_dir}) catch
@@ -1627,18 +1632,16 @@ pub const CaskInstaller = struct {
         }) catch return error.InstallFailed;
         defer extract_handle.close(self.io);
 
+        // unzip reads a wildcard in the archive's file name as a pattern. The
+        // pattern can open a different cached file than the one checked.
+        if (unzipReadsArchive(cask) and zipNameIsPattern(zip_path)) return error.InstallFailed;
         // Nothing vouches for unpinned bytes, so bound what they inflate to.
-        // Pinned casks skip the extra pass: ditto, not unzip, is their decoder.
+        // Pinned casks skip this pass because the digest check covers their bytes.
         if (artifactIntegrity(cask.sha256) == .transport_only)
             archive_mod.checkZipExpansion(self.io, zip_path, self.unverified_zip_budget) catch return error.InstallFailed;
 
-        // Nested containers may have a signature before the ZIP header (Steam).
-        // unzip accepts these; ditto preserves macOS metadata for app ZIPs.
-        const extract_argv: []const []const u8 = if (cask.nested_container != null)
-            &.{ system_tools.unzip, "-q", "-o", zip_path }
-        else
-            &.{ system_tools.ditto, "-xk", zip_path, "." };
-        child_mod.runOrFailInDir(self.io, self.allocator, extract_argv, extract_handle) catch
+        var argv_buf: [6][]const u8 = undefined;
+        child_mod.runOrFailInDir(self.io, self.allocator, zipExtractArgv(&argv_buf, cask.nested_container != null, zip_path), extract_handle) catch
             return error.InstallFailed;
 
         if (cask.nested_container) |nested| {
@@ -2278,6 +2281,56 @@ pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8
     // Cask manifest SHAs are public: constant-time here is for uniformity
     // across malt's SHA paths, not to close a live oracle.
     if (!hash_mod.eqlHex256(got, expected_hash)) return error.Sha256Mismatch;
+}
+
+/// unzip matches wildcards only in the archive's file name, so a pattern
+/// in a directory name is harmless.
+fn zipNameIsPattern(zip_path: []const u8) bool {
+    return std.mem.findAny(u8, std.Io.Dir.path.basename(zip_path), "*?[]\\") != null;
+}
+
+/// unzip decodes a nested container, and it measures an unpinned ZIP.
+fn unzipReadsArchive(cask: *const Cask) bool {
+    return cask.nested_container != null or artifactIntegrity(cask.sha256) == .transport_only;
+}
+
+/// Nested containers may have a signature before the ZIP header (Steam).
+/// unzip accepts these. ditto keeps macOS metadata for app ZIPs.
+fn zipExtractArgv(buf: *[6][]const u8, nested: bool, zip_path: []const u8) []const []const u8 {
+    if (nested) {
+        // With a dummy password, an encrypted entry fails at once. unzip
+        // does not wait for a password on the terminal.
+        buf.* = .{ system_tools.unzip, "-q", "-o", "-P", "x", zip_path };
+        return buf;
+    }
+    buf[0..4].* = .{ system_tools.ditto, "-xk", zip_path, "." };
+    return buf[0..4];
+}
+
+test "only a wildcard in the ZIP file name is a pattern to unzip" {
+    try std.testing.expect(zipNameIsPattern("/c/Cask/t-1.[0].zip"));
+    try std.testing.expect(zipNameIsPattern("/c/Cask/t-1.0*.zip"));
+    try std.testing.expect(zipNameIsPattern("/c/Cask/t-1\\0.zip"));
+    try std.testing.expect(!zipNameIsPattern("/c[1]/Cask/t-1.0.zip"));
+    try std.testing.expect(!zipNameIsPattern("/c/Cask/t-1.0.zip"));
+}
+
+test "a nested ZIP is decoded with a dummy password and a plain ZIP by ditto" {
+    // Without a password, unzip waits on the terminal for an encrypted entry.
+    var buf: [6][]const u8 = undefined;
+    const nested = zipExtractArgv(&buf, true, "/c/a.zip");
+    try std.testing.expectEqualStrings(system_tools.unzip, nested[0]);
+    const pw = for (nested, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "-P")) break i;
+    } else return error.TestUnexpectedResult;
+    // The password value sits between the flag and the archive.
+    try std.testing.expect(pw + 2 < nested.len);
+    try std.testing.expectEqualStrings("/c/a.zip", nested[nested.len - 1]);
+
+    var plain_buf: [6][]const u8 = undefined;
+    const plain = zipExtractArgv(&plain_buf, false, "/c/a.zip");
+    try std.testing.expectEqualStrings(system_tools.ditto, plain[0]);
+    try std.testing.expectEqualStrings("/c/a.zip", plain[2]);
 }
 
 /// What backs a cask's artifact once it is off the wire — the mirror image of
@@ -3182,6 +3235,52 @@ test "installZip bounds what an unpinned zip inflates to, and only an unpinned o
     defer pinned.deinit();
     a.free(try installer.installZip(zip_path, app_dir, &pinned));
     try std.Io.Dir.accessAbsolute(io, placed, .{});
+}
+
+test "an unpinned ZIP whose file name holds a wildcard is refused" {
+    // The size check runs unzip too. `big-1.0[a].zip` measures the small
+    // `big-1.0a.zip`, and ditto then extracts the large file.
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try a.printSentinel("/tmp/malt_cask_zip_glob_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try a.printSentinel("{s}/prefix", .{base}, 0);
+    const app_dir = try a.print("{s}/Applications", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/tmp", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/big/Big.app/Contents", .{base}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/small", .{base}));
+    try std.Io.Dir.cwd().createDirPath(io, app_dir);
+    for ([_][]const u8{ "big/Big.app/Contents/payload", "small/f" }, [_][]const u8{ &@as([64 * 1024]u8, @splat(0)), "" }) |sub, body| {
+        const f = try std.Io.Dir.createFileAbsolute(io, try a.print("{s}/{s}", .{ base, sub }), .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, body);
+    }
+    const zip_path = try a.print("{s}/big-1.0[a].zip", .{base});
+    try child_mod.runOrFail(io, a, &.{ system_tools.ditto, "-c", "-k", try a.print("{s}/small", .{base}), try a.print("{s}/big-1.0a.zip", .{base}) });
+    try child_mod.runOrFail(io, a, &.{ system_tools.ditto, "-c", "-k", try a.print("{s}/big", .{base}), zip_path });
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+        .unverified_zip_budget = 4096,
+    };
+    var unpinned = try parseCask(a,
+        \\{"token":"big","name":["Big"],"version":"1.0[a]","url":"https://example.invalid/big.zip","sha256":"no_check","artifacts":[{"app":["Big.app"]}]}
+    );
+    defer unpinned.deinit();
+    try std.testing.expectError(error.InstallFailed, installer.installZip(zip_path, app_dir, &unpinned));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, try a.print("{s}/Big.app", .{app_dir}), .{}));
 }
 
 test "parseCask does not length-cap a clean version" {
