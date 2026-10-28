@@ -247,6 +247,114 @@ test "in-flight downgrade: all three fs-vs-DB checks become info only while an o
     }
 }
 
+test "in-flight downgrade: an op that takes the lock after the pre-walk snapshot is still detected" {
+    var s = try Scratch.init(testing.allocator, "downgrade_late_lock");
+    defer s.deinit(testing.allocator);
+
+    const orphan_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        var stmt = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('phantom', 'phantom', '9.9', 0, '', '/tmp/malt_phantom_missing_late_lock');
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+
+        var store_dir_buf: [512]u8 = undefined;
+        const store_dir = try std.mem.print(&store_dir_buf, "{s}/store/{s}", .{ s.path, orphan_sha });
+        try test_io.cwd().createDirPath(std.Options.debug_io, store_dir);
+        var store = store_mod.Store.init(std.Options.debug_io, testing.allocator, &db, s.path);
+        try store.claim(orphan_sha);
+    }
+    {
+        var bin_buf: [512]u8 = undefined;
+        const bin_dir = try std.mem.print(&bin_buf, "{s}/bin", .{s.path});
+        var bin = try test_io.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
+        defer bin.close(std.Options.debug_io);
+        try bin.symLink(std.Options.debug_io, "/tmp/malt_late_lock_vanished_target", "ghost", .{});
+    }
+    {
+        var cellar_buf: [512]u8 = undefined;
+        const cellar_dir = try std.mem.print(&cellar_buf, "{s}/Cellar", .{s.path});
+        var cellar = try test_io.openDirAbsolute(std.Options.debug_io, cellar_dir, .{ .iterate = true });
+        defer cellar.close(std.Options.debug_io);
+        try cellar.symLink(std.Options.debug_io, "/tmp", "planted", .{});
+    }
+
+    quiet();
+    defer unquiet();
+
+    // The snapshot `execute` takes before the walk: nothing holds the lock yet.
+    const snapshot = doctor.operationInFlight(std.Options.debug_io, s.path);
+    try testing.expect(!snapshot);
+
+    // An install starts after the snapshot and takes the lock.
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{s.path});
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        var b: [16]u8 = undefined;
+        try f.writeStreamingAll(std.Options.debug_io, try std.mem.print(&b, "{d}", .{std.c.getpid()}));
+    }
+
+    var walk = doctor.collectFindings(testing.allocator, .{
+        .allocator = testing.allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .op_in_flight = snapshot,
+    }, &doctor.checks, true);
+    defer walk.deinit();
+    try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "missing_kegs").?);
+    try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "orphaned_store_entries").?);
+    try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "cellar_package_directories").?);
+    try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "broken_symlinks").?);
+    try testing.expectEqual(@as(u32, 0), walk.tally.errors);
+}
+
+test "in-flight downgrade: a dead-PID lock taken after the snapshot does not mask findings" {
+    var s = try Scratch.init(testing.allocator, "downgrade_late_stale");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        var stmt = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('phantom', 'phantom', '9.9', 0, '', '/tmp/malt_phantom_missing_late_stale');
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+    }
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = try std.mem.print(&lock_buf, "{s}/db/malt.lock", .{s.path});
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "999999");
+    }
+
+    quiet();
+    defer unquiet();
+
+    var walk = doctor.collectFindings(testing.allocator, .{
+        .allocator = testing.allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks, true);
+    defer walk.deinit();
+    try testing.expectEqual(doctor.CheckStatus.err_status, severityOf(walk.findings(), "missing_kegs").?);
+}
+
 // --- execute pre-loop branches -----------------------------------------
 
 test "execute --help short-circuits before opening anything" {
