@@ -1595,6 +1595,66 @@ test "a tap PKG cask upgrade refuses before its prefetch fills the slot" {
     try testing.expect(slot == null);
 }
 
+test "a tap ZIP cask upgrade refuses a wildcard version before its prefetch" {
+    // The install would refuse `<token>-2.[0].zip` once the upgrade had
+    // removed the old version. Offline, a prefetch that reaches the fetch
+    // fails as a download instead.
+    const prefix = try setupPrefix("zip_wildcard");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true, .allow_unpinned = true };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "zipcask",
+        .full_name = "user/repo/zipcask",
+        .tap_label = "user/repo",
+        .version = "2.[0]",
+        .url = "https://malt-zipcask-test.invalid/releases/zipcask.zip",
+        .sha256 = "",
+        .checksum_opted_out = true,
+        .app_name = "Zip.app",
+    };
+
+    var slot: ?[]const u8 = null;
+    defer if (slot) |p| allocator.free(p);
+
+    try testing.expectError(install_record.InstallError.CaskNotFound, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        try allocator.print("{s}/cache", .{prefix}),
+        false, // dry_run
+        true, // force
+        true, // download_only — the upgrade route's prefetch pass
+        &slot,
+        malt.install_sink.progress_only,
+    ));
+    try testing.expect(slot == null);
+}
+
 test "--download-only on a tap app cask refuses a bin entry the cask cannot take over" {
     // The upgrade's prefetch pass runs this before it removes the installed
     // version, so a link conflict must surface here, while that version is

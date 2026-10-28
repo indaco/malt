@@ -586,7 +586,8 @@ fn validChksum(header: *const [512]u8) bool {
 /// its behavior on binary-only archives is boring and well understood.
 /// Validates the PKZip magic `PK\x03\x04` up front so an HTML error
 /// page saved as .zip gives a clean error instead of propagating up
-/// from unzip's own output.
+/// from unzip's own output. If unzip starts and the extraction then
+/// fails, this function deletes `dest_dir`, so no partial tree stays.
 pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
     return extractZipLimited(io, archive_path, dest_dir, .default);
 }
@@ -668,7 +669,8 @@ fn validateTarListing(io: std.Io, archive_path: []const u8) !void {
     try validateSubprocessListing(io, &argv);
 }
 
-/// The zip budget for extractors other than `extractZip` (cask `ditto`).
+/// Refuse a ZIP whose entries decode past `limit`. `extractZip` and the
+/// cask ZIP path both call it.
 pub fn checkZipExpansion(io: std.Io, archive_path: []const u8, limit: u64) !void {
     // A dummy password: an encrypted entry fails fast instead of prompting on
     // the tty with stderr ignored.

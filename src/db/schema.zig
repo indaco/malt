@@ -78,6 +78,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\    sha256          TEXT,
         \\    artifact_type   TEXT,
         \\    cache_path      TEXT,
+        \\    nested_container TEXT,
         \\    installed_at    TEXT NOT NULL DEFAULT (datetime('now')),
         \\    UNIQUE(token, version)
         \\);
@@ -134,7 +135,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 18;
+pub const known_schema_version: i64 = 19;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -162,6 +163,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 16) try migrateV15toV16(db);
     if (ver < 17) try migrateV16toV17(db);
     if (ver < 18) try migrateV17toV18(db);
+    if (ver < 19) try migrateV18toV19(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -834,6 +836,24 @@ fn migrateV17toV18(db: *sqlite.Database) sqlite.SqliteError!void {
     }
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (18);");
+
+    try db.commit();
+}
+
+/// v19 - the nested archive inside a cask's ZIP. A restore needs it, and
+/// `mt cleanup` can prune any cache file. Existing rows stay NULL: they
+/// restore as a plain ZIP, as before.
+fn migrateV18toV19(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    if (try columnsPresent(db, "PRAGMA table_info(cask_versions);", &.{"token"})) {
+        if (!try columnsPresent(db, "PRAGMA table_info(cask_versions);", &.{"nested_container"})) {
+            try db.exec("ALTER TABLE cask_versions ADD COLUMN nested_container TEXT;");
+        }
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (19);");
 
     try db.commit();
 }
@@ -1511,7 +1531,22 @@ test "v17→v18 adds kegs.tap_rb_subtree and leaves existing rows unknown" {
 
     var buf: [64]u8 = undefined;
     try testing.expect((try tapField(&db, "SELECT tap_rb_subtree FROM kegs WHERE name = ?1;", "a", &buf)) == null);
-    try testing.expectEqual(@as(i64, 18), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v18→v19 adds cask_versions.nested_container and leaves existing rows plain" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+    try db.exec("ALTER TABLE cask_versions DROP COLUMN nested_container;");
+    try db.exec("INSERT INTO cask_versions (token, version, url) VALUES ('a', '1.0', 'u');");
+    try db.exec("DELETE FROM schema_version WHERE version >= 19;");
+    try migrate(&db);
+    try migrate(&db);
+
+    var buf: [64]u8 = undefined;
+    try testing.expect((try tapField(&db, "SELECT nested_container FROM cask_versions WHERE token = ?1;", "a", &buf)) == null);
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v14→v15 is idempotent and never overwrites a keg that already knows its commit" {
