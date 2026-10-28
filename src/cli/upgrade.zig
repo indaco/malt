@@ -1793,16 +1793,16 @@ fn upgradeAllFormulas(
 /// line, the sudo gate and the download: a suffix-less URL is walked here as
 /// on install, so none of them reads it as an unsupported format. `unknown`
 /// is a verdict, reported by the caller; only a failed walk aborts here.
-fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, url: []const u8) error{Aborted}!cask_mod.ArtifactType {
-    const from_url = cask_mod.artifactTypeFromUrl(url);
-    if (from_url != .unknown) return from_url;
+fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, cask: *const cask_mod.Cask) error{Aborted}!cask_mod.ArtifactType {
+    const declared_or_url = cask.artifactType();
+    if (declared_or_url != .unknown) return declared_or_url;
 
-    return install_mod.resolveCaskArtifactViaWalk(ctx, allocator, url) catch |e| {
+    return install_mod.resolveCaskArtifactViaWalk(ctx, allocator, cask.url) catch |e| {
         if (e == error.Canceled) {
             output.warn("Interrupted.", .{});
             return error.Aborted;
         }
-        output.err("Could not resolve the download URL for {s}: {s} (installed version left in place)", .{ token, @errorName(e) });
+        output.err("Could not resolve the download URL for {s}: {s} (installed version left in place)", .{ cask.token, @errorName(e) });
         return error.Aborted;
     };
 }
@@ -1878,7 +1878,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     warnIfBackward(token, installed_version, parsed_cask.version);
 
-    const artifact_type = try caskArtifactType(ctx, allocator, token, parsed_cask.url);
+    const artifact_type = try caskArtifactType(ctx, allocator, &parsed_cask);
 
     if (dry_run) {
         if (sink) |s| s.collectCask(token, installed_version, parsed_cask.version);
@@ -2774,8 +2774,13 @@ test "an upgrade takes a cask artifact type from the URL suffix without a walk" 
     // A suffixed URL is settled locally: a walk here would dial an unbound
     // host and abort.
     const ctx = @import("../app_ctx.zig").debug_ctx;
-    try std.testing.expectEqual(cask_mod.ArtifactType.dmg, try caskArtifactType(&ctx, std.testing.allocator, "x", "https://example.invalid/x.dmg"));
-    try std.testing.expectEqual(cask_mod.ArtifactType.pkg, try caskArtifactType(&ctx, std.testing.allocator, "x", "https://example.invalid/x.pkg"));
+    var cask = try cask_mod.parseCask(std.testing.allocator,
+        \\{"token":"x","url":"https://example.invalid/x.dmg"}
+    );
+    defer cask.deinit();
+    try std.testing.expectEqual(cask_mod.ArtifactType.dmg, try caskArtifactType(&ctx, std.testing.allocator, &cask));
+    cask.url = "https://example.invalid/x.pkg";
+    try std.testing.expectEqual(cask_mod.ArtifactType.pkg, try caskArtifactType(&ctx, std.testing.allocator, &cask));
 }
 
 test "an upgrade refuses a suffix-less cask URL it cannot resolve before downloading" {
@@ -2783,7 +2788,11 @@ test "an upgrade refuses a suffix-less cask URL it cannot resolve before downloa
     // with the installed version in place, not inside the prefetch.
     var ctx = @import("../app_ctx.zig").debug_ctx;
     ctx.offline = true;
-    try std.testing.expectError(error.Aborted, caskArtifactType(&ctx, std.testing.allocator, "x", "https://example.invalid/download?package=dmg"));
+    var cask = try cask_mod.parseCask(std.testing.allocator,
+        \\{"token":"x","url":"https://example.invalid/download?package=dmg"}
+    );
+    defer cask.deinit();
+    try std.testing.expectError(error.Aborted, caskArtifactType(&ctx, std.testing.allocator, &cask));
 }
 
 test "upgradeAllFormulas processes nothing when interrupted before the loop" {

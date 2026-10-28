@@ -73,6 +73,7 @@ done
 TESTS=(
   "configure_clang_system writes one isysroot config per arch and target"
   "configure_clang_system writes nothing when every config file already exists"
+  "configure_clang_system keeps both targets when the version majors match"
   "configure_clang_system refuses rather than naming files from an unknown version"
   "configure_gcc_runtime is a no-op on macOS rather than an unsupported step"
   "warn surfaces the formula's message instead of downgrading the install"

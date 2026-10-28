@@ -442,6 +442,7 @@ test "extractZip rejects a non-zip archive" {
     f.close(std.Options.debug_io);
 
     try testing.expectError(error.ExtractionFailed, archive.extractZip(std.Options.debug_io, archive_path, fx.base));
+    try test_io.accessAbsolute(std.Options.debug_io, archive_path, .{});
 }
 
 test "extractZip rejects a missing archive" {
@@ -501,6 +502,7 @@ test "extractZip rejects tar-slip and leaves dest untouched" {
     var threaded = spawnIo();
     defer threaded.deinit();
     try testing.expectError(error.ExtractionFailed, archive.extractZip(threaded.io(), archive_path, dest));
+    try test_io.accessAbsolute(std.Options.debug_io, dest, .{});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, fx.p("dest/good.txt"), .{}));
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, fx.p("escape.txt"), .{}));
 }

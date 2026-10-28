@@ -48,6 +48,99 @@ const Fixture = struct {
 
 // --- artifactTypeFromUrl ---
 
+test "a declared ZIP container upgrades offline despite a hash-suffixed URL" {
+    var fx = try Fixture.init("declared_zip_upgrade");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    try seedCaskCache(&fx, "bare",
+        \\{"token":"bare","version":"2.0","url":"https://example.invalid/app.zip.hash","sha256":"no_check",
+        \\ "container":{"type":"zip","nested":"Bootstrapper.tar.gz"},"artifacts":[{"app":["Bare.app"]}]}
+    );
+    try test_io.cwd().createDirPath(testIo(), fx.p("db"));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertInstalledCask(&db, "bare", "1.0");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    try malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "bare" });
+    try testing.expect(std.mem.find(u8, captured.items, "would upgrade cask bare 1.0 -> 2.0 (zip)") != null);
+}
+
+test "a ZIP installs the app inside its declared nested tarball" {
+    var fx = try Fixture.init("nested_zip_install");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try test_io.cwd().createDirPath(io, fx.p("source/Nested.app/Contents"));
+    try test_io.cwd().createDirPath(io, fx.p("outer"));
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    {
+        const f = try test_io.createFileAbsolute(io, fx.p("source/Nested.app/Contents/payload"), .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "nested app");
+    }
+    try malt.child.runOrFail(io, testing.allocator, &.{ "/usr/bin/tar", "czf", fx.p("outer/Bootstrapper.tar.gz"), "-C", fx.p("source"), "Nested.app" });
+    const zip_path = fx.p("cache/Cask/nested-1.0.zip");
+    try malt.child.runOrFail(io, testing.allocator, &.{ "/usr/bin/ditto", "-c", "-k", fx.p("outer"), zip_path });
+    // Steam's ZIP has a 20-byte signature before its first local header.
+    const original = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip_path, 1024 * 1024);
+    defer testing.allocator.free(original);
+    {
+        const f = try test_io.createFileAbsolute(io, zip_path, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "steam container stub");
+        try f.writeStreamingAll(io, original);
+    }
+    try malt.child.runOrFail(io, testing.allocator, &.{ "/usr/bin/zip", "-q", "-A", zip_path });
+    const bytes = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip_path, 1024 * 1024);
+    defer testing.allocator.free(bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const json = try fx.arena.allocator().print(
+        \\{{"token":"nested","version":"1.0","url":"https://example.invalid/app.zip.hash","sha256":"{s}",
+        \\ "container":{{"type":"zip","nested":"Bootstrapper.tar.gz"}},"artifacts":[{{"app":["Nested.app"]}}]}}
+    , .{std.fmt.bytesToHex(digest, .lower)});
+    var c = try cask.parseCask(testing.allocator, json);
+    defer c.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    // Also exercise nested extraction independently of URL classification.
+    installer.artifact_type_override = .zip;
+    const installed = try installer.install(&c);
+    defer testing.allocator.free(installed);
+    const payload = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Nested.app/Contents/payload"), 64);
+    defer testing.allocator.free(payload);
+    try testing.expectEqualStrings("nested app", payload);
+}
+
+test "parseCask rejects a nested container path outside the extracted archive" {
+    for ([_][]const u8{ "../outside.tar.gz", "/tmp/outside.tar.gz" }) |nested| {
+        const json = try testing.allocator.print(
+            \\{{"token":"nested","version":"1","url":"https://example.invalid/a.zip","container":{{"type":"zip","nested":"{s}"}}}}
+        , .{nested});
+        defer testing.allocator.free(json);
+        try testing.expectError(error.ParseFailed, cask.parseCask(testing.allocator, json));
+    }
+}
+
 test "artifactTypeFromUrl detects .dmg" {
     try std.testing.expectEqual(cask.ArtifactType.dmg, cask.artifactTypeFromUrl("https://example.com/App.dmg"));
 }

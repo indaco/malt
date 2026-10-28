@@ -1876,7 +1876,7 @@ fn installCask(
         return InstallError.CaskNotFound;
     }
 
-    var artifact_type = cask_mod.artifactTypeFromUrl(cask.url);
+    var artifact_type = cask.artifactType();
 
     // Extensionless URLs (e.g. download APIs that 302 to the real file):
     // walk the redirects - HEAD, then GET - to discover the final URL and

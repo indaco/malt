@@ -73,6 +73,9 @@ pub const Cask = struct {
     /// Borrowed from `parsed` when present.
     sha256: ?[]const u8,
     auto_updates: bool,
+    container_type: ArtifactType = .unknown,
+    /// Borrowed from `parsed` when present.
+    nested_container: ?[]const u8 = null,
     /// False when `depends_on.macos` rules out the running macOS.
     os_supported: bool = true,
     /// The `depends_on.macos` clause, borrowed from `parsed`, for the
@@ -87,6 +90,10 @@ pub const Cask = struct {
 
     pub fn deinit(self: *Cask) void {
         self.parsed.deinit();
+    }
+
+    pub fn artifactType(self: *const Cask) ArtifactType {
+        return if (self.container_type != .unknown) self.container_type else artifactTypeFromUrl(self.url);
     }
 };
 
@@ -169,6 +176,13 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
     // the same choke point rather than at each sink.
     try validateArtifactPaths(obj.*);
 
+    const container: ?std.json.ObjectMap = if (obj.get("container")) |v| switch (v) {
+        .object => |o| o,
+        else => null,
+    } else null;
+    const nested = if (container) |c| getStr(c, "nested") else null;
+    if (nested) |path| if (!path_component.isRelativeSubpath(path)) return CaskError.ParseFailed;
+
     // Read after the overlay so a variation's own clause is the one judged.
     const requirement = cask_variation.macosRequirement(obj.get("depends_on"));
     return .{
@@ -180,6 +194,8 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
         .url = getStr(obj.*, "url") orelse return CaskError.ParseFailed,
         .sha256 = getStr(obj.*, "sha256"),
         .auto_updates = getBool(obj.*, "auto_updates") orelse false,
+        .container_type = if (container) |c| if (getStr(c, "type")) |tag| artifactTypeFromTag(tag) else .unknown else .unknown,
+        .nested_container = nested,
         .os_supported = cask_variation.osSupported(requirement, macos_major),
         .os_requirement = requirement,
         .flight_steps = parseFlightSteps(obj.*),
@@ -190,7 +206,7 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
 /// Fields a variation may replace. Copied into the top-level object one by
 /// one — a variation only carries what differs — so every later reader,
 /// including the artifact walkers, sees the resolved cask.
-const variation_fields = [_][]const u8{ "url", "sha256", "version", "artifacts", "depends_on" };
+const variation_fields = [_][]const u8{ "url", "sha256", "version", "artifacts", "depends_on", "container" };
 
 fn overlayVariation(arena: std.mem.Allocator, obj: *std.json.ObjectMap, major: u32) CaskError!void {
     var key_buf: [32]u8 = undefined;
@@ -952,7 +968,7 @@ pub const CaskInstaller = struct {
     }
 
     pub fn downloadOnly(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
-        const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
+        const artifact_type = self.artifact_type_override orelse cask.artifactType();
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
         var cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -987,7 +1003,7 @@ pub const CaskInstaller = struct {
     /// Install a cask. Downloads, verifies SHA256, and installs based on artifact type.
     /// Returns the installed app path on success.
     pub fn install(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
-        const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
+        const artifact_type = self.artifact_type_override orelse cask.artifactType();
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
         // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
@@ -1101,7 +1117,7 @@ pub const CaskInstaller = struct {
         // Only the stanzas the install will link are screened: a pkg and a
         // font cask link none.
         const obj = cask.parsed.value.object;
-        if ((self.artifact_type_override orelse artifactTypeFromUrl(cask.url)) == .pkg) return;
+        if ((self.artifact_type_override orelse cask.artifactType()) == .pkg) return;
         if (try cask_font.collectFontArtifacts(self.allocator, obj)) |fonts| {
             self.allocator.free(fonts);
             return;
@@ -1474,7 +1490,7 @@ pub const CaskInstaller = struct {
     const CachedArtifact = struct { path: []const u8, verified: bool };
 
     fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8, progress: ?client_mod.ProgressCallback) !CachedArtifact {
-        const resolved = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
+        const resolved = self.artifact_type_override orelse cask.artifactType();
         const ext_str = artifactExtension(resolved);
         // Per-version filename so older versions' artefacts survive a
         // newer install — `mt rollback <cask> --to <ver>` reaches for
@@ -1591,10 +1607,25 @@ pub const CaskInstaller = struct {
         if (artifactIntegrity(cask.sha256) == .transport_only)
             archive_mod.checkZipExpansion(self.io, zip_path, self.unverified_zip_budget) catch return error.InstallFailed;
 
-        // Extract with ditto -xk (handles macOS-specific ZIP features).
-        const ditto_argv = [_][]const u8{ system_tools.ditto, "-xk", zip_path, "." };
-        child_mod.runOrFailInDir(self.io, self.allocator, &ditto_argv, extract_handle) catch
+        // Nested containers may have a signature before the ZIP header (Steam).
+        // unzip accepts these; ditto preserves macOS metadata for app ZIPs.
+        const extract_argv: []const []const u8 = if (cask.nested_container != null)
+            &.{ system_tools.unzip, "-q", "-o", zip_path }
+        else
+            &.{ system_tools.ditto, "-xk", zip_path, "." };
+        child_mod.runOrFailInDir(self.io, self.allocator, extract_argv, extract_handle) catch
             return error.InstallFailed;
+
+        if (cask.nested_container) |nested| {
+            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = try std.mem.print(&path_buf, "{s}/{s}", .{ extract_dir, nested });
+            var source = try confined_source.openFile(self.io, self.allocator, extract_dir, path, .read_only);
+            defer source.deinit(self.io);
+            return switch (artifactTypeFromUrl(nested)) {
+                .tar_gz, .tar_xz => |kind| self.installTarball(source.path, app_dir, cask, kind),
+                else => error.InstallFailed,
+            };
+        }
 
         return self.placeExtracted(extract_dir, app_dir, cask);
     }

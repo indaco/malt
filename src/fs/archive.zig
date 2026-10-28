@@ -607,6 +607,7 @@ fn extractZipLimited(io: std.Io, archive_path: []const u8, dest_dir: []const u8,
     var child = std.process.spawn(io, .{
         .argv = &argv,
     }) catch return error.ExtractionFailed;
+    errdefer std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
     const term = child.wait(io) catch return error.ExtractionFailed;
     switch (term) {
         .exited => |code| {
@@ -617,7 +618,7 @@ fn extractZipLimited(io: std.Io, archive_path: []const u8, dest_dir: []const u8,
 
     // The `-Z1` listing only surfaces entry names; symlink targets are not
     // checked until the tree exists on disk.
-    try rejectEscapingSymlinks(io, dest_dir);
+    checkSymlinkTargets(io, dest_dir) catch return error.ExtractionFailed;
 }
 
 fn validateZip(io: std.Io, archive_path: []const u8) !void {

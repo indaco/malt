@@ -5719,6 +5719,22 @@ test "configure_clang_system writes nothing when every config file already exist
     try testing.expectEqualStrings("user edit\n", try fs_read.readFileAllAbsolute(h.io, a, probe, 4096));
 }
 
+test "configure_clang_system keeps both targets when the version majors match" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    try testing.expect(writeClangConfigs(h.ctx(), 27, 27));
+    try testing.expect(!h.flog.hasErrors());
+    for (clang_arches) |arch| {
+        for ([_][]const u8{ "darwin27", "macosx27" }) |target| {
+            const path = try a.print("{s}/etc/clang/{s}-apple-{s}.cfg", .{ h.prefix, arch, target });
+            const got = try fs_read.readFileAllAbsolute(h.io, a, path, 4096);
+            try testing.expectEqualStrings("-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX27.sdk\n", got);
+        }
+    }
+}
+
 test "configure_clang_system refuses rather than naming files from an unknown version" {
     // The version reads are the step's only inputs; an unreadable one must
     // yield null so the caller refuses, not a sentinel that names six files
@@ -5726,10 +5742,6 @@ test "configure_clang_system refuses rather than naming files from an unknown ve
     try testing.expect(sysctlMajor("kern.no_such_sysctl_for_malt") == null);
     try testing.expect(sysctlMajor("kern.osrelease") != null);
     try testing.expect(sysctlMajor("kern.osproductversion") != null);
-
-    // The Darwin major and the macOS major are different numbers, which is the
-    // whole reason the step reads two sysctls.
-    try testing.expect(sysctlMajor("kern.osrelease").? != sysctlMajor("kern.osproductversion").?);
 }
 
 test "configure_gcc_runtime is a no-op on macOS rather than an unsupported step" {

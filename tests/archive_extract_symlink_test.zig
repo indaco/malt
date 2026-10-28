@@ -111,6 +111,29 @@ test "extractZip rejects a zip symlink target that escapes the destination" {
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, dst, .{}));
 }
 
+test "extractZip removes partial output when unzip cannot create an entry" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("zip_partial");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "src/blocked");
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.writeFile(io, .{ .sub_path = "src/hello", .data = "partial output" });
+    try s.dir.writeFile(io, .{ .sub_path = "src/blocked/child", .data = "blocked" });
+    try s.dir.writeFile(io, .{ .sub_path = "dest/blocked", .data = "not a directory" });
+    var src = try s.dir.openDir(io, "src", .{});
+    defer src.close(io);
+
+    const arc = s.p("partial.zip");
+    try run(io, &.{ "zip", "-q", arc, "hello", "blocked/child" }, .{ .dir = src });
+
+    const dst = s.p("dest");
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(io, arc, dst));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, dst, .{}));
+}
+
 test "extractZip still extracts a benign archive" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
