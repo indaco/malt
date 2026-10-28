@@ -501,6 +501,10 @@ pub const InstallAllOpts = struct {
     /// Of `packages`, the ones the parent marked `:recommended`. Their absence
     /// is survivable, so a source-build refusal on one is a warning.
     recommended: []const []const u8 = &.{},
+    /// Print the caveats of the named packages. Off by default: the callers
+    /// that use `installAll` install dependencies, which are not the user's
+    /// request, or have their own report (the bundle runner).
+    show_caveats: bool = false,
 };
 
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
@@ -517,12 +521,17 @@ pub fn installAll(
 ) !void {
     // Build the typed flags directly — the bundle callers pass validated
     // package names, so there is nothing to re-scan or refuse in `parse`.
-    return runInstall(ctx, allocator, packages, installFlagsFromOpts(opts), .{
+    return runInstall(ctx, allocator, packages, installFlagsFromOpts(opts), execOptsFromAll(opts));
+}
+
+fn execOptsFromAll(opts: InstallAllOpts) ExecuteOpts {
+    return .{
         .skip_lock = opts.skip_lock,
         .sink = opts.sink,
         .dep_tap = opts.dep_tap,
         .recommended = opts.recommended,
-    });
+        .show_caveats = opts.show_caveats,
+    };
 }
 
 /// Map the non-argv `InstallAllOpts` onto the typed flags the argv path
@@ -546,6 +555,9 @@ const ExecuteOpts = struct {
     /// See `InstallAllOpts.recommended`. Empty on the argv path: a package the
     /// user asked for by name is never skipped on their behalf.
     recommended: []const []const u8 = &.{},
+    /// See `InstallAllOpts.show_caveats`. On here, off there: the argv path
+    /// names the packages itself.
+    show_caveats: bool = true,
 };
 
 /// A recommended dep malt cannot build is a warning, not a failure - refusing
@@ -1344,6 +1356,9 @@ fn runInstall(
         post_install_mod.provisionShippedCaBundle(ctx.io, prefix, job.name);
     }
 
+    // Last, so the notes are not buried under hook output.
+    printLinkedCaveats(allocator, prefix, all_jobs.items, linked_jobs.items, &formula_cache, exec_opts.show_caveats, sink);
+
     if (failed_count > 0) {
         const pkg_word: []const u8 = if (failed_count == 1) "package" else "packages";
         sink.err(
@@ -1702,6 +1717,41 @@ pub fn linkAndRecord(
     // not as a "not linking" warning paired with a separate ✓.
     const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";
     sink.success("{s} {s} installed{s}", .{ job.name, job.version_str, keg_only_suffix });
+}
+
+fn printLinkedCaveats(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    jobs: []const DownloadJob,
+    linked: []const usize,
+    cache: *deps_mod.FormulaCache,
+    show_caveats: bool,
+    sink: OutputSink,
+) void {
+    for (linked) |idx| {
+        const job = jobs[idx];
+        const f = cache.getOrParse(job.name, job.formula_json) catch continue;
+        if (caveatsToShow(show_caveats, job.is_dep, f)) |text| {
+            printCaveats(allocator, prefix, job.name, text, sink);
+        }
+    }
+}
+
+/// The caveats to print for a job, or null. Homebrew prints them for what the
+/// user asked for, never for dependencies pulled in alongside. They follow
+/// `--quiet` like every other install line, and `info` does the same.
+fn caveatsToShow(show_caveats: bool, is_dep: bool, f: *const formula_mod.Formula) ?[]const u8 {
+    if (!show_caveats or is_dep) return null;
+    return f.caveats;
+}
+
+/// One sink line per text line, so each gets the same indent and scrub.
+fn printCaveats(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, text: []const u8, sink: OutputSink) void {
+    const expanded = formula_mod.expandCaveats(allocator, text, prefix) catch return;
+    defer allocator.free(expanded);
+    sink.info("Caveats for {s}:", .{name});
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, expanded, "\n"), '\n');
+    while (lines.next()) |line| sink.info("{s}", .{line});
 }
 
 /// Only a miss may fall through to the cask probe; OOM or an offline gap ends
@@ -2639,4 +2689,118 @@ test "isSiblingKegDir accepts only another version dir beside the kept keg" {
     try std.testing.expect(!isSiblingKegDir("/Users/me/work", keep));
     try std.testing.expect(!isSiblingKegDir("Cellar/foo/1.0", keep));
     try std.testing.expect(!isSiblingKegDir("Cellar/foo/1.0", "Cellar/foo/2.0"));
+}
+
+fn parseCaveatFormula(arena: std.mem.Allocator, caveats_json: []const u8) !formula_mod.Formula {
+    const json = try std.fmt.allocPrint(
+        arena,
+        "{{\"name\":\"alpha\",\"versions\":{{\"stable\":\"1.0\"}}{s}}}",
+        .{caveats_json},
+    );
+    return formula_mod.parseFormula(arena, json);
+}
+
+test "caveatsToShow prints for a named package only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var with = try parseCaveatFormula(arena.allocator(), ",\"caveats\":\"do this\"");
+    defer with.deinit();
+    var without = try parseCaveatFormula(arena.allocator(), "");
+    defer without.deinit();
+
+    try std.testing.expectEqualStrings("do this", caveatsToShow(true, false, &with).?);
+    // Homebrew shows caveats for the package the user asked for, not its deps.
+    try std.testing.expect(caveatsToShow(true, true, &with) == null);
+    // A re-entrant dependency install must stay quiet.
+    try std.testing.expect(caveatsToShow(false, false, &with) == null);
+    try std.testing.expect(caveatsToShow(true, false, &without) == null);
+}
+
+const LineCapture = struct {
+    lines: std.ArrayList([]u8) = .empty,
+
+    fn onInfo(ctx: ?*anyopaque, msg: []const u8) void {
+        const self: *LineCapture = @ptrCast(@alignCast(ctx.?));
+        self.lines.append(std.testing.allocator, std.testing.allocator.dupe(u8, msg) catch return) catch {};
+    }
+    fn drop(_: ?*anyopaque, _: []const u8) void {}
+    fn sink(self: *LineCapture) OutputSink {
+        return .{ .ctx = self, .writeInfo = onInfo, .writeWarn = drop, .writeSuccess = drop, .writeErr = drop };
+    }
+    fn deinit(self: *LineCapture) void {
+        for (self.lines.items) |l| std.testing.allocator.free(l);
+        self.lines.deinit(std.testing.allocator);
+    }
+};
+
+test "printCaveats writes a header then one expanded line per text line" {
+    var cap: LineCapture = .{};
+    defer cap.deinit();
+    printCaveats(std.testing.allocator, "/opt/malt", "alpha", "first $HOMEBREW_PREFIX/x\n\nthird", cap.sink());
+
+    try std.testing.expectEqual(@as(usize, 4), cap.lines.items.len);
+    try std.testing.expectEqualStrings("Caveats for alpha:", cap.lines.items[0]);
+    try std.testing.expectEqualStrings("first /opt/malt/x", cap.lines.items[1]);
+    try std.testing.expectEqualStrings("", cap.lines.items[2]);
+    try std.testing.expectEqualStrings("third", cap.lines.items[3]);
+}
+
+test "printCaveats ignores a trailing newline" {
+    var cap: LineCapture = .{};
+    defer cap.deinit();
+    printCaveats(std.testing.allocator, "/opt/malt", "alpha", "only\n", cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+}
+
+fn caveatJob(name: []const u8, is_dep: bool, json: []const u8) DownloadJob {
+    return .{
+        .name = name,
+        .version_str = "1.0",
+        .sha256 = "",
+        .bottle_url = "",
+        .is_dep = is_dep,
+        .keg_only = false,
+        .wants_post_install = false,
+        .formula_json = json,
+        .cellar_type = "",
+        .label_width = 0,
+        .line_index = 0,
+        .multi = null,
+        .bar = null,
+        .store_sha256 = "",
+        .succeeded = true,
+    };
+}
+
+test "printLinkedCaveats prints for the named package only and honours the switch" {
+    const with = "{\"name\":\"a\",\"versions\":{\"stable\":\"1\"},\"caveats\":\"note a\"}";
+    const dep = "{\"name\":\"b\",\"versions\":{\"stable\":\"1\"},\"caveats\":\"note b\"}";
+    const jobs = [_]DownloadJob{ caveatJob("a", false, with), caveatJob("b", true, dep) };
+
+    var cache = deps_mod.FormulaCache.init(std.testing.allocator);
+    defer cache.deinit();
+    var cap: LineCapture = .{};
+    defer cap.deinit();
+
+    printLinkedCaveats(std.testing.allocator, "/p", &jobs, &.{ 0, 1 }, &cache, true, cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+    try std.testing.expectEqualStrings("Caveats for a:", cap.lines.items[0]);
+    try std.testing.expectEqualStrings("note a", cap.lines.items[1]);
+
+    // A job that never linked has nothing to say.
+    printLinkedCaveats(std.testing.allocator, "/p", &jobs, &.{1}, &cache, true, cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+
+    printLinkedCaveats(std.testing.allocator, "/p", &jobs, &.{0}, &cache, false, cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+}
+
+test "the argv path shows caveats by default" {
+    try std.testing.expect((ExecuteOpts{}).show_caveats);
+}
+
+test "installAll keeps caveats off unless asked and forwards the switch" {
+    // A caller that forgets the flag must not print a dependency's notes.
+    try std.testing.expect(!execOptsFromAll(.{}).show_caveats);
+    try std.testing.expect(execOptsFromAll(.{ .show_caveats = true }).show_caveats);
 }

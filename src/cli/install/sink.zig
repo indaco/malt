@@ -58,6 +58,8 @@ pub const OutputSink = struct {
 // `"{s}"` re-format keeps `output`'s prefix/colour/quiet handling intact;
 // the message bytes are identical regardless of the formatting round-trip.
 fn termInfo(_: ?*anyopaque, msg: []const u8) void {
+    // An empty message is a paragraph break, not a line with a bare prefix.
+    if (msg.len == 0) return output.blankLine();
     output.info("{s}", .{msg});
 }
 fn termWarn(_: ?*anyopaque, msg: []const u8) void {
@@ -121,6 +123,16 @@ test "terminal sink forwards human lines to ui/output" {
 
     try std.testing.expect(std.mem.find(u8, buf.items, "hello 7") != null);
     try std.testing.expect(std.mem.find(u8, buf.items, "boom") != null);
+}
+
+test "terminal sink turns an empty info message into a bare line break" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    terminal.info("{s}", .{""});
+    try std.testing.expectEqualStrings("\n", buf.items);
 }
 
 test "silent sink swallows every human line" {

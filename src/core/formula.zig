@@ -9,6 +9,7 @@ const service_types = @import("services/types.zig");
 const cron = @import("services/cron.zig");
 const path_component = @import("../fs/path_component.zig");
 const store_path = @import("../fs/store_path.zig");
+const caveats_mod = @import("caveats.zig");
 const cask_variation = @import("../net/cask_variation.zig");
 pub const Schedule = service_types.Schedule;
 
@@ -381,6 +382,9 @@ pub const Formula = struct {
     /// Advisories still open at the tap's current version. Outer slice
     /// allocated through `_parsed.arena`; strings live in `_parsed`.
     vulns_open: []const Vuln = &.{},
+    /// Post-install notes the formula asks the user to read. Borrowed from
+    /// `_parsed`; raw prose, so scrub it at output.
+    caveats: ?[]const u8 = null,
 
     /// Holds the parsed JSON tree. Must stay alive as long as the Formula
     /// is in use because string fields point into the JSON source buffer.
@@ -570,6 +574,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     const revision = getInt(root, "revision");
     const keg_only = getBool(root, "keg_only");
     const post_install_defined = getBool(root, "post_install_defined");
+    const caveats = caveats_mod.blankToNull(getString(root, "caveats"));
     // The steps key is present (empty) on every formula; only a non-empty
     // array marks a steps-migrated hook.
     const has_post_install_steps = blk: {
@@ -739,8 +744,20 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .service = service_def,
         .service_refusal = service_refusal,
         .vulns_open = vulns_open,
+        .caveats = caveats,
         ._parsed = parsed,
     };
+}
+
+/// Replace the Homebrew path placeholders in caveat text with real paths.
+// shortcut: `/$HOME` is left as is (one formula), expand it if more appear.
+pub fn expandCaveats(allocator: std.mem.Allocator, text: []const u8, prefix: []const u8) std.mem.Allocator.Error![]u8 {
+    const cellar = try std.fmt.allocPrint(allocator, "{s}/Cellar", .{prefix});
+    defer allocator.free(cellar);
+    return caveats_mod.expand(allocator, text, &.{
+        .{ .token = "$HOMEBREW_PREFIX", .value = prefix },
+        .{ .token = "$HOMEBREW_CELLAR", .value = cellar },
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1449,6 +1466,72 @@ test "parseFormula releases every auxiliary allocation through deinit" {
     try testing.expectEqual(@as(usize, 1), formula.oldnames.len);
     try testing.expect(formula.service != null);
     try testing.expect(formula.bottle_files != null);
+}
+
+fn parseCaveatsFixture(extra: []const u8, arena: std.mem.Allocator) !Formula {
+    const json = try std.fmt.allocPrint(
+        arena,
+        "{{\"name\":\"alpha\",\"versions\":{{\"stable\":\"1.0\"}}{s}}}",
+        .{extra},
+    );
+    return parseFormula(arena, json);
+}
+
+test "parseFormula reads caveats and maps absent, empty, null and non-string to none" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cases = [_]struct { extra: []const u8, want: ?[]const u8 }{
+        .{ .extra = ",\"caveats\":\"Run this\\nthen that\"", .want = "Run this\nthen that" },
+        .{ .extra = "", .want = null },
+        .{ .extra = ",\"caveats\":\"\"", .want = null },
+        .{ .extra = ",\"caveats\":\" \\n\\n\"", .want = null },
+        .{ .extra = ",\"caveats\":null", .want = null },
+        .{ .extra = ",\"caveats\":42", .want = null },
+        .{ .extra = ",\"caveats\":[\"x\"]", .want = null },
+    };
+    for (cases) |c| {
+        var f = try parseCaveatsFixture(c.extra, a);
+        defer f.deinit();
+        if (c.want) |w| {
+            try testing.expectEqualStrings(w, f.caveats.?);
+        } else {
+            try testing.expect(f.caveats == null);
+        }
+    }
+}
+
+test "parseFormula keeps a control byte in caveats so output can scrub it" {
+    // Prose, not an identity: refusing the formula would hide a good install.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try parseCaveatsFixture(",\"caveats\":\"a\\u001bb\"", arena.allocator());
+    defer f.deinit();
+    try testing.expectEqualStrings("a\x1bb", f.caveats.?);
+}
+
+test "expandCaveats replaces the prefix and cellar placeholders everywhere" {
+    const got = try expandCaveats(
+        testing.allocator,
+        "ln $HOMEBREW_PREFIX/opt/x $HOMEBREW_PREFIX/bin; ls $HOMEBREW_CELLAR/x",
+        "/opt/malt",
+    );
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("ln /opt/malt/opt/x /opt/malt/bin; ls /opt/malt/Cellar/x", got);
+}
+
+test "expandCaveats leaves text without placeholders and the home token unchanged" {
+    const text = "plain text, and /$HOME/x stays";
+    const got = try expandCaveats(testing.allocator, text, "/opt/malt");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(text, got);
+}
+
+test "expandCaveats handles empty text" {
+    const got = try expandCaveats(testing.allocator, "", "/opt/malt");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("", got);
 }
 
 test "dependencyPlaceholder resolves a token against its declared dependency" {

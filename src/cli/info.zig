@@ -9,6 +9,7 @@ const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -341,7 +342,7 @@ fn emitApiFormula(
     var f = formula_mod.parseFormula(allocator, body) catch |e| return refusedRecord(e, name);
     defer f.deinit();
 
-    if (json_mode) try writeApiFormulaJson(&f, stdout) else try writeApiFormulaHuman(&f, stdout, colorize);
+    if (json_mode) try writeApiFormulaJson(&f, stdout) else try writeApiFormulaHuman(allocator, &f, stdout, colorize, atomic.maltPrefixOrAbort());
     return true;
 }
 
@@ -363,9 +364,10 @@ fn emitApiCask(
     return true;
 }
 
-fn writeApiFormulaHuman(f: *const formula_mod.Formula, stdout: *std.Io.Writer, colorize: bool) !void {
+fn writeApiFormulaHuman(allocator: std.mem.Allocator, f: *const formula_mod.Formula, stdout: *std.Io.Writer, colorize: bool, prefix: []const u8) !void {
     var buf: [4096]u8 = undefined;
     try encodeApiFormulaHuman(stdout, &buf, f, output.isQuiet(), colorize);
+    try encodeFormulaCaveats(stdout, allocator, &buf, colorize, output.isQuiet(), f, prefix);
 }
 
 fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: *std.Io.Writer, colorize: bool) !void {
@@ -413,6 +415,38 @@ pub fn encodeApiFormulaHuman(
             if (i != 0) try w.writeAll(", ");
             try w.writeAll(dep);
         }
+        try w.writeAll("\n");
+    }
+}
+
+/// Caveats are formula prose with Homebrew path placeholders; they follow the
+/// field rows and keep the value column.
+pub fn encodeFormulaCaveats(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    scratch: []u8,
+    colorize: bool,
+    quiet: bool,
+    f: *const formula_mod.Formula,
+    prefix: []const u8,
+) !void {
+    if (quiet) return;
+    const raw = f.caveats orelse return;
+    const text = try formula_mod.expandCaveats(allocator, raw, prefix);
+    defer allocator.free(text);
+    const col: usize = 14;
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (first) {
+            try output.writeFieldKey(w, colorize, col, "Caveats");
+        } else if (line.len != 0) {
+            for (0..col) |_| try w.writeAll(" ");
+        }
+        first = false;
+        // A line longer than the scratch buffer is dropped, like any field value.
+        const out = std.mem.print(scratch, "{s}", .{line}) catch scratch[0..0];
+        try w.writeAll(term_sanitize.scrubInPlace(out));
         try w.writeAll("\n");
     }
 }
@@ -924,6 +958,95 @@ test "encodeApiFormulaHuman includes metadata and install hint" {
     try testing.expect(std.mem.find(u8, out, "homebrew/core") != null);
     try testing.expect(std.mem.find(u8, out, "Dependencies:") != null);
     try testing.expect(std.mem.find(u8, out, "libidn2, openssl@3\n") != null);
+}
+
+fn caveatsFormula(arena: std.mem.Allocator, caveats_json: []const u8) !formula_mod.Formula {
+    const json = try std.fmt.allocPrint(
+        arena,
+        "{{\"name\":\"alpha\",\"versions\":{{\"stable\":\"1.0\"}}{s}}}",
+        .{caveats_json},
+    );
+    return formula_mod.parseFormula(arena, json);
+}
+
+test "encodeFormulaCaveats stays silent under quiet and pads no blank line" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try caveatsFormula(arena.allocator(), ",\"caveats\":\"one\\n\\ntwo\"");
+    defer f.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [512]u8 = undefined;
+    try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, true, &f, "/p");
+    try testing.expectEqualStrings("", aw.written());
+
+    try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, false, &f, "/p");
+    try testing.expectEqualStrings("Caveats:      one\n\n              two\n", aw.written());
+}
+
+test "writeApiFormulaHuman prints the caveats block after the field rows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try caveatsFormula(arena.allocator(), ",\"caveats\":\"at $HOMEBREW_PREFIX\"");
+    defer f.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeApiFormulaHuman(testing.allocator, &f, &aw.writer, false, "/opt/malt");
+    try testing.expect(std.mem.endsWith(u8, aw.written(), "Caveats:      at /opt/malt\n"));
+}
+
+test "encodeFormulaCaveats expands the prefix and aligns continuation lines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try caveatsFormula(arena.allocator(), ",\"caveats\":\"source $HOMEBREW_PREFIX/a\\nthen b\\n\"");
+    defer f.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, false, &f, "/opt/malt");
+    try testing.expectEqualStrings("Caveats:      source /opt/malt/a\n              then b\n", aw.written());
+}
+
+test "encodeFormulaCaveats scrubs an escape byte from the text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try caveatsFormula(arena.allocator(), ",\"caveats\":\"a\\u001b[31mb\"");
+    defer f.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, false, &f, "/p");
+    try testing.expectEqualStrings("Caveats:      a[31mb\n", aw.written());
+}
+
+test "encodeFormulaCaveats drops a line longer than the scratch buffer and keeps the rest" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try caveatsFormula(arena.allocator(), ",\"caveats\":\"0123456789abcdef\\nok\"");
+    defer f.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [8]u8 = undefined;
+    try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, false, &f, "/p");
+    try testing.expectEqualStrings("Caveats:      \n              ok\n", aw.written());
+}
+
+test "encodeFormulaCaveats writes nothing without caveats" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try caveatsFormula(arena.allocator(), "");
+    defer f.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try encodeFormulaCaveats(&aw.writer, testing.allocator, &scratch, false, false, &f, "/p");
+    try testing.expectEqualStrings("", aw.written());
 }
 
 test "encodeApiFormulaJson produces the documented shape" {

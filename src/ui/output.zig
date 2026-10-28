@@ -335,6 +335,12 @@ pub fn info(comptime fmt: []const u8, args: anytype) void {
     emitPrefixLine(.info, fmt, args);
 }
 
+/// A bare line break between paragraphs of `info` text; hidden by `--quiet`.
+pub fn blankLine() void {
+    if (quiet) return;
+    writeStderrAll("\n");
+}
+
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
     emitPrefixLine(.warn, fmt, args);
 }
@@ -662,6 +668,25 @@ test "shellQuoted keeps a path with spaces and quotes one argument" {
     var buf: [64]u8 = undefined;
     const got = try std.mem.print(&buf, "{f}", .{shellQuoted("/src/my dir/l'x.rb")});
     try std.testing.expectEqualStrings("'/src/my dir/l'\\''x.rb'", got);
+}
+
+test "blankLine writes a bare newline and hides under quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        setQuiet(prior_quiet);
+    }
+
+    setQuiet(false);
+    blankLine();
+    try std.testing.expectEqualStrings("\n", buf.items);
+
+    setQuiet(true);
+    blankLine();
+    try std.testing.expectEqualStrings("\n", buf.items);
 }
 
 test "notice wraps the magenta prefix and uses the circled-i glyph (dark + basic)" {
