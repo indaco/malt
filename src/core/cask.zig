@@ -180,8 +180,15 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
         .object => |o| o,
         else => null,
     } else null;
-    const nested = if (container) |c| getStr(c, "nested") else null;
-    if (nested) |path| if (!path_component.isRelativeSubpath(path)) return CaskError.ParseFailed;
+    const declared_nested = if (container) |c| getStr(c, "nested") else null;
+    if (declared_nested) |path| if (!path_component.isRelativeSubpath(path) or path_component.hasControlByte(path))
+        return CaskError.ParseFailed;
+    // Only a nested tarball has an installer. Other payloads keep the plain
+    // ZIP placement.
+    const nested = if (declared_nested) |path| switch (artifactTypeFromUrl(path)) {
+        .tar_gz, .tar_xz => path,
+        else => null,
+    } else null;
 
     // Read after the overlay so a variation's own clause is the one judged.
     const requirement = cask_variation.macosRequirement(obj.get("depends_on"));

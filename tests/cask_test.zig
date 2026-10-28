@@ -141,6 +141,42 @@ test "parseCask rejects a nested container path outside the extracted archive" {
     }
 }
 
+test "parseCask rejects a nested container path with a control byte" {
+    // The path is a line-framed identity, as the token and version are.
+    for ([_][]const u8{ "dir\\tP.tar.gz", "dir\\nP.tar.gz" }) |nested| {
+        const json = try testing.allocator.print(
+            \\{{"token":"nested","version":"1","url":"https://example.invalid/a.zip","container":{{"type":"zip","nested":"{s}"}}}}
+        , .{nested});
+        defer testing.allocator.free(json);
+        try testing.expectError(error.ParseFailed, cask.parseCask(testing.allocator, json));
+    }
+}
+
+test "parseCask keeps only a nested tarball so other nested casks stay on the ditto path" {
+    // Real casks nest a .dmg, .zip or .pkg payload. The tarball installer
+    // cannot read it, so these casks keep the plain ZIP placement.
+    const cases = [_]struct { nested: []const u8, kept: bool }{
+        .{ .nested = "Bootstrapper.tar.gz", .kept = true },
+        .{ .nested = "dist/Payload.tar.xz", .kept = true },
+        .{ .nested = "Ryver-1.3.3.dmg", .kept = false },
+        .{ .nested = "Gearboy.app.zip", .kept = false },
+        .{ .nested = "Installer.pkg/Contents/Archive.pax.gz", .kept = false },
+    };
+    for (cases) |case| {
+        const json = try testing.allocator.print(
+            \\{{"token":"nested","version":"1","url":"https://example.invalid/a.zip","container":{{"nested":"{s}"}}}}
+        , .{case.nested});
+        defer testing.allocator.free(json);
+        var c = try cask.parseCask(testing.allocator, json);
+        defer c.deinit();
+        if (case.kept) {
+            try testing.expectEqualStrings(case.nested, c.nested_container.?);
+        } else {
+            try testing.expect(c.nested_container == null);
+        }
+    }
+}
+
 test "artifactTypeFromUrl detects .dmg" {
     try std.testing.expectEqual(cask.ArtifactType.dmg, cask.artifactTypeFromUrl("https://example.com/App.dmg"));
 }
