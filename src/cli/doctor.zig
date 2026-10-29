@@ -86,7 +86,11 @@ pub const CheckCtx = struct {
     /// checks observe its non-atomic intermediate states (a keg row before
     /// its dir, a mid-swap symlink); when set they downgrade those findings
     /// to an informational "operation in progress" note instead of a fault.
+    /// This is the pre-walk snapshot; the checks also probe before the scan
+    /// and when they report (see `inFlight`).
     op_in_flight: bool = false,
+    /// Tests set this to simulate a lock change during one check.
+    lock_probe: *const fn (std.Io, []const u8) bool = operationInFlight,
 };
 
 /// The single in-progress note the lock-aware checks share.
@@ -103,6 +107,13 @@ pub fn operationInFlight(io: std.Io, prefix: []const u8) bool {
 }
 
 const pidAlive = fix_mod.pidAlive;
+
+/// An operation can start after the pre-walk snapshot, so a check probes
+/// before its scan and again when it reports: a release in between empties
+/// the lock file. An operation that starts and ends inside one scan is missed.
+fn inFlight(ctx: CheckCtx) bool {
+    return ctx.op_in_flight or ctx.lock_probe(ctx.io, ctx.prefix);
+}
 
 /// One entry in the health walk. `run` prints its row(s) and returns
 /// the walker's tally tag.
@@ -979,6 +990,7 @@ pub fn formatMirrorOverrideDetail(buf: []u8, mirrors: mirror_mod.Mirrors) []cons
 }
 
 fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
+    const live_at_start = inFlight(ctx);
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
@@ -1021,7 +1033,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
-    if (ctx.op_in_flight) {
+    if (live_at_start or inFlight(ctx)) {
         printCheck(name, .info_status, op_in_flight_note);
         return .info_status;
     }
@@ -1037,6 +1049,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
+    const live_at_start = inFlight(ctx);
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
@@ -1076,7 +1089,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
-    if (ctx.op_in_flight) {
+    if (live_at_start or inFlight(ctx)) {
         printCheck(name, .info_status, op_in_flight_note);
         return .info_status;
     }
@@ -1097,6 +1110,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
 /// where the user is sent after that refusal, so it has to name the link.
 /// No `--fix` hint: unlinking a package dir the user planted is their call.
 fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
+    const live_at_start = inFlight(ctx);
     var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cellar_root = std.mem.print(&root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
@@ -1130,7 +1144,7 @@ fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
-    if (ctx.op_in_flight) {
+    if (live_at_start or inFlight(ctx)) {
         printCheck(name, .info_status, op_in_flight_note);
         return .info_status;
     }
@@ -1147,6 +1161,7 @@ fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
+    const live_at_start = inFlight(ctx);
     var offenders: std.ArrayList([]u8) = .empty;
     defer freeOwnedStringList(ctx.allocator, &offenders);
 
@@ -1170,7 +1185,7 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
-    if (ctx.op_in_flight) {
+    if (live_at_start or inFlight(ctx)) {
         printCheck(name, .info_status, op_in_flight_note);
         return .info_status;
     }
@@ -2112,6 +2127,128 @@ test "checkCellarPackageDirs: a dangling package-dir symlink is still reported" 
     defer resetVerboseHint();
 
     try testing.expectEqual(CheckResult.warn_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
+}
+
+test "inFlight: re-probes the lock, and a dead holder never counts" {
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_inflight_reprobe");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
+
+    const ctx: CheckCtx = .{ .allocator = testing.allocator, .prefix = s.base, .io = io, .environ = .empty };
+    try testing.expect(!inFlight(ctx));
+
+    // The lock appears after `ctx` was built: the live file wins.
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, s.p("/db/malt.lock"), .{});
+        defer f.close(io);
+        var b: [16]u8 = undefined;
+        try f.writeStreamingAll(io, try std.mem.print(&b, "{d}", .{std.c.getpid()}));
+    }
+    try testing.expect(inFlight(ctx));
+
+    // A dead holder is a stale lock, not an operation.
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, s.p("/db/malt.lock"), .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "999999");
+    }
+    var dead = ctx;
+    try testing.expect(!inFlight(dead));
+
+    // An unreadable holder is no proof of an operation either.
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, s.p("/db/malt.lock"), .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not-a-pid");
+    }
+    try testing.expect(!inFlight(dead));
+
+    // The snapshot alone still downgrades once the operation has ended.
+    dead.op_in_flight = true;
+    try testing.expect(inFlight(dead));
+}
+
+/// Scripted lock probe: returns `probe_answers` in call order, then false.
+/// Call 0 also plants the faults, so a scan that starts before call 0 sees none.
+var probe_answers: []const bool = &.{};
+var probe_calls: usize = 0;
+var probe_prefix: ?*Scratch = null;
+
+fn scriptedProbe(_: std.Io, _: []const u8) bool {
+    defer probe_calls += 1;
+    if (probe_calls == 0) {
+        if (probe_prefix) |s| plantAllFaults(s) catch @panic("plant faults");
+    }
+    return probe_calls < probe_answers.len and probe_answers[probe_calls];
+}
+
+fn plantAllFaults(s: *Scratch) !void {
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, s.p("/db"));
+    try cwd.createDirPath(io, s.p("/store/orphan-a"));
+    try cwd.createDirPath(io, s.p("/Cellar"));
+    try cwd.createDirPath(io, s.p("/bin"));
+    try cwd.createDirPath(io, s.p("/victim"));
+    try std.Io.Dir.symLinkAbsolute(io, s.p("/victim"), s.p("/Cellar/planted"), .{});
+    try std.Io.Dir.symLinkAbsolute(io, s.p("/gone"), s.p("/bin/ghost"), .{});
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO store_refs VALUES ('orphan-a');
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('phantom', 'phantom', '1.0', 'aa', '/nonexistent/phantom/1.0');
+    );
+}
+
+test "lock-aware checks: a lock seen at the start or at the report downgrades every finding" {
+    const checks_under_test = [_]struct { name: []const u8, run: *const fn (CheckCtx, []const u8) CheckResult }{
+        .{ .name = "Orphaned store entries", .run = checkOrphanedStore },
+        .{ .name = "Missing kegs", .run = checkMissingKegs },
+        .{ .name = "Cellar package directories", .run = checkCellarPackageDirs },
+        .{ .name = "Broken symlinks", .run = checkBrokenSymlinks },
+    };
+    // [live, gone]: the operation ends during the scan.
+    // [gone, live]: the operation starts during the scan.
+    // [gone, gone]: no operation, so the fault must still show.
+    const cases = [_]struct { answers: []const bool, want_info: bool }{
+        .{ .answers = &.{ true, false }, .want_info = true },
+        .{ .answers = &.{ false, true }, .want_info = true },
+        .{ .answers = &.{ false, false }, .want_info = false },
+    };
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    defer resetVerboseHint();
+    defer resetFixHint();
+    defer probe_prefix = null;
+
+    for (checks_under_test) |c| {
+        for (cases) |case| {
+            // Fresh prefix per run: it is clean until probe call 0 plants the faults.
+            var s = try Scratch.init("doctor_scripted_probe");
+            defer s.deinit();
+            probe_answers = case.answers;
+            probe_calls = 0;
+            probe_prefix = &s;
+            const ctx: CheckCtx = .{
+                .allocator = testing.allocator,
+                .prefix = s.base,
+                .io = std.Options.debug_io,
+                .environ = .empty,
+                .lock_probe = scriptedProbe,
+            };
+            const got = c.run(ctx, c.name);
+            if (case.want_info) {
+                try testing.expectEqual(CheckResult.info_status, got);
+            } else {
+                try testing.expect(got != CheckResult.info_status and got != CheckResult.ok);
+            }
+        }
+    }
 }
 
 test "checkCellarPackageDirs: a live operation downgrades the finding, never hides it" {
