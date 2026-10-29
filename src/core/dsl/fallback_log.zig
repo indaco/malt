@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const json_escape = @import("../json_escape.zig");
 
 pub const FallbackReason = enum {
     unknown_method,
@@ -126,13 +127,12 @@ pub const FallbackLog = struct {
         try writer.writeAll("[");
         for (self._entries.items, 0..) |entry, i| {
             if (i > 0) try writer.writeAll(",");
-            try writer.writeAll("{\"formula\":\"");
-            try writer.writeAll(entry.formula);
-            try writer.writeAll("\",\"reason\":\"");
+            try writer.writeAll("{\"formula\":");
+            try json_escape.jsonStr(writer, entry.formula);
+            try writer.writeAll(",\"reason\":\"");
             try writer.writeAll(@tagName(entry.reason));
-            try writer.writeAll("\",\"detail\":\"");
-            try writer.writeAll(entry.detail);
-            try writer.writeAll("\"");
+            try writer.writeAll("\",\"detail\":");
+            try json_escape.jsonStr(writer, entry.detail);
             if (entry.loc) |loc| {
                 try writer.print(",\"line\":{d},\"col\":{d}", .{ loc.line, loc.col });
             }
@@ -248,4 +248,50 @@ test "note() flags dropped_oom and records nothing when the dupe OOMs" {
 
     try std.testing.expectEqual(@as(usize, 0), flog.notes().len);
     try std.testing.expect(flog.dropped_oom);
+}
+
+test "toJson escapes quote, backslash and newline in formula and detail" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    const formula = "f\"o";
+    const detail = "a\"b\\c\n";
+    flog.log(.{ .formula = formula, .reason = .system_command_failed, .detail = detail, .loc = null });
+
+    const j = try flog.toJson(std.testing.allocator);
+    defer std.testing.allocator.free(j);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, j, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.array.items[0].object;
+    try std.testing.expectEqualStrings(formula, obj.get("formula").?.string);
+    try std.testing.expectEqualStrings(detail, obj.get("detail").?.string);
+}
+
+test "toJson escapes terminal control bytes in detail" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "f", .reason = .system_command_failed, .detail = "\x1b]52;c;AAAA\x07", .loc = null });
+
+    const j = try flog.toJson(std.testing.allocator);
+    defer std.testing.allocator.free(j);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, j, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, j, 0x07) == null);
+    try std.testing.expect(std.mem.indexOf(u8, j, "\\u001b") != null);
+}
+
+test "toJson keeps the shape of escape-free entries" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "wget", .reason = .unknown_method, .detail = "h", .loc = null });
+    flog.log(.{ .formula = "wget", .reason = .parse_error, .detail = "h", .loc = .{ .line = 3, .col = 4 } });
+
+    const j = try flog.toJson(std.testing.allocator);
+    defer std.testing.allocator.free(j);
+
+    try std.testing.expectEqualStrings(
+        "[{\"formula\":\"wget\",\"reason\":\"unknown_method\",\"detail\":\"h\"}," ++
+            "{\"formula\":\"wget\",\"reason\":\"parse_error\",\"detail\":\"h\",\"line\":3,\"col\":4}]",
+        j,
+    );
 }
