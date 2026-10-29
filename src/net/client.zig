@@ -1349,11 +1349,9 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Redirect budget for every walk - matches stdlib's default so download
-    /// depth is unchanged by taking over redirect handling. The HEAD walk that
-    /// classifies a cask shares it, so it cannot resolve a chain the download
-    /// would reject.
-    pub const max_redirects: usize = 3;
+    /// Shared by classification and downloads. Allow regional installer
+    /// endpoints while keeping redirect loops bounded.
+    pub const max_redirects: usize = 10;
 
     const GetOutcome = struct {
         status: u16,

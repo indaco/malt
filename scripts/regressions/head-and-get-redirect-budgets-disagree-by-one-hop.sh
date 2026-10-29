@@ -13,6 +13,9 @@
 # they express every chain length in terms of that budget. The source
 # preconditions guard the HEAD walk from growing a second one.
 #
+# The budget is now 10 redirects, so regional installer chains of 4 or more
+# hops download. Fixture tests pin 4 and 10 as followed and 11 as refused.
+#
 # No network, no temp state, well under 30s.
 
 set -euo pipefail
