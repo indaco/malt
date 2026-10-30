@@ -80,7 +80,7 @@ The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/insta
 To verify `install.sh` separately, download it from a release tag. The example uses the latest tag, but you can use any release that you trust. Then compare its SHA256 with the value in the release notes:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.25.4/scripts/install.sh" -o install.sh
+curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.25.5/scripts/install.sh" -o install.sh
 shasum -a 256 install.sh
 bash install.sh
 ```
