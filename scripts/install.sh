@@ -10,6 +10,25 @@ BINARY="malt"
 # INSTALL_DIR=/tmp/malt-bin ./scripts/install.sh`) without touching
 # the system prefix.
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+# A ".." component can make a path look like it sits under PREFIX while it
+# names another dir, so refuse it.
+case "/$INSTALL_DIR/" in
+*/../*)
+  printf '  ✗ INSTALL_DIR must not contain a ".." component: %s\n' "$INSTALL_DIR" >&2
+  exit 1
+  ;;
+esac
+# A quoted ~ reaches us unexpanded. Pinning it would create a dir named "~".
+# The source build cds away, so any other relative value is pinned first.
+case "$INSTALL_DIR" in
+/*) ;;
+"~"*)
+  # shellcheck disable=SC2016 # $HOME is literal text in the hint
+  printf '  ✗ INSTALL_DIR starts with "~", which the shell did not expand. Use $HOME instead.\n' >&2
+  exit 1
+  ;;
+*) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
+esac
 PREFIX="${PREFIX:-/opt/malt}"
 
 # URL overrides — TESTING ONLY. In production both point at github.com.
@@ -20,21 +39,30 @@ PREFIX="${PREFIX:-/opt/malt}"
 RELEASES_BASE_URL="${MALT_TEST_RELEASES_URL:-https://github.com/${REPO}/releases/download}"
 API_LATEST_URL="${MALT_TEST_API_URL:-https://api.github.com/repos/${REPO}/releases/latest}"
 
-# Use sudo only when we actually need it. Root obviously skips it; a
-# non-root run skips it too when INSTALL_DIR and PREFIX are already
-# writable (the common case when testing against /tmp).
+# Decide sudo per write target. SUDO covers PREFIX and the man page,
+# BIN_SUDO covers INSTALL_DIR. One shared flag would make root create a
+# bin directory the user could create, and root-owned dirs in the user's
+# tree break later user-level installs. Root skips both.
 SUDO="sudo"
+BIN_SUDO="sudo"
+bin_dir_is_new=0
 if [ "$(id -u)" = 0 ]; then
   SUDO=""
+  BIN_SUDO=""
 else
-  prefix_writable=0
   if [ -d "$PREFIX" ] && [ -w "$PREFIX" ]; then
-    prefix_writable=1
-  elif [ ! -e "$PREFIX" ] && [ -w "$(dirname "$PREFIX")" ]; then
-    prefix_writable=1
-  fi
-  if [ -w "$INSTALL_DIR" ] && [ "$prefix_writable" = 1 ]; then
     SUDO=""
+  elif [ ! -e "$PREFIX" ] && [ -w "$(dirname "$PREFIX")" ]; then
+    SUDO=""
+  fi
+  # Test the nearest existing ancestor of INSTALL_DIR: a missing directory
+  # is as writable as the place it would be created in.
+  install_dir_probe=$INSTALL_DIR
+  while [ ! -e "$install_dir_probe" ]; do
+    install_dir_probe=$(dirname "$install_dir_probe")
+  done
+  if [ -d "$install_dir_probe" ] && [ -w "$install_dir_probe" ]; then
+    BIN_SUDO=""
   fi
 fi
 
@@ -185,10 +213,14 @@ if [ -z "$LATEST" ]; then
   fi
 
   info "Installing to ${INSTALL_DIR}..."
-  $SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
+  # Only a dir the installer creates may be handed back to the user later.
+  # Ask with the privilege that will create it. A failed ask reads as "not new".
+  if [ -n "$BIN_SUDO" ] && $BIN_SUDO test ! -e "$INSTALL_DIR"; then bin_dir_is_new=1; fi
+  $BIN_SUDO mkdir -p "$INSTALL_DIR"
+  $BIN_SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
 
   # `mt` is a symlink to `malt`. Relative target survives prefix moves.
-  $SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
+  $BIN_SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
 
 else
   VERSION="${LATEST#v}"
@@ -282,10 +314,14 @@ else
 
   # ── Install binary ──────────────────────────────────────────────
   info "Installing to ${INSTALL_DIR}..."
-  $SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
+  # Only a dir the installer creates may be handed back to the user later.
+  # Ask with the privilege that will create it. A failed ask reads as "not new".
+  if [ -n "$BIN_SUDO" ] && $BIN_SUDO test ! -e "$INSTALL_DIR"; then bin_dir_is_new=1; fi
+  $BIN_SUDO mkdir -p "$INSTALL_DIR"
+  $BIN_SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
 
   # `mt` is a symlink to `malt`. Relative target survives prefix moves.
-  $SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
+  $BIN_SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
 fi
 
 # ── Create prefix directory ─────────────────────────────────────────
@@ -302,6 +338,17 @@ else
     $SUDO chown "$USER" "$PREFIX"
   fi
   ok "${PREFIX} already exists"
+fi
+
+# A bin dir that root created under PREFIX must end up user-owned, or malt
+# cannot link into it later. Only the dir and the two files root wrote are
+# touched. A nested path keeps its root-owned parents: use <prefix>/bin.
+if [ -n "$BIN_SUDO" ] && [ "$bin_dir_is_new" = 1 ]; then
+  case "$INSTALL_DIR" in
+  "${PREFIX%/}"/*)
+    $BIN_SUDO chown -h "$USER" "$INSTALL_DIR" "$INSTALL_DIR/$BINARY" "$INSTALL_DIR/mt"
+    ;;
+  esac
 fi
 
 # ── Install man page ────────────────────────────────────────────────
