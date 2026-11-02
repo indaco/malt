@@ -75,7 +75,7 @@ The script does these steps:
 curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
 ```
 
-The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) on your `PATH`. To skip verification, set `MALT_ALLOW_UNVERIFIED=1` (not recommended). If no release matches your platform, the script builds malt from source.
+The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) on your `PATH`. To skip verification, set `MALT_ALLOW_UNVERIFIED=1` on the `bash` side of the pipe: `curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | MALT_ALLOW_UNVERIFIED=1 bash` (not recommended). A variable set before `curl` does not reach `bash`. For a downloaded copy, set it before `bash /path/to/install.sh`. If no release matches your platform, the script builds malt from source.
 
 To verify `install.sh` separately, download it from a release tag. The example uses the latest tag, but you can use any release that you trust. Then compare its SHA256 with the value in the release notes:
 
@@ -640,7 +640,7 @@ malt completions fish > ~/.config/fish/completions/malt.fish
 
 `mt version update` verifies the release with cosign and SHA256, against the same trust anchor as `install.sh`. Then it replaces the binary atomically and keeps the previous binary at `<target>.old`. `--cleanup` removes these files and the orphaned staging files from stopped updates. It does not use the network. If Homebrew installed malt, the command tells you to use `brew upgrade --cask malt`.
 
-To skip cosign, `install.sh` accepts `MALT_ALLOW_UNVERIFIED=1` (strongly discouraged). `mt version update` needs the env var **and** `--no-verify`, because you run the update command many times:
+To skip cosign, `install.sh` accepts `MALT_ALLOW_UNVERIFIED=1` on the `bash` side of the pipe, or before `bash /path/to/install.sh` for a downloaded copy (strongly discouraged). `mt version update` needs the env var **and** `--no-verify`, because you run the update command many times:
 
 ```bash
 MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
