@@ -168,7 +168,7 @@ if [ -z "$LATEST" ]; then
     else
       error "Could not resolve a release tag to clone.
   Refusing to build from the default branch (untrusted).
-  To bypass (not recommended): MALT_ALLOW_UNVERIFIED_SOURCE=1 curl … | bash"
+  To bypass (not recommended): curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | MALT_ALLOW_UNVERIFIED_SOURCE=1 bash"
     fi
 
     info "Building (this may take a minute)..."
@@ -248,7 +248,7 @@ else
   else
     error "cosign is required to verify the release signature.
   Install: https://docs.sigstore.dev/cosign/system_config/installation/ (e.g. \`brew install cosign\`)
-  To bypass (not recommended): MALT_ALLOW_UNVERIFIED=1 curl … | bash"
+  To bypass (not recommended): curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | MALT_ALLOW_UNVERIFIED=1 bash"
   fi
 
   # Compare the name field for equality. `grep "$ARCHIVE_NAME"` treated the
