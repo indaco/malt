@@ -37,6 +37,7 @@ cleanup() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
+  chmod -R u+rwx "$TMP" 2>/dev/null || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -52,6 +53,14 @@ INSTALLER="$TMP/install.sh"
 pass=0
 fail=0
 failures=()
+
+# A sudo that always refuses. Tests that expect no sudo put it first on
+# PATH, so a wrong sudo choice fails the run instead of prompting or
+# writing root-owned files.
+NOSUDO="$TMP/nosudo"
+mkdir -p "$NOSUDO"
+printf '#!/bin/sh\necho "sudo called: $*" >&2\nexit 97\n' >"$NOSUDO/sudo"
+chmod +x "$NOSUDO/sudo"
 
 start_server() {
   local root="$1"
@@ -130,7 +139,7 @@ run_installer() {
   # binaries ahead of the system install.
   env -i \
     HOME="$HOME" \
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
     USER="$USER" \
     PREFIX="$prefix" \
     INSTALL_DIR="$install_dir" \
@@ -297,7 +306,7 @@ mkdir -p "$prefix5" "$install_dir5"
 rc5=0
 env -i \
   HOME="$HOME" \
-  PATH="$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$NOSUDO:$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
   USER="$USER" \
   PREFIX="$prefix5" \
   INSTALL_DIR="$install_dir5" \
@@ -350,7 +359,7 @@ chmod +x "$FAKE_BIN5C/git" "$FAKE_BIN5C/zig"
 mkdir -p "$TMP/prefix_5c" "$TMP/bin_5c"
 env -i \
   HOME="$HOME" \
-  PATH="$FAKE_BIN5C:/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$NOSUDO:$FAKE_BIN5C:/usr/bin:/bin:/usr/sbin:/sbin" \
   USER="$USER" \
   PREFIX="$TMP/prefix_5c" \
   INSTALL_DIR="$TMP/bin_5c" \
@@ -455,7 +464,7 @@ mkdir -p "$prefix7" "$install_dir7"
 rc7=0
 env -i \
   HOME="$HOME" \
-  PATH="$FAKE_BIN7:/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$NOSUDO:$FAKE_BIN7:/usr/bin:/bin:/usr/sbin:/sbin" \
   USER="$USER" \
   PREFIX="$prefix7" \
   INSTALL_DIR="$install_dir7" \
@@ -584,7 +593,7 @@ else
   SHIM11="$TMP/shim_11"
   install_dir11="$TMP/missing_11/a/bin"
   mkdir -p "$SHIM11"
-  printf '#!/bin/sh\necho "sudo called: $*" >&2\nexit 97\n' >"$SHIM11/sudo"
+  printf '#!/bin/sh\necho "sudo called: $*" >&2\n' >"$SHIM11/sudo"
   chmod +x "$SHIM11/sudo"
   env -i \
     HOME="$HOME" \
@@ -609,24 +618,56 @@ else
   fi
 fi
 
+# ── test 11b: a failed PREFIX step leaves no binary behind ───────────
+# The prefix step runs before the binary install, so a refused sudo must stop
+# the run before anything lands in the bin dir.
+printf '▸ failed PREFIX step\n'
+if [ "$(id -u)" = 0 ] || [ -w /usr ]; then
+  printf '  - skipped: running as root, or /usr is writable here\n'
+else
+  make_release_fixture "$TMP/releases24" "9.9.9"
+  start_server "$TMP/releases24"
+  SHIM24="$TMP/shim_24"
+  install_dir24="$TMP/bin_24"
+  mkdir -p "$SHIM24"
+  printf '#!/bin/sh\nexit 97\n' >"$SHIM24/sudo"
+  chmod +x "$SHIM24/sudo"
+  rc24=0
+  env -i \
+    HOME="$HOME" \
+    PATH="$SHIM24:/usr/bin:/bin:/usr/sbin:/sbin" \
+    USER="$USER" \
+    PREFIX="/usr/malt_test_nonexistent_24" \
+    INSTALL_DIR="$install_dir24" \
+    MALT_ALLOW_UNVERIFIED=1 \
+    MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
+    MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
+    NO_COLOR=1 \
+    bash "$INSTALLER" >"$TMP/out.log" 2>&1 || rc24=$?
+  stop_server
+  if [ "$rc24" != 0 ] && [ ! -e "$install_dir24/malt" ]; then
+    printf '  ✓ failed PREFIX step: nothing installed\n'
+    pass=$((pass + 1))
+  else
+    printf '  ✗ failed PREFIX step: rc=%s, binary present=%s\n' "$rc24" "$([ -e "$install_dir24/malt" ] && echo yes || echo no)" >&2
+    fail=$((fail + 1))
+    failures+=("failed-prefix-step")
+    sed 's/^/      /' "$TMP/out.log" >&2 || true
+  fi
+fi
+
 # ── tests 12, 15, 16: ownership of a bin dir under PREFIX ────────────
-# Root creates a missing <prefix>/bin before the prefix step. The installer
-# must hand back exactly that dir and the two files it wrote, or malt cannot
-# link into it later. It must never chown a dir it did not create. The shim
-# only logs and succeeds, so nothing is created under /usr.
+# The installer creates PREFIX before the binary, so the user creates a
+# missing <prefix>/bin and no hand-back is needed. The logging shim only
+# records argv and succeeds, so nothing is created under /usr.
 run_logging_sudo() {
-  local prefix="$1" install_dir="$2" n="$3" test_rc="${4:-}"
+  local prefix="$1" install_dir="$2" n="$3"
   make_release_fixture "$TMP/releases$n" "9.9.9"
   start_server "$TMP/releases$n"
   local shim="$TMP/shim_$n"
   mkdir -p "$shim"
-  # `sudo test ! -e` stands in for root's view of the dir: it runs for real, or
-  # returns $test_rc (0 = missing, 1 = exists or sudo failed) when the case
-  # needs a view the user cannot have.
-  local test_line='exec "$@"'
-  [ -z "$test_rc" ] || test_line="exit $test_rc"
-  # shellcheck disable=SC2016 # $1 and $* belong to the generated shim
-  printf '#!/bin/sh\ncase "$1" in test) %s ;; esac\necho "sudo called: $*" >&2\n' "$test_line" >"$shim/sudo"
+  # shellcheck disable=SC2016 # $* belongs to the generated shim
+  printf '#!/bin/sh\necho "sudo called: $*" >&2\n' >"$shim/sudo"
   chmod +x "$shim/sudo"
   env -i \
     HOME="$HOME" \
@@ -642,37 +683,79 @@ run_logging_sudo() {
   stop_server
 }
 
-printf '▸ bin dir under a new PREFIX\n'
+# Stand-in for a PREFIX that needs root: the parent is read-only until the
+# sudo shim opens it. The shim then runs the command as the user, so any
+# sudo argv naming the bin dir proves root would have created it. The first
+# `test` call fails, like a failed first prompt.
+# The sudo argv log lands in $TMP/sudo.log.
+run_emulating_sudo() {
+  local prefix="$1" install_dir="$2" parent="$3" n="$4"
+  make_release_fixture "$TMP/releases$n" "9.9.9"
+  start_server "$TMP/releases$n"
+  local shim="$TMP/shim_$n"
+  mkdir -p "$shim" "$parent"
+  chmod 555 "$parent"
+  cat >"$shim/sudo" <<SHIM
+#!/bin/sh
+echo "sudo called: \$*" >>"$TMP/sudo.log"
+if [ "\$1" = test ] && [ ! -e "$shim/first" ]; then : >"$shim/first"; exit 1; fi
+chmod 755 "$parent"
+exec "\$@"
+SHIM
+  chmod +x "$shim/sudo"
+  : >"$TMP/sudo.log"
+  env -i \
+    HOME="$HOME" \
+    PATH="$shim:/usr/bin:/bin:/usr/sbin:/sbin" \
+    USER="$USER" \
+    PREFIX="$prefix" \
+    INSTALL_DIR="$install_dir" \
+    MALT_ALLOW_UNVERIFIED=1 \
+    MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
+    MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
+    NO_COLOR=1 \
+    bash "$INSTALLER" >"$TMP/out.log" 2>&1 || true
+  stop_server
+}
+
+# Pass when the binary landed and no sudo argv names the bin dir. $1 label, $2 failure tag, $3 bin dir.
+check_user_created_bin_dir() {
+  local label="$1" tag="$2" dir="$3"
+  if [ -x "$dir/malt" ] && ! grep -qF "$dir" "$TMP/sudo.log"; then
+    printf '  ✓ %s\n' "$label"
+    pass=$((pass + 1))
+  else
+    printf '  ✗ %s: the bin dir was not created by the user\n' "$label" >&2
+    fail=$((fail + 1))
+    failures+=("$tag")
+    cat "$TMP/sudo.log" "$TMP/out.log" | sed 's/^/      /' >&2 || true
+  fi
+}
+
+printf '▸ bin dir under a PREFIX that needs root\n'
+if [ "$(id -u)" = 0 ]; then
+  printf '  - skipped: running as root\n'
+else
+  pfx12="$TMP/ro_12/pfx"
+  run_emulating_sudo "$pfx12" "$pfx12/bin" "$TMP/ro_12" 12
+  check_user_created_bin_dir "bin dir under PREFIX: created by the user" "bin-dir-under-prefix" "$pfx12/bin"
+
+  # A trailing slash on PREFIX must not change who creates the dir.
+  pfx15="$TMP/ro_15/pfx"
+  run_emulating_sudo "$pfx15/" "$pfx15/bin" "$TMP/ro_15" 15
+  check_user_created_bin_dir "bin dir under PREFIX: trailing slash" "bin-dir-prefix-slash" "$pfx15/bin"
+
+  # Every level of a nested path is the user's.
+  pfx23="$TMP/ro_23/pfx"
+  run_emulating_sudo "$pfx23" "$pfx23/a/b/bin" "$TMP/ro_23" 23
+  check_user_created_bin_dir "bin dir under PREFIX: nested path" "bin-dir-nested" "$pfx23/a/b/bin"
+fi
+
+# An existing bin dir was not made by the installer: leave its owner alone.
+printf '▸ existing bin dir under PREFIX\n'
 if [ "$(id -u)" = 0 ] || [ -w /usr ]; then
   printf '  - skipped: running as root, or /usr is writable here\n'
 else
-  d12="/usr/malt_test_nonexistent_12/bin"
-  want12="sudo called: chown -h $USER $d12 $d12/malt $d12/mt"
-  run_logging_sudo "/usr/malt_test_nonexistent_12" "$d12" 12
-  if grep -qxF "$want12" "$TMP/out.log"; then
-    printf '  ✓ bin dir under PREFIX: exact chown argv\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ bin dir under PREFIX: expected "%s"\n' "$want12" >&2
-    fail=$((fail + 1))
-    failures+=("bin-dir-under-prefix")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-
-  # A trailing slash on PREFIX must not defeat the match.
-  d15="/usr/malt_test_nonexistent_15/bin"
-  run_logging_sudo "/usr/malt_test_nonexistent_15/" "$d15" 15
-  if grep -qxF "sudo called: chown -h $USER $d15 $d15/malt $d15/mt" "$TMP/out.log"; then
-    printf '  ✓ bin dir under PREFIX: trailing slash still matches\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ bin dir under PREFIX: trailing slash PREFIX skipped the chown\n' >&2
-    fail=$((fail + 1))
-    failures+=("bin-dir-prefix-slash")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-
-  # An existing bin dir was not made by the installer: leave its owner alone.
   run_logging_sudo "/usr" "/usr/bin" 16
   if ! grep -Eq 'sudo called: chown .* /usr/bin( |$)' "$TMP/out.log"; then
     printf '  ✓ existing bin dir under PREFIX: owner left alone\n'
@@ -684,6 +767,157 @@ else
     sed 's/^/      /' "$TMP/out.log" >&2 || true
   fi
 fi
+
+# ── test 25: missing parents of PREFIX are the user's to create ──────
+# The nearest existing ancestor decides: a PREFIX under a writable dir needs
+# no sudo even when its parent is missing, or root would own the parents.
+printf '▸ PREFIX with a missing parent\n'
+if [ "$(id -u)" = 0 ] || [ -w /usr ]; then
+  printf '  - skipped: running as root, or /usr is writable here\n'
+else
+  make_release_fixture "$TMP/releases25" "9.9.9"
+  start_server "$TMP/releases25"
+  rc25=0
+  env -i \
+    HOME="$HOME" \
+    PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
+    USER="$USER" \
+    PREFIX="$TMP/missing_25/pfx" \
+    INSTALL_DIR="$TMP/missing_25/bin" \
+    MALT_ALLOW_UNVERIFIED=1 \
+    MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
+    MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
+    NO_COLOR=1 \
+    bash "$INSTALLER" >"$TMP/out.log" 2>&1 || rc25=$?
+  stop_server
+  if [ "$rc25" = 0 ] && [ -x "$TMP/missing_25/bin/malt" ]; then
+    printf '  ✓ PREFIX with a missing parent: installed without sudo\n'
+    pass=$((pass + 1))
+  else
+    printf '  ✗ PREFIX with a missing parent: rc=%s\n' "$rc25" >&2
+    fail=$((fail + 1))
+    failures+=("prefix-missing-parent")
+    sed 's/^/      /' "$TMP/out.log" >&2 || true
+  fi
+fi
+
+# ── test 26: a sticky PREFIX is refused ──────────────────────────────
+# chown on /tmp would hand the user a dir that holds other users' entries.
+printf '▸ sticky PREFIX\n'
+if [ ! -k /tmp ]; then
+  printf '  - skipped: /tmp is not sticky here\n'
+else
+  run_logging_sudo "/tmp" "$TMP/bin_26" 26
+  if grep -q 'sticky' "$TMP/out.log" && ! grep -q 'sudo called' "$TMP/out.log" && [ ! -e "$TMP/bin_26/malt" ]; then
+    printf '  ✓ sticky PREFIX: refused before any sudo call\n'
+    pass=$((pass + 1))
+  else
+    printf '  ✗ sticky PREFIX: the installer went on\n' >&2
+    fail=$((fail + 1))
+    failures+=("prefix-sticky")
+    sed 's/^/      /' "$TMP/out.log" >&2 || true
+  fi
+fi
+
+# ── test 27: a reinstall into a user-owned PREFIX needs no sudo ──────
+# The default /opt/malt sits under a root-owned parent. The existing dir,
+# not its parent, decides.
+printf '▸ existing user-owned PREFIX under a read-only parent\n'
+if [ "$(id -u)" = 0 ]; then
+  printf '  - skipped: running as root\n'
+else
+  mkdir -p "$TMP/ro_27/pfx"
+  chmod 555 "$TMP/ro_27"
+  make_release_fixture "$TMP/releases27" "9.9.9"
+  start_server "$TMP/releases27"
+  rc27=0
+  env -i \
+    HOME="$HOME" \
+    PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
+    USER="$USER" \
+    PREFIX="$TMP/ro_27/pfx" \
+    INSTALL_DIR="$TMP/bin_27" \
+    MALT_ALLOW_UNVERIFIED=1 \
+    MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
+    MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
+    NO_COLOR=1 \
+    bash "$INSTALLER" >"$TMP/out.log" 2>&1 || rc27=$?
+  stop_server
+  if [ "$rc27" = 0 ] && [ -x "$TMP/bin_27/malt" ]; then
+    printf '  ✓ existing PREFIX: reinstall without sudo\n'
+    pass=$((pass + 1))
+  else
+    printf '  ✗ existing PREFIX: rc=%s, sudo was needed\n' "$rc27" >&2
+    fail=$((fail + 1))
+    failures+=("prefix-existing-no-sudo")
+    sed 's/^/      /' "$TMP/out.log" >&2 || true
+  fi
+fi
+
+# ── test 28: a relative PREFIX is resolved before the source build cds ─
+printf '▸ relative PREFIX in a source build\n'
+FAKE_REPO28="$TMP/fake-repo-28"
+mkdir -p "$FAKE_REPO28/scripts" "$FAKE_REPO28/src" "$FAKE_REPO28/man"
+cp scripts/install.sh "$FAKE_REPO28/scripts/install.sh"
+printf '// build\n' >"$FAKE_REPO28/build.zig"
+printf '// main\n' >"$FAKE_REPO28/src/main.zig"
+printf '.TH MALT 1\n' >"$FAKE_REPO28/man/malt.1"
+FAKE_BIN28="$TMP/fake-bin-28"
+mkdir -p "$FAKE_BIN28" "$TMP/cwd_28"
+cp "$FAKE_BIN7/zig" "$FAKE_BIN28/zig"
+rc28=0
+(cd "$TMP/cwd_28" && env -i \
+  HOME="$HOME" \
+  PATH="$NOSUDO:$FAKE_BIN28:/usr/bin:/bin:/usr/sbin:/sbin" \
+  USER="$USER" \
+  PREFIX="rel/pfx" \
+  INSTALL_DIR="$TMP/cwd_28/bin" \
+  NO_COLOR=1 \
+  bash "$FAKE_REPO28/scripts/install.sh" >"$TMP/out.log" 2>&1) || rc28=$?
+if [ "$rc28" = 0 ] && [ -f "$TMP/cwd_28/rel/pfx/share/man/man1/malt.1" ]; then
+  printf '  ✓ relative PREFIX: created under the caller cwd\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ relative PREFIX: rc=%s, prefix not under the caller cwd\n' "$rc28" >&2
+  fail=$((fail + 1))
+  failures+=("relative-prefix")
+  sed 's/^/      /' "$TMP/out.log" >&2 || true
+fi
+
+# ── tests 29, 30: ".." and a literal ~ in PREFIX are refused ─────────
+# Root creates and chowns PREFIX. A ".." can steer it to another dir, and an
+# unexpanded ~ would pin a dir named "~".
+make_release_fixture "$TMP/releases29" "9.9.9"
+start_server "$TMP/releases29"
+check_prefix_refused() {
+  local label="$1" tag="$2" prefix="$3" watch="$4" rc=0
+  (cd "$watch" && env -i \
+    HOME="$HOME" \
+    PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
+    USER="$USER" \
+    PREFIX="$prefix" \
+    INSTALL_DIR="$TMP/bin_$tag" \
+    MALT_ALLOW_UNVERIFIED=1 \
+    MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
+    MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
+    NO_COLOR=1 \
+    bash "$INSTALLER" >"$TMP/out.log" 2>&1) || rc=$?
+  if [ "$rc" != 0 ] && [ -z "$(command ls -A "$watch")" ] && [ ! -e "$TMP/bin_$tag/malt" ]; then
+    printf '  ✓ %s: refused, nothing written\n' "$label"
+    pass=$((pass + 1))
+  else
+    printf '  ✗ %s: rc=%s, dir holds: %s\n' "$label" "$rc" "$(command ls -A "$watch")" >&2
+    fail=$((fail + 1))
+    failures+=("$tag")
+    sed 's/^/      /' "$TMP/out.log" >&2 || true
+  fi
+}
+printf '▸ ".." and ~ in PREFIX\n'
+mkdir -p "$TMP/dd_29" "$TMP/cwd_30"
+check_prefix_refused '".." in PREFIX' prefix-dotdot "$TMP/dd_29/a/../b" "$TMP/dd_29"
+# shellcheck disable=SC2088 # the literal tilde is the input under test
+check_prefix_refused 'literal ~ in PREFIX' prefix-tilde '~/.malt' "$TMP/cwd_30"
+stop_server
 
 # ── test 13: an unexpanded ~ in INSTALL_DIR is refused ───────────────
 # A quoted tilde reaches the script as a literal. Installing into ./~/...
@@ -697,7 +931,7 @@ start_server "$TMP/releases13"
 rc13=0
 (cd "$cwd13" && env -i \
   HOME="$HOME" \
-  PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
   USER="$USER" \
   PREFIX="$TMP/prefix_13" \
   INSTALL_DIR='~/.local/bin' \
@@ -733,7 +967,7 @@ mkdir -p "$cwd14" "$TMP/prefix_14"
 rc14=0
 (cd "$cwd14" && env -i \
   HOME="$HOME" \
-  PATH="$FAKE_BIN14:/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$NOSUDO:$FAKE_BIN14:/usr/bin:/bin:/usr/sbin:/sbin" \
   USER="$USER" \
   PREFIX="$TMP/prefix_14" \
   INSTALL_DIR="rel/bin" \
@@ -750,8 +984,8 @@ else
 fi
 
 # ── test 17: a ".." component in INSTALL_DIR is refused ──────────────
-# The prefix match in the ownership hand-back is a string match. A ".." can
-# make a path look like it sits under PREFIX while it names another dir.
+# A ".." component names a different dir than the path shows. The installer
+# must refuse it before it writes anything.
 printf '▸ ".." in INSTALL_DIR\n'
 dd17="$TMP/dd_17"
 mkdir -p "$dd17" "$TMP/prefix_17"
@@ -760,7 +994,7 @@ start_server "$TMP/releases17"
 rc17=0
 env -i \
   HOME="$HOME" \
-  PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
   USER="$USER" \
   PREFIX="$TMP/prefix_17" \
   INSTALL_DIR="$dd17/a/../b" \
@@ -780,102 +1014,10 @@ else
   sed 's/^/      /' "$TMP/out.log" >&2 || true
 fi
 
-# ── test 18: an existing bin dir behind an unsearchable parent is not new ─
-# The user cannot see into the parent, so only root can say the dir exists.
-# Root must not chown a dir it did not create. Root ignores modes, so this
-# case cannot run as root.
-printf '▸ existing bin dir behind a mode-000 parent\n'
+# ── test 22: the source-build site creates PREFIX before the bin dir ──
+printf '▸ source build under a PREFIX that needs root\n'
 if [ "$(id -u)" = 0 ]; then
   printf '  - skipped: running as root\n'
-else
-  pfx18="$TMP/pfx_18"
-  mkdir -p "$pfx18/priv/bin"
-  chmod 000 "$pfx18/priv"
-  run_logging_sudo "$pfx18" "$pfx18/priv/bin" 18 1
-  chmod 755 "$pfx18/priv"
-  if ! grep -q 'sudo called: chown -h' "$TMP/out.log"; then
-    printf '  ✓ mode-000 parent: existing bin dir not chowned\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ mode-000 parent: chown reached a dir the installer did not create\n' >&2
-    fail=$((fail + 1))
-    failures+=("unsearchable-parent-chown")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-fi
-
-# ── test 19: a bin dir root really creates behind an unsearchable parent ─
-# The user cannot see into the parent, but root can and finds the dir missing.
-# The hand-back must still happen, or the new dir stays root-owned.
-printf '▸ new bin dir behind a mode-000 parent\n'
-if [ "$(id -u)" = 0 ]; then
-  printf '  - skipped: running as root\n'
-else
-  pfx19="$TMP/pfx_19"
-  mkdir -p "$pfx19/priv"
-  chmod 000 "$pfx19/priv"
-  run_logging_sudo "$pfx19" "$pfx19/priv/bin" 19 0
-  chmod 755 "$pfx19/priv"
-  if grep -qF "sudo called: chown -h $USER $pfx19/priv/bin " "$TMP/out.log"; then
-    printf '  ✓ mode-000 parent: new bin dir handed back\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ mode-000 parent: new bin dir stayed root-owned\n' >&2
-    fail=$((fail + 1))
-    failures+=("unsearchable-parent-new")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-fi
-
-# ── test 20: a failed `sudo test` fails closed ───────────────────────
-# Bad passwords, a prompt timeout or a sudoers refusal make `sudo test` fail.
-# That must read as "not new", or root chowns a dir it did not create.
-printf '▸ failed sudo test on an existing bin dir\n'
-if [ "$(id -u)" = 0 ] || [ -w /usr ]; then
-  printf '  - skipped: running as root, or /usr is writable here\n'
-else
-  run_logging_sudo "/usr" "/usr/bin" 20 1
-  if ! grep -Eq 'sudo called: chown .* /usr/bin( |$)' "$TMP/out.log"; then
-    printf '  ✓ failed sudo test: no chown of the existing dir\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ failed sudo test: chown reached an existing dir\n' >&2
-    fail=$((fail + 1))
-    failures+=("failed-sudo-test-chown")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-fi
-
-# ── test 21: a symlink through an unsearchable dir reaches an existing dir ─
-# The user cannot follow the link, but root can. The dir exists, so there is
-# nothing to hand back. The ln line proves the sudo path ran.
-printf '▸ bin dir behind a symlink into a mode-000 dir\n'
-if [ "$(id -u)" = 0 ]; then
-  printf '  - skipped: running as root\n'
-else
-  pfx21="$TMP/pfx_21"
-  hid21="$TMP/hid_21"
-  mkdir -p "$pfx21" "$hid21/sub/bin"
-  ln -s "$hid21/sub" "$pfx21/link"
-  chmod 000 "$hid21"
-  chmod 555 "$pfx21"
-  run_logging_sudo "$pfx21" "$pfx21/link/bin" 21 1
-  chmod 755 "$pfx21" "$hid21"
-  if grep -q 'sudo called: ln -sfn' "$TMP/out.log" && ! grep -q 'sudo called: chown -h' "$TMP/out.log"; then
-    printf '  ✓ symlink into mode-000 dir: existing dir not chowned\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ symlink into mode-000 dir: chown reached an existing dir\n' >&2
-    fail=$((fail + 1))
-    failures+=("symlink-unsearchable-chown")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-fi
-
-# ── test 22: the source-build site hands the new bin dir back too ────
-printf '▸ source build hands back a new bin dir\n'
-if [ "$(id -u)" = 0 ] || [ -w /usr ]; then
-  printf '  - skipped: running as root, or /usr is writable here\n'
 else
   FAKE_REPO22="$TMP/fake-repo-22"
   mkdir -p "$FAKE_REPO22/scripts" "$FAKE_REPO22/src" "$FAKE_REPO22/man"
@@ -884,51 +1026,27 @@ else
   printf '// main\n' >"$FAKE_REPO22/src/main.zig"
   printf '.TH MALT 1\n' >"$FAKE_REPO22/man/malt.1"
   SHIM22="$TMP/shim_22"
-  mkdir -p "$SHIM22"
+  mkdir -p "$SHIM22" "$TMP/ro_22"
+  chmod 555 "$TMP/ro_22"
   cp "$FAKE_BIN7/zig" "$SHIM22/zig"
-  # shellcheck disable=SC2016 # $1 and $* belong to the generated shim
-  printf '#!/bin/sh\ncase "$1" in test) exec "$@" ;; esac\necho "sudo called: $*" >&2\n' >"$SHIM22/sudo"
+  cat >"$SHIM22/sudo" <<SHIM
+#!/bin/sh
+echo "sudo called: \$*" >>"$TMP/sudo.log"
+chmod 755 "$TMP/ro_22"
+exec "\$@"
+SHIM
   chmod +x "$SHIM22/sudo"
-  d22="/usr/malt_test_nonexistent_22/bin"
+  : >"$TMP/sudo.log"
+  pfx22="$TMP/ro_22/pfx"
   env -i \
     HOME="$HOME" \
     PATH="$SHIM22:/usr/bin:/bin:/usr/sbin:/sbin" \
     USER="$USER" \
-    PREFIX="/usr/malt_test_nonexistent_22" \
-    INSTALL_DIR="$d22" \
+    PREFIX="$pfx22" \
+    INSTALL_DIR="$pfx22/bin" \
     NO_COLOR=1 \
     bash "$FAKE_REPO22/scripts/install.sh" >"$TMP/out.log" 2>&1 || true
-  if grep -qxF "sudo called: chown -h $USER $d22 $d22/malt $d22/mt" "$TMP/out.log"; then
-    printf '  ✓ source build: new bin dir handed back\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ source build: expected the exact chown -h argv for %s\n' "$d22" >&2
-    fail=$((fail + 1))
-    failures+=("source-build-hand-back")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
-
-  # Same site, existing bin dir, `sudo test` failing: it must fail closed.
-  # The ln line proves the sudo path ran.
-  # shellcheck disable=SC2016 # $1 and $* belong to the generated shim
-  printf '#!/bin/sh\ncase "$1" in test) exit 1 ;; esac\necho "sudo called: $*" >&2\n' >"$SHIM22/sudo"
-  env -i \
-    HOME="$HOME" \
-    PATH="$SHIM22:/usr/bin:/bin:/usr/sbin:/sbin" \
-    USER="$USER" \
-    PREFIX="/usr" \
-    INSTALL_DIR="/usr/bin" \
-    NO_COLOR=1 \
-    bash "$FAKE_REPO22/scripts/install.sh" >"$TMP/out.log" 2>&1 || true
-  if grep -q 'sudo called: ln -sfn' "$TMP/out.log" && ! grep -Eq 'sudo called: chown .* /usr/bin( |$)' "$TMP/out.log"; then
-    printf '  ✓ source build: failed sudo test fails closed\n'
-    pass=$((pass + 1))
-  else
-    printf '  ✗ source build: a failed sudo test reached chown of an existing dir\n' >&2
-    fail=$((fail + 1))
-    failures+=("source-build-fail-closed")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
-  fi
+  check_user_created_bin_dir "source build: bin dir created by the user" "source-build-bin-dir" "$pfx22/bin"
 fi
 
 printf '\n── summary ──\n'

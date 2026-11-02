@@ -10,8 +10,7 @@ BINARY="malt"
 # INSTALL_DIR=/tmp/malt-bin ./scripts/install.sh`) without touching
 # the system prefix.
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-# A ".." component can make a path look like it sits under PREFIX while it
-# names another dir, so refuse it.
+# A ".." component names a different dir than the path shows, so refuse it.
 case "/$INSTALL_DIR/" in
 */../*)
   printf '  ✗ INSTALL_DIR must not contain a ".." component: %s\n' "$INSTALL_DIR" >&2
@@ -30,6 +29,28 @@ case "$INSTALL_DIR" in
 *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
 esac
 PREFIX="${PREFIX:-/opt/malt}"
+# Same rules as INSTALL_DIR: root creates PREFIX, so a ".." or an unexpanded
+# ~ must not steer it. The source build cds away, so pin a relative value.
+case "/$PREFIX/" in
+*/../*)
+  printf '  ✗ PREFIX must not contain a ".." component: %s\n' "$PREFIX" >&2
+  exit 1
+  ;;
+esac
+case "$PREFIX" in
+/*) ;;
+"~"*)
+  # shellcheck disable=SC2016 # $HOME is literal text in the hint
+  printf '  ✗ PREFIX starts with "~", which the shell did not expand. Use $HOME instead.\n' >&2
+  exit 1
+  ;;
+*) PREFIX="$PWD/$PREFIX" ;;
+esac
+# Owning a sticky dir such as /tmp lets you rename other users' entries.
+if [ -k "$PREFIX" ]; then
+  printf '  ✗ PREFIX is a sticky directory: %s\n' "$PREFIX" >&2
+  exit 1
+fi
 
 # URL overrides — TESTING ONLY. In production both point at github.com.
 # The regression tests under scripts/test/install_sh_test.sh drive the
@@ -45,24 +66,20 @@ API_LATEST_URL="${MALT_TEST_API_URL:-https://api.github.com/repos/${REPO}/releas
 # tree break later user-level installs. Root skips both.
 SUDO="sudo"
 BIN_SUDO="sudo"
-bin_dir_is_new=0
 if [ "$(id -u)" = 0 ]; then
   SUDO=""
   BIN_SUDO=""
 else
-  if [ -d "$PREFIX" ] && [ -w "$PREFIX" ]; then
-    SUDO=""
-  elif [ ! -e "$PREFIX" ] && [ -w "$(dirname "$PREFIX")" ]; then
-    SUDO=""
-  fi
-  # Test the nearest existing ancestor of INSTALL_DIR: a missing directory
-  # is as writable as the place it would be created in.
-  install_dir_probe=$INSTALL_DIR
-  while [ ! -e "$install_dir_probe" ]; do
-    install_dir_probe=$(dirname "$install_dir_probe")
+  # An existing PREFIX must also be ours: chown needs root otherwise. A
+  # missing one is created in its nearest existing ancestor, so root must
+  # not make the missing parents.
+  prefix_probe=$PREFIX
+  while [ ! -e "$prefix_probe" ]; do
+    prefix_probe=$(dirname "$prefix_probe")
   done
-  if [ -d "$install_dir_probe" ] && [ -w "$install_dir_probe" ]; then
-    BIN_SUDO=""
+  if [ -d "$prefix_probe" ] && [ -w "$prefix_probe" ] &&
+    { [ "$prefix_probe" != "$PREFIX" ] || [ -O "$PREFIX" ]; }; then
+    SUDO=""
   fi
 fi
 
@@ -211,17 +228,6 @@ if [ -z "$LATEST" ]; then
   if [ ! -f "$BINARY_PATH" ]; then
     error "Build failed — binary not found"
   fi
-
-  info "Installing to ${INSTALL_DIR}..."
-  # Only a dir the installer creates may be handed back to the user later.
-  # Ask with the privilege that will create it. A failed ask reads as "not new".
-  if [ -n "$BIN_SUDO" ] && $BIN_SUDO test ! -e "$INSTALL_DIR"; then bin_dir_is_new=1; fi
-  $BIN_SUDO mkdir -p "$INSTALL_DIR"
-  $BIN_SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
-
-  # `mt` is a symlink to `malt`. Relative target survives prefix moves.
-  $BIN_SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
-
 else
   VERSION="${LATEST#v}"
   info "Latest version: ${VERSION}"
@@ -312,16 +318,6 @@ else
   # same way; absence is tolerated below so older tarballs still install.
   MAN_SRC=$(find "$TMPDIR" -name "malt.1" -type f | head -1)
 
-  # ── Install binary ──────────────────────────────────────────────
-  info "Installing to ${INSTALL_DIR}..."
-  # Only a dir the installer creates may be handed back to the user later.
-  # Ask with the privilege that will create it. A failed ask reads as "not new".
-  if [ -n "$BIN_SUDO" ] && $BIN_SUDO test ! -e "$INSTALL_DIR"; then bin_dir_is_new=1; fi
-  $BIN_SUDO mkdir -p "$INSTALL_DIR"
-  $BIN_SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
-
-  # `mt` is a symlink to `malt`. Relative target survives prefix moves.
-  $BIN_SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
 fi
 
 # ── Create prefix directory ─────────────────────────────────────────
@@ -340,16 +336,25 @@ else
   ok "${PREFIX} already exists"
 fi
 
-# A bin dir that root created under PREFIX must end up user-owned, or malt
-# cannot link into it later. Only the dir and the two files root wrote are
-# touched. A nested path keeps its root-owned parents: use <prefix>/bin.
-if [ -n "$BIN_SUDO" ] && [ "$bin_dir_is_new" = 1 ]; then
-  case "$INSTALL_DIR" in
-  "${PREFIX%/}"/*)
-    $BIN_SUDO chown -h "$USER" "$INSTALL_DIR" "$INSTALL_DIR/$BINARY" "$INSTALL_DIR/mt"
-    ;;
-  esac
+# ── Install binary ──────────────────────────────────────────────────
+# After the prefix step, so a bin dir under PREFIX is created by its owner.
+# Test the nearest existing ancestor of INSTALL_DIR: a missing directory
+# is as writable as the place it would be created in.
+if [ -n "$BIN_SUDO" ]; then
+  install_dir_probe=$INSTALL_DIR
+  while [ ! -e "$install_dir_probe" ]; do
+    install_dir_probe=$(dirname "$install_dir_probe")
+  done
+  if [ -d "$install_dir_probe" ] && [ -w "$install_dir_probe" ]; then
+    BIN_SUDO=""
+  fi
 fi
+info "Installing to ${INSTALL_DIR}..."
+$BIN_SUDO mkdir -p "$INSTALL_DIR"
+$BIN_SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
+
+# `mt` is a symlink to `malt`. Relative target survives prefix moves.
+$BIN_SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
 
 # ── Install man page ────────────────────────────────────────────────
 # `man malt` resolves only when the page sits under ${PREFIX}/share/man,
