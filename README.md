@@ -68,8 +68,8 @@ The script does these steps:
 
 1. It downloads the latest release.
 2. It verifies the SHA256 checksum **and a cosign keyless signature** against the GitHub Actions workflow that made the release.
-3. It installs the binary in `/usr/local/bin/`.
-4. It creates `/opt/malt` with the correct ownership.
+3. It creates `/opt/malt` with the correct ownership.
+4. It installs the binary in `/usr/local/bin/`, and creates that directory if it is missing.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
