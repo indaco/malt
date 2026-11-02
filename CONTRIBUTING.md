@@ -118,7 +118,7 @@ Some formulas ship their own launchd plist (a `service` block with only a `name`
 
 ### Release signing
 
-The goreleaser workflow signs releases keyless with cosign. `scripts/install.sh` verifies the signature again before the SHA check. It fails closed: no signature, no install. To skip this check, you must set `MALT_ALLOW_UNVERIFIED=1`. The `scripts/test/install_sh_test.sh` suite prevents regressions in the fail-closed paths.
+The goreleaser workflow signs releases keyless with cosign. `scripts/install.sh` verifies the signature again before the SHA check. It fails closed: no signature, no install. To skip this check, you must set `MALT_ALLOW_UNVERIFIED=1` on the `bash` side of the pipe, or before `bash /path/to/install.sh` for a downloaded copy. The `scripts/test/install_sh_test.sh` suite prevents regressions in the fail-closed paths.
 
 ## Build & test
 
