@@ -35,6 +35,8 @@ install:
 # Static regression guards — cheap, no network, no build.
 [group('test')]
 regressions-static:
+    @./scripts/regressions/install-bypass-hint-env-reaches-bash-gh1251.sh
+    @./scripts/regressions/install-bypass-hint-guard-never-runs-extra-commands.sh
     @./scripts/regressions/tap-resolution-contract.sh
     @./scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
     @./scripts/regressions/relocated-store-logic-version-pin.sh

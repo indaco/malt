@@ -123,6 +123,8 @@ run_installer() {
   local install_dir="$TMP/bin_$RANDOM"
   mkdir -p "$prefix" "$install_dir"
   local rc=0
+  # Pass an empty first arg to run without the cosign opt-out.
+  local bypass="${1-MALT_ALLOW_UNVERIFIED=1}"
   # Force a minimal PATH so the test is stable across dev machines
   # that shadow `shasum` or `curl` with broken homebrew/nanobrew
   # binaries ahead of the system install.
@@ -132,7 +134,7 @@ run_installer() {
     USER="$USER" \
     PREFIX="$prefix" \
     INSTALL_DIR="$install_dir" \
-    MALT_ALLOW_UNVERIFIED=1 \
+    ${bypass:+"$bypass"} \
     MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
     MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
     NO_COLOR=1 \
@@ -319,13 +321,80 @@ fi
   fail=$((fail + 1))
   failures+=("source-fallback-artifact")
 }
-if grep -q "MALT_ALLOW_UNVERIFIED_SOURCE" "$TMP/out.log"; then
-  printf '  ✓ refuse message references the opt-out env\n'
+# The assignment must sit on the `bash` side of the pipe, or it never reaches the installer.
+if grep -qF '| MALT_ALLOW_UNVERIFIED_SOURCE=1 bash' "$TMP/out.log" &&
+  grep -qF 'MALT_ALLOW_UNVERIFIED_SOURCE=1 bash /path/to/install.sh' "$TMP/out.log"; then
+  printf '  ✓ refuse message shows the opt-out env on the bash side\n'
   pass=$((pass + 1))
 else
   printf '  ✗ refuse message missing the opt-out env hint\n' >&2
   fail=$((fail + 1))
   failures+=("source-fallback-message")
+fi
+
+# ── test 5c: the source opt-out lifts the refusal ────────────────────
+# Same offline setup as test 5, plus the opt-out. The build may fail later
+# on the stubs; only the gate decision matters here.
+printf '▸ source fallback honours the opt-out\n'
+FAKE_BIN5C="$TMP/fake-bin-5c"
+mkdir -p "$FAKE_BIN5C"
+cat >"$FAKE_BIN5C/git" <<'EOF'
+#!/bin/bash
+if [ "$1" = "ls-remote" ]; then exit 0; fi
+# Offline clone: create the target dir (last argument) only.
+if [ "$1" = "clone" ]; then mkdir -p "${@: -1}"; exit 0; fi
+exec /usr/bin/git "$@"
+EOF
+cp "$FAKE_BIN/zig" "$FAKE_BIN5C/zig"
+chmod +x "$FAKE_BIN5C/git" "$FAKE_BIN5C/zig"
+mkdir -p "$TMP/prefix_5c" "$TMP/bin_5c"
+env -i \
+  HOME="$HOME" \
+  PATH="$FAKE_BIN5C:/usr/bin:/bin:/usr/sbin:/sbin" \
+  USER="$USER" \
+  PREFIX="$TMP/prefix_5c" \
+  INSTALL_DIR="$TMP/bin_5c" \
+  MALT_ALLOW_UNVERIFIED_SOURCE=1 \
+  MALT_TEST_RELEASES_URL="http://127.0.0.1:1" \
+  MALT_TEST_API_URL="http://127.0.0.1:1/unreachable" \
+  NO_COLOR=1 \
+  bash "$INSTALLER" >"$TMP/out.log" 2>&1 || true
+if grep -qF 'cloning default branch without a pinned tag' "$TMP/out.log" &&
+  ! grep -qF 'Could not resolve a release tag' "$TMP/out.log"; then
+  printf '  ✓ source opt-out: refusal lifted\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ source opt-out: refusal still raised or no warning\n' >&2
+  fail=$((fail + 1))
+  failures+=("source-optout")
+  sed 's/^/      /' "$TMP/out.log" >&2 || true
+fi
+
+# ── test 5b: missing cosign refuses and shows a working bypass ───────
+# The test PATH has no cosign, so omitting the opt-out hits the refusal.
+printf '▸ missing cosign refuses without opt-out\n'
+make_release_fixture "$TMP/releases5b" "9.9.9"
+start_server "$TMP/releases5b"
+split_result "$(run_installer "")"
+stop_server
+case_result "missing cosign: rc=1" 1 "$RC"
+if [ ! -e "$INSTALL_DIR_USED/malt" ]; then
+  printf '  ✓ missing cosign: no artifact installed\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ missing cosign: artifact landed anyway\n' >&2
+  fail=$((fail + 1))
+  failures+=("cosign-missing-artifact")
+fi
+if grep -qF 'cosign is required' "$TMP/out.log" &&
+  grep -qF '| MALT_ALLOW_UNVERIFIED=1 bash' "$TMP/out.log" &&
+  grep -qF 'MALT_ALLOW_UNVERIFIED=1 bash /path/to/install.sh' "$TMP/out.log"; then
+  printf '  ✓ missing cosign: hint shows the opt-out env on the bash side\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ missing cosign: hint missing or misplaced\n' >&2
+  fail=$((fail + 1))
+  failures+=("cosign-missing-message")
 fi
 
 # ── test 6: tarball without a man page still installs the binary ─────
