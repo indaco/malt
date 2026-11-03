@@ -112,7 +112,7 @@ The build needs [Zig 0.17.x](https://ziglang.org/download/). It puts `malt` in `
 Before you start, add the malt binaries to the `PATH` of new shells. `mt shellenv` is a drop-in replacement for `eval "$(brew shellenv)"`:
 
 ```bash
-echo 'eval "$(mt shellenv)"' >> ~/.zshrc          # or ~/.bashrc
+echo 'eval "$(mt shellenv)"' >> ~/.zprofile       # or ~/.bash_profile
 mt shellenv fish | source                          # fish: set -gx, not export
 ```
 

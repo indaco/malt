@@ -384,10 +384,36 @@ else
 fi
 
 echo ""
-printf '%s%smalt is ready!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+# Whole-entry match, trailing slash ignored, like doctor's PATH check.
+case ":${PATH}:" in
+*":${PREFIX}/bin:"* | *":${PREFIX}/bin/:"*)
+  printf '%s%smalt is ready!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+  ;;
+*)
+  # Never write dotfiles: a piped installer cannot ask for consent.
+  # Login-shell files, like Homebrew's installer.
+  SHELLENV_CMD="malt shellenv"
+  [ "$PREFIX" = "/opt/malt" ] || SHELLENV_CMD="MALT_PREFIX=${PREFIX} malt shellenv"
+  case "$(basename "${SHELL:-}")" in
+  zsh) PROFILE_LINE="echo 'eval \"\$(${SHELLENV_CMD})\"' >> ~/.zprofile" ;;
+  bash) PROFILE_LINE="echo 'eval \"\$(${SHELLENV_CMD})\"' >> ~/.bash_profile" ;;
+  fish) PROFILE_LINE="${SHELLENV_CMD} fish | source    # in ~/.config/fish/config.fish" ;;
+  *) PROFILE_LINE="eval \"\$(${SHELLENV_CMD})\"" ;;
+  esac
+  printf '%s%smalt is installed, but one more step is needed%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
+  echo "  ${PREFIX}/bin is not on your PATH, so installed commands will not be found."
+  echo "  Add this to your shell profile:"
+  echo "    ${PROFILE_LINE}"
+  echo "  Then apply it to this shell:"
+  case "$(basename "${SHELL:-}")" in
+  fish) echo "    ${SHELLENV_CMD} fish | source" ;;
+  *) echo "    eval \"\$(${SHELLENV_CMD})\"" ;;
+  esac
+  ;;
+esac
 echo ""
 echo "  Get started:"
-echo "    malt install jq           # install a formula"
+echo "    malt install tree         # install a formula"
 echo "    malt install --cask app   # install a cask"
 echo "    malt list                 # list installed packages"
 echo "    malt --help               # see all commands"
