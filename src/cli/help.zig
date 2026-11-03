@@ -574,9 +574,13 @@ const shellenv_help =
     \\malt's bin/sbin/man/info dirs onto PATH/MANPATH/INFOPATH. With no
     \\argument the shell is detected from $SHELL.
     \\
-    \\Source from your rc file:
+    \\Add to your login shell profile (~/.zprofile, ~/.bash_profile;
+    \\~/.config/fish/config.fish for fish):
     \\  bash/zsh   eval "$(malt shellenv)"
     \\  fish       malt shellenv fish | source
+    \\
+    \\It does not export MALT_PREFIX. With a custom prefix, export it first
+    \\(fish: set -gx MALT_PREFIX <prefix>).
     \\
 ;
 

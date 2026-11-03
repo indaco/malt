@@ -116,6 +116,8 @@ echo 'eval "$(mt shellenv)"' >> ~/.zprofile       # or ~/.bash_profile
 mt shellenv fish | source                          # fish: set -gx, not export
 ```
 
+For fish, put the second line in `~/.config/fish/config.fish`. With a custom prefix, export `MALT_PREFIX` first in the same file (fish: `set -gx MALT_PREFIX <prefix>`). `mt shellenv` does not export it.
+
 This is an example of a first session:
 
 ```bash
@@ -646,7 +648,7 @@ To skip cosign, `install.sh` accepts `MALT_ALLOW_UNVERIFIED=1` on the `bash` sid
 MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 ```
 
-`mt shellenv` exports `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`, and `HOMEBREW_REPOSITORY`. Thus, scripts that use these brew variables continue to work. It also adds the malt paths to the start of `PATH`, `MANPATH`, and `INFOPATH`. Without an argument, it finds the shell from `$SHELL`. If it does not recognise the shell, it fails closed.
+`mt shellenv` exports `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`, and `HOMEBREW_REPOSITORY`. Thus, scripts that use these brew variables continue to work. It also adds the malt paths to the start of `PATH`, `MANPATH`, and `INFOPATH`. Without an argument, it finds the shell from `$SHELL`. If it does not recognise the shell, it fails closed. It does not export `MALT_PREFIX`. With a custom prefix, export it first in the same profile.
 
 `mt completions` prints a `bash`, `zsh`, or `fish` completion script to stdout. The script includes subcommands, per-command flags, and global flags. For an unknown shell, the command exits with a non-zero code.
 

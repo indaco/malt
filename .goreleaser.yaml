@@ -112,6 +112,13 @@ homebrew_casks:
 
         eval "$(malt shellenv)"
 
+      For fish, put this in ~/.config/fish/config.fish instead:
+
+        malt shellenv fish | source
+
+      If you override the prefix, export MALT_PREFIX first in the same file
+      (fish: set -gx MALT_PREFIX <prefix>).
+
 release:
   # Assets upload to a draft; the release workflow's notes step flips
   # draft=false after writing the changelog. All other release
