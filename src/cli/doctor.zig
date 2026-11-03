@@ -904,14 +904,35 @@ fn checkPrefixPath(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
-    var msg_buf: [640]u8 = undefined;
-    const msg = std.mem.print(
-        &msg_buf,
-        "{s} is not on PATH — installed commands won't be found. Add: export PATH=\"{s}:$PATH\"",
-        .{ bin, bin },
-    ) catch "Prefix bin directory is not on PATH";
+    var msg_buf: [prefix_path_msg_cap]u8 = undefined;
+    const msg = formatPrefixPathMessage(&msg_buf, ctx.prefix) catch "Prefix bin directory is not on PATH";
     printCheck(name, .warn_status, msg);
     return .warn_status;
+}
+
+/// Room for the longest remedy: fixed text plus the prefix printed three times.
+const prefix_path_msg_cap = 2048;
+comptime {
+    std.debug.assert(3 * prefix_path.max_prefix_len + 256 <= prefix_path_msg_cap);
+    // The row printer must hold the remedy plus the row header.
+    std.debug.assert(prefix_path_msg_cap + 512 <= render.row_buf_len);
+}
+
+/// Pure formatter for `checkPrefixPath`'s warning. The remedy is `shellenv`,
+/// not a bare `export PATH`: it also sets MANPATH, INFOPATH and HOMEBREW_*.
+/// A custom prefix is exported too: `shellenv` does not, and a profile line
+/// without it would put the default prefix on PATH and leave the warning.
+fn formatPrefixPathMessage(buf: *[prefix_path_msg_cap]u8, prefix: []const u8) error{NoSpaceLeft}![]const u8 {
+    if (std.mem.eql(u8, prefix, atomic.default_prefix)) return std.mem.print(
+        buf,
+        "{s}/bin is not on PATH — installed commands won't be found. Add to your shell profile: eval \"$(mt shellenv)\" (fish: mt shellenv fish | source)",
+        .{prefix},
+    );
+    return std.mem.print(
+        buf,
+        "{s}/bin is not on PATH — installed commands won't be found. Add to your shell profile: export MALT_PREFIX={s}; eval \"$(mt shellenv)\" (fish: set -gx MALT_PREFIX {s}; mt shellenv fish | source)",
+        .{ prefix, prefix, prefix },
+    );
 }
 
 /// Report offline-mode state so operators can confirm `MALT_OFFLINE` /
@@ -2447,6 +2468,47 @@ test "pathContainsDir: matches a complete entry, ignores trailing slashes" {
     // Trailing slash on either side must not defeat the match.
     try testing.expect(pathContainsDir("/opt/malt/bin/:/usr/bin", "/opt/malt/bin"));
     try testing.expect(pathContainsDir("/opt/malt/bin", "/opt/malt/bin/"));
+}
+
+test "formatPrefixPathMessage: remedy is shellenv, not a bare export PATH" {
+    // A bare `export PATH` leaves MANPATH, INFOPATH and HOMEBREW_* unset, so
+    // the warning must point at the complete setup.
+    var buf: [prefix_path_msg_cap]u8 = undefined;
+    const msg = try formatPrefixPathMessage(&buf, "/opt/malt");
+    try testing.expect(std.mem.startsWith(u8, msg, "/opt/malt/bin is not on PATH"));
+    try testing.expect(std.mem.indexOf(u8, msg, "eval \"$(mt shellenv)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "mt shellenv fish | source") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "export PATH") == null);
+    // The default prefix needs no export: malt already assumes it.
+    try testing.expect(std.mem.indexOf(u8, msg, "MALT_PREFIX") == null);
+}
+
+test "formatPrefixPathMessage: a custom prefix is exported before shellenv" {
+    // `shellenv` does not export MALT_PREFIX. Without it the profile line puts
+    // the default prefix on PATH and the warning would never clear.
+    var buf: [prefix_path_msg_cap]u8 = undefined;
+    const msg = try formatPrefixPathMessage(&buf, "/x/malt");
+    try testing.expect(std.mem.startsWith(u8, msg, "/x/malt/bin is not on PATH"));
+    try testing.expect(std.mem.indexOf(u8, msg, "export MALT_PREFIX=/x/malt; eval \"$(mt shellenv)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "set -gx MALT_PREFIX /x/malt; mt shellenv fish | source") != null);
+}
+
+test "formatPrefixPathMessage: the longest valid prefix renders in full through the row printer" {
+    // The custom text prints the prefix three times. A short buffer, here or
+    // in the row printer, cut the remedy and ran the next row onto its line.
+    var buf: [prefix_path_msg_cap]u8 = undefined;
+    const prefix = comptime blk: {
+        var b: [prefix_path.max_prefix_len]u8 = @splat('a');
+        b[0] = '/';
+        break :blk b;
+    };
+    const msg = try formatPrefixPathMessage(&buf, &prefix);
+    try testing.expect(std.mem.indexOf(u8, msg, "set -gx MALT_PREFIX " ++ prefix ++ "; mt shellenv fish | source") != null);
+
+    var row: [render.row_buf_len]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&row);
+    try renderCheckRow(&w, .warn_status, "Prefix on PATH", msg, .{ .color = false, .emoji = false });
+    try testing.expect(std.mem.endsWith(u8, w.buffered(), "mt shellenv fish | source)\n"));
 }
 
 test "pathContainsDir: rejects substrings, missing entries, and empties" {

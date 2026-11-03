@@ -567,6 +567,22 @@ test "printCheck emits plain-mode bytes identical to renderCheckRow" {
     );
 }
 
+test "printCheck keeps a long detail whole and ends the row with a newline" {
+    // The custom-prefix PATH remedy runs past 1 KiB. A short row buffer cut it
+    // and ran the next row onto the same line.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = PrintCheckCapture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    // 2048 bytes is the longest remedy the doctor formats (its message cap).
+    var detail: [2048]u8 = @splat('x');
+    @memcpy(detail[2045..], "END");
+    doctor.printCheck("Prefix on PATH", .warn_status, &detail);
+
+    try testing.expect(std.mem.endsWith(u8, buf.items, "END\n"));
+}
+
 test "printCheck honours quiet mode and emits nothing" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
