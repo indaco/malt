@@ -884,39 +884,102 @@ else
   sed 's/^/      /' "$TMP/out.log" >&2 || true
 fi
 
-# ── tests 29, 30: ".." and a literal ~ in PREFIX are refused ─────────
+# ── tests 29, 30: PREFIX rules ───────────────────────────────────────
 # Root creates and chowns PREFIX. A ".." can steer it to another dir, and an
-# unexpanded ~ would pin a dir named "~".
+# unexpanded ~ would pin a dir named "~". malt refuses any other byte, an empty
+# or "." component, and more than 493 bytes, so the installer must refuse them
+# too, or the install works and every later malt call fails.
 make_release_fixture "$TMP/releases29" "9.9.9"
 start_server "$TMP/releases29"
-check_prefix_refused() {
-  local label="$1" tag="$2" prefix="$3" watch="$4" rc=0
-  (cd "$watch" && env -i \
+prefix_run() { # $1 = tag, $2 = prefix, $3 = cwd; output goes to $TMP/out.log
+  (cd "$3" && env -i \
     HOME="$HOME" \
     PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
     USER="$USER" \
-    PREFIX="$prefix" \
-    INSTALL_DIR="$TMP/bin_$tag" \
+    PREFIX="$2" \
+    LC_ALL=en_US.UTF-8 \
+    INSTALL_DIR="$TMP/bin_$1" \
     MALT_ALLOW_UNVERIFIED=1 \
     MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
     MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
     NO_COLOR=1 \
-    bash "$INSTALLER" >"$TMP/out.log" 2>&1) || rc=$?
-  if [ "$rc" != 0 ] && [ -z "$(command ls -A "$watch")" ] && [ ! -e "$TMP/bin_$tag/malt" ]; then
+    bash "$INSTALLER" >"$TMP/out.log" 2>&1)
+}
+prefix_fail() { # $1 = label, $2 = tag, $3 = what went wrong
+  printf '  ✗ %s: %s\n' "$1" "$3" >&2
+  fail=$((fail + 1))
+  failures+=("$2")
+  sed 's/^/      /' "$TMP/out.log" >&2 || true
+}
+# $5 is a fragment of the refusal message: a refusal for the wrong reason
+# must not pass.
+check_prefix_refused() {
+  local label="$1" tag="$2" prefix="$3" watch="$4" expect="$5" rc=0
+  prefix_run "$tag" "$prefix" "$watch" || rc=$?
+  if [ "$rc" != 0 ] && [ -z "$(command ls -A "$watch")" ] && [ ! -e "$TMP/bin_$tag/malt" ] &&
+    grep -qF -- "$expect" "$TMP/out.log"; then
     printf '  ✓ %s: refused, nothing written\n' "$label"
     pass=$((pass + 1))
   else
-    printf '  ✗ %s: rc=%s, dir holds: %s\n' "$label" "$rc" "$(command ls -A "$watch")" >&2
-    fail=$((fail + 1))
-    failures+=("$tag")
-    sed 's/^/      /' "$TMP/out.log" >&2 || true
+    prefix_fail "$label" "$tag" "rc=$rc, dir holds: $(command ls -A "$watch"), wanted message: $expect"
   fi
 }
-printf '▸ ".." and ~ in PREFIX\n'
-mkdir -p "$TMP/dd_29" "$TMP/cwd_30"
-check_prefix_refused '".." in PREFIX' prefix-dotdot "$TMP/dd_29/a/../b" "$TMP/dd_29"
+check_prefix_accepted() {
+  local label="$1" tag="$2" prefix="$3" watch="$4" rc=0
+  prefix_run "$tag" "$prefix" "$watch" || rc=$?
+  if [ "$rc" = 0 ] && [ -x "$TMP/bin_$tag/malt" ] && [ -d "$prefix" ]; then
+    printf '  ✓ %s: installed\n' "$label"
+    pass=$((pass + 1))
+  else
+    prefix_fail "$label" "$tag" "rc=$rc, expected an install"
+  fi
+}
+printf '▸ PREFIX rules\n'
+mkdir -p "$TMP/dd_29" "$TMP/cwd_30" "$TMP"/sp_30{,_utf8,_empty,_dot,_reldot,_long,_root,_root2,_ok,_over}
+check_prefix_refused '".." in PREFIX' prefix-dotdot "$TMP/dd_29/a/../b" "$TMP/dd_29" 'must not contain a ".." component'
+check_prefix_refused 'space in PREFIX' prefix-space "$TMP/sp_30/a b" "$TMP/sp_30" 'may hold only letters'
+# A letter range in a case pattern follows the locale: stock bash 3.2 in a
+# UTF-8 locale accepts the é unless the letters are spelled out.
+check_prefix_refused 'non-ASCII letter in PREFIX' prefix-utf8 "$TMP/sp_30_utf8/malté" "$TMP/sp_30_utf8" 'may hold only letters'
+check_prefix_refused 'empty component in PREFIX' prefix-empty "$TMP/sp_30_empty/a//b" "$TMP/sp_30_empty" 'no empty or "." component'
+check_prefix_refused '"." component in PREFIX' prefix-dot "$TMP/sp_30_dot/./x" "$TMP/sp_30_dot" 'no empty or "." component'
+check_prefix_refused 'relative "./" PREFIX' prefix-reldot './malt' "$TMP/sp_30_reldot" 'no empty or "." component'
+# The filesystem root is refused on purpose: malt accepts "/", but the
+# installer would chown it to the user.
+check_prefix_refused 'PREFIX is /' prefix-root '/' "$TMP/sp_30_root" 'filesystem root'
+check_prefix_refused 'PREFIX is //' prefix-root2 '//' "$TMP/sp_30_root2" 'filesystem root'
+# From "/", a relative PREFIX must pin to /malt, not //malt (an empty
+# component). The sudo shim refuses, so the run stops at the first sudo call
+# and nothing is created. Skipped as root, or where / is writable or /malt
+# exists: there the installer could really create /malt.
+if [ "$(id -u)" = 0 ] || [ -w / ] || [ -e /malt ]; then
+  printf '  ~ relative PREFIX from /: skipped, / is writable or /malt exists\n'
+else
+  prefix_run prefix-fromroot malt / || true
+  if grep -qF 'sudo called: mkdir -p /malt' "$TMP/out.log" && ! grep -qF '//malt' "$TMP/out.log" &&
+    ! grep -qF 'no empty or' "$TMP/out.log" && [ ! -e /malt ]; then
+    printf '  ✓ relative PREFIX from /: pinned to /malt\n'
+    pass=$((pass + 1))
+  else
+    prefix_fail 'relative PREFIX from /' prefix-fromroot 'did not reach the /malt step cleanly'
+  fi
+fi
+# Two long components, so each fits NAME_MAX and only the total length varies.
+# 493 bytes is malt's own cap; one more must be refused.
+long_comp=$(printf 'a%.0s' $(seq 1 200))
+# A prefix of exactly $2 bytes: "$1/<200 bytes>/<tail>".
+prefix_of_len() {
+  local head="$1/$long_comp" n
+  n=$(($2 - ${#head} - 1))
+  [ "$n" -ge 1 ] && [ "$n" -le 255 ] || return 1
+  printf '%s/%s' "$head" "$(printf 'a%.0s' $(seq 1 "$n"))"
+}
+p493=$(prefix_of_len "$TMP/sp_30_ok" 493)
+p494=$(prefix_of_len "$TMP/sp_30_over" 494)
+check_prefix_accepted 'PREFIX of exactly 493 bytes' prefix-493 "$p493" "$TMP/sp_30_ok"
+check_prefix_refused 'PREFIX of 494 bytes' prefix-494 "$p494" "$TMP/sp_30_over" 'longer than 493 bytes'
 # shellcheck disable=SC2088 # the literal tilde is the input under test
-check_prefix_refused 'literal ~ in PREFIX' prefix-tilde '~/.malt' "$TMP/cwd_30"
+check_prefix_refused 'literal ~ in PREFIX' prefix-tilde '~/.malt' "$TMP/cwd_30" 'starts with "~"'
 stop_server
 
 # ── test 13: an unexpanded ~ in INSTALL_DIR is refused ───────────────
