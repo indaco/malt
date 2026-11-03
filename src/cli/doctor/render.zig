@@ -179,13 +179,18 @@ pub fn renderCheckRow(
     try writer.writeAll("\n");
 }
 
+/// Room for one rendered row. A check's detail must fit with its header, or
+/// the row is cut and the next one starts on the same line.
+pub const row_buf_len = 4096;
+
 pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
     if (output.isQuiet()) return;
     // `File.writer.flush` writes positionally from offset 0, overwriting
     // prior rows when stderr is a regular file; stream via `stderrWriteAll`.
-    var buf: [1024]u8 = undefined;
+    var buf: [row_buf_len]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    // Truncation of an oversized row is acceptable - `buffered()` still emits what fit.
+    // An oversized row is cut and loses its newline, so `row_buf_len` must stay
+    // above every check's detail.
     renderCheckRow(&w, status, name, detail, .{
         .color = color.isColorEnabledForStderr(),
         .emoji = color.isEmojiEnabled(),
