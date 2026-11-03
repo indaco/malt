@@ -44,8 +44,29 @@ case "$PREFIX" in
   printf '  ✗ PREFIX starts with "~", which the shell did not expand. Use $HOME instead.\n' >&2
   exit 1
   ;;
-*) PREFIX="$PWD/$PREFIX" ;;
+*) PREFIX="${PWD%/}/$PREFIX" ;;
 esac
+# Trailing slashes would print as "//bin" and break the PATH match. Strip
+# them all, so "//" reaches the root refusal below.
+while [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX="${PREFIX%/}"; done
+# Root would be chowned to the user.
+if [ -z "$PREFIX" ]; then
+  printf '  ✗ PREFIX must not be the filesystem root\n' >&2
+  exit 1
+fi
+# malt refuses a MALT_PREFIX with any other byte, an empty or "." component,
+# or more than 493 bytes. Such a prefix would install here and then fail at
+# every malt call. The letters are spelled out: a range follows the locale.
+case "$PREFIX/" in
+*//* | */./* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+/-]*)
+  printf '  ✗ PREFIX may hold only letters, digits and . _ + - / with no empty or "." component: %s\n' "$PREFIX" >&2
+  exit 1
+  ;;
+esac
+if [ "${#PREFIX}" -gt 493 ]; then
+  printf '  ✗ PREFIX is longer than 493 bytes: %s\n' "$PREFIX" >&2
+  exit 1
+fi
 # Owning a sticky dir such as /tmp lets you rename other users' entries.
 if [ -k "$PREFIX" ]; then
   printf '  ✗ PREFIX is a sticky directory: %s\n' "$PREFIX" >&2
@@ -101,6 +122,22 @@ warn() { printf "${YELLOW}  ⚠ ${RESET}%s\n" "$*"; }
 error() {
   printf "${RED}  ✗ ${RESET}%s\n" "$*" >&2
   exit 1
+}
+# Shell-quote $1 for a line the user pastes. Single quotes keep any byte
+# literal, so no $'..' form can leak out. Plain words stay unquoted. sed, not
+# ${var//}: bash 3.2 and 5.x disagree on backslashes in a replacement.
+sq() {
+  case "$1" in
+  "" | *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+  *) printf '%s' "$1" ;;
+  esac
+}
+# Same for fish, which reads \\ and \' as escapes inside single quotes.
+fq() {
+  case "$1" in
+  "" | *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")" ;;
+  *) printf '%s' "$1" ;;
+  esac
 }
 
 # ── Platform detection ──────────────────────────────────────────────
@@ -384,10 +421,45 @@ else
 fi
 
 echo ""
-printf '%s%smalt is ready!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+# Whole-entry match, trailing slash ignored, like doctor's PATH check.
+case ":${PATH}:" in
+*":${PREFIX}/bin:"* | *":${PREFIX}/bin/:"*)
+  printf '%s%smalt is ready!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+  ;;
+*)
+  # Print only: a piped installer cannot ask before editing dotfiles.
+  # Login-shell files, as Homebrew's installer uses. The full path works
+  # even when a profile runs before INSTALL_DIR reaches PATH.
+  MALT_CMD=$(sq "${INSTALL_DIR}/${BINARY}")
+  EVAL_LINE="eval \"\$(${MALT_CMD} shellenv)\""
+  FISH_LINE="$(fq "${INSTALL_DIR}/${BINARY}") shellenv fish | source"
+  # shellenv does not export it, and the next malt call needs it.
+  if [ "$PREFIX" != "/opt/malt" ]; then
+    EVAL_LINE="export MALT_PREFIX=${PREFIX}; ${EVAL_LINE}"
+    FISH_LINE="set -gx MALT_PREFIX ${PREFIX}; ${FISH_LINE}"
+  fi
+  case "$(basename "${SHELL:-}")" in
+  # printf, not echo: echo would expand a backslash in the line.
+  zsh) PROFILE_LINE="printf '%s\\n' $(sq "$EVAL_LINE") >> ~/.zprofile" ;;
+  bash) PROFILE_LINE="printf '%s\\n' $(sq "$EVAL_LINE") >> ~/.bash_profile" ;;
+  fish)
+    EVAL_LINE=$FISH_LINE
+    PROFILE_LINE="${FISH_LINE}    # in ~/.config/fish/config.fish"
+    ;;
+  *) PROFILE_LINE=$EVAL_LINE ;;
+  esac
+  printf '%s%smalt is installed, but one more step is needed%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
+  echo "  ${PREFIX}/bin is not on your PATH, so installed commands will not be found."
+  echo "  Add this to your shell profile:"
+  # printf, not echo: under sh, echo expands the backslashes sq/fq emit.
+  printf '    %s\n' "${PROFILE_LINE}"
+  echo "  Then apply it to this shell:"
+  printf '    %s\n' "${EVAL_LINE}"
+  ;;
+esac
 echo ""
 echo "  Get started:"
-echo "    malt install jq           # install a formula"
+echo "    malt install tree         # install a formula"
 echo "    malt install --cask app   # install a cask"
 echo "    malt list                 # list installed packages"
 echo "    malt --help               # see all commands"

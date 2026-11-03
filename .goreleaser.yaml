@@ -99,18 +99,25 @@ homebrew_casks:
 
     # The cask drops the binaries but cannot create malt's install prefix:
     # it lives under root-owned /opt, so it needs one privileged step the
-    # cask itself must not take. Spell it out, plus the PATH entry that
-    # makes installed commands resolve. `scripts/install.sh` already does
-    # both for the script-install path.
+    # cask itself must not take. Spell it out, plus the shellenv line that
+    # puts the prefix on PATH. `scripts/install.sh` creates the prefix but
+    # only prints the shellenv line, so the cask repeats it here.
     caveats: |
       malt installs packages into a prefix that must exist and be owned by you.
       Create it once (default /opt/malt; override with MALT_PREFIX):
 
         sudo mkdir -p /opt/malt && sudo chown "$USER" /opt/malt
 
-      Then add its bin directory to your PATH, e.g. in ~/.zshrc:
+      Then put it on your PATH, e.g. in ~/.zprofile:
 
-        export PATH="/opt/malt/bin:$PATH"
+        eval "$(malt shellenv)"
+
+      For fish, put this in ~/.config/fish/config.fish instead:
+
+        malt shellenv fish | source
+
+      If you override the prefix, export MALT_PREFIX first in the same file
+      (fish: set -gx MALT_PREFIX <prefix>).
 
 release:
   # Assets upload to a draft; the release workflow's notes step flips
