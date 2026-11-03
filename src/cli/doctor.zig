@@ -905,13 +905,19 @@ fn checkPrefixPath(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     }
     var msg_buf: [640]u8 = undefined;
-    const msg = std.mem.print(
-        &msg_buf,
-        "{s} is not on PATH — installed commands won't be found. Add: export PATH=\"{s}:$PATH\"",
-        .{ bin, bin },
-    ) catch "Prefix bin directory is not on PATH";
+    const msg = formatPrefixPathMessage(&msg_buf, bin) catch "Prefix bin directory is not on PATH";
     printCheck(name, .warn_status, msg);
     return .warn_status;
+}
+
+/// Pure formatter for `checkPrefixPath`'s warning. The remedy is `shellenv`,
+/// not a bare `export PATH`: it also sets MANPATH, INFOPATH and HOMEBREW_*.
+fn formatPrefixPathMessage(buf: []u8, bin: []const u8) error{NoSpaceLeft}![]const u8 {
+    return std.mem.print(
+        buf,
+        "{s} is not on PATH — installed commands won't be found. Add to your shell profile: eval \"$(mt shellenv)\" (fish: mt shellenv fish | source)",
+        .{bin},
+    );
 }
 
 /// Report offline-mode state so operators can confirm `MALT_OFFLINE` /
@@ -2447,6 +2453,17 @@ test "pathContainsDir: matches a complete entry, ignores trailing slashes" {
     // Trailing slash on either side must not defeat the match.
     try testing.expect(pathContainsDir("/opt/malt/bin/:/usr/bin", "/opt/malt/bin"));
     try testing.expect(pathContainsDir("/opt/malt/bin", "/opt/malt/bin/"));
+}
+
+test "formatPrefixPathMessage: remedy is shellenv, not a bare export PATH" {
+    // A bare `export PATH` leaves MANPATH, INFOPATH and HOMEBREW_* unset, so
+    // the warning must point at the complete setup.
+    var buf: [640]u8 = undefined;
+    const msg = try formatPrefixPathMessage(&buf, "/opt/malt/bin");
+    try testing.expect(std.mem.startsWith(u8, msg, "/opt/malt/bin is not on PATH"));
+    try testing.expect(std.mem.indexOf(u8, msg, "eval \"$(mt shellenv)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "mt shellenv fish | source") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "export PATH") == null);
 }
 
 test "pathContainsDir: rejects substrings, missing entries, and empties" {
