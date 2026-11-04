@@ -117,6 +117,7 @@ regressions-harness:
     @./scripts/regressions/unbounded-relative-cursor-motion-enables-spoofing.sh
     @./scripts/regressions/upgrade-prunes-outdated-snapshot-upgrade-does-not-update-outdated-json.sh
     @./scripts/regressions/utf8-lead-byte-smuggles-c1-introducer.sh
+    @./scripts/test/install_sh_test.sh
 
 # Run the full regression pool (token + built binary + per-script timeout).
 # Pass script names to run a subset; MALT_REGRESSION_TIMEOUT overrides the cap.
