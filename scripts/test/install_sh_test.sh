@@ -903,7 +903,7 @@ prefix_run() { # $1 = tag, $2 = prefix, $3 = cwd; output goes to $TMP/out.log
     MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
     MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
     NO_COLOR=1 \
-    bash "$INSTALLER" >"$TMP/out.log" 2>&1)
+    bash "$INSTALLER") >"$TMP/out.log" 2>&1
 }
 prefix_fail() { # $1 = label, $2 = tag, $3 = what went wrong
   printf '  ✗ %s: %s\n' "$1" "$3" >&2
@@ -1111,6 +1111,203 @@ SHIM
     bash "$FAKE_REPO22/scripts/install.sh" >"$TMP/out.log" 2>&1 || true
   check_user_created_bin_dir "source build: bin dir created by the user" "source-build-bin-dir" "$pfx22/bin"
 fi
+
+# ── test 31: INSTALL_DIR takes only plain paths ─────────────────────
+# The installer prints this value in lines the user pastes into any shell. The
+# allowlist is what keeps those lines safe, so each shape below holds one
+# refused byte class and the rest of the path is plain.
+printf '▸ INSTALL_DIR allowlist\n'
+ID_RULE='INSTALL_DIR may hold only letters, digits and . _ + - / with no empty or "." component'
+ID_REL_HINT='A relative INSTALL_DIR includes the current directory, which must obey the same rule'
+mkdir -p "$TMP/w31" "$TMP/w31_pfx" "$TMP/home_31"
+make_release_fixture "$TMP/releases31" "9.9.9"
+start_server "$TMP/releases31"
+sudo -k 2>/dev/null || true
+
+# $1 = INSTALL_DIR, $2 = cwd, $3 = locale or empty, $4 = PREFIX, $5 = login
+# shell, $6 = runner. The redirect is on the subshell: a failed cd then leaves
+# an empty log, not the log of the previous row.
+id_run() {
+  (cd "$2" && env -i \
+    HOME="$TMP/home_31" \
+    PATH="$NOSUDO:/usr/bin:/bin:/usr/sbin:/sbin" \
+    USER="$USER" \
+    SHELL="${5:-/bin/zsh}" \
+    PREFIX="$4" \
+    INSTALL_DIR="$1" \
+    ${3:+"LC_ALL=$3"} \
+    MALT_ALLOW_UNVERIFIED=1 \
+    MALT_TEST_RELEASES_URL="http://127.0.0.1:${PORT}" \
+    MALT_TEST_API_URL="http://127.0.0.1:${PORT}/latest.json" \
+    NO_COLOR=1 \
+    "${6:-bash}" "$INSTALLER") >"$TMP/out.log" 2>&1 </dev/null
+}
+# A refusal prints only its own text. Any byte other than printable ASCII and
+# the refusal glyph came from the value, and could drive the terminal.
+log_has_raw_bytes() {
+  [ -n "$(LC_ALL=C sed 's/✗//g' "$TMP/out.log" | LC_ALL=C tr -d '\n\040-\176')" ]
+}
+# $4 = watched dir, $5 = locale or empty, $6 = refusal text, $7 = cwd
+check_id_refused() {
+  local label="$1" tag="$2" dir="$3" watch="$4" locale="$5" expect="$6" cwd="${7:-$4}" rc=0
+  # One PREFIX per row: a row that installs must not turn the next ones red.
+  local pfx="$TMP/w31_pfx/$tag"
+  id_run "$dir" "$cwd" "$locale" "$pfx" || rc=$?
+  if [ "$rc" = 1 ] && [ -z "$(command ls -A "$watch")" ] && [ ! -e "$pfx" ] &&
+    grep -qF -- "$expect" "$TMP/out.log" && ! log_has_raw_bytes; then
+    printf '  ✓ %s: refused, nothing written, no value echoed\n' "$label"
+    pass=$((pass + 1))
+  else
+    prefix_fail "$label" "$tag" "rc=$rc, dir holds: $(command ls -A "$watch"), wanted message: $expect"
+  fi
+}
+id_row() { # $1 = tag, $2 = path below a watched dir, $3 = locale or empty
+  local w="$TMP/w31/$1${3:+_$3}"
+  mkdir -p "$w"
+  check_id_refused "INSTALL_DIR $1${3:+ under $3}" "id-$1${3:+-$3}" "$w/$2" "$w" "$3" "$ID_RULE"
+}
+for loc in "" en_US.UTF-8; do
+  id_row colon 'a:b' "$loc"
+  id_row space 'a b' "$loc"
+  id_row quote "a'b" "$loc"
+  id_row backslash 'a\b' "$loc"
+  # shellcheck disable=SC2016 # the literal $(...) is the input under test
+  id_row subst 'a$(id)b' "$loc"
+  # shellcheck disable=SC2016 # the literal backticks are the input under test
+  id_row backtick 'a`id`b' "$loc"
+  id_row bang 'a!b' "$loc"
+  id_row newline $'a\nb' "$loc"
+  id_row trailing-newline $'a\n' "$loc"
+  id_row esc $'a\033b' "$loc"
+  id_row del $'a\177b' "$loc"
+  id_row utf8-c1 $'a\302\235b' "$loc"
+  id_row raw-c1 $'a\233b' "$loc"
+  id_row non-ascii 'malté' "$loc"
+  id_row equals 'a=b' "$loc"
+  id_row empty-component 'a//b' "$loc"
+  id_row dot-component 'a/./b' "$loc"
+done
+# A slash-only value strips to empty, which prints an empty PATH entry: the
+# current directory.
+mkdir -p "$TMP/w31/root" "$TMP/w31/root2"
+check_id_refused 'INSTALL_DIR bare /' id-root / "$TMP/w31/root" "" "$ID_RULE"
+check_id_refused 'INSTALL_DIR //' id-root2 // "$TMP/w31/root2" "" "$ID_RULE"
+# Legacy locales read the bytes as multibyte text, so a range or a class in the
+# check would follow the locale. A skip here proves nothing for that locale.
+for loc in ko_KR.eucKR ja_JP.SJIS; do
+  if locale -a 2>/dev/null | grep -x "$loc" >/dev/null; then
+    id_row esc $'a\033b' "$loc"
+    id_row clean-non-ascii '人z' "$loc"
+  else
+    printf '  - skipped: %s not installed\n' "$loc"
+  fi
+done
+# Under bash 3.2 in this locale the strip turns <dir>/<A1> into <dir>, a plain
+# path that names another directory. Only a check before the strip refuses it.
+if locale -a 2>/dev/null | grep -x ko_KR.eucKR >/dev/null; then
+  id_row strip-cut $'\241' ko_KR.eucKR
+else
+  printf '  - skipped: ko_KR.eucKR not installed\n'
+fi
+# The check must read the pinned path, or a cwd with a colon reaches PATH.
+colon_cwd="$TMP/w31/colon:cwd"
+mkdir -p "$colon_cwd"
+check_id_refused 'relative INSTALL_DIR under a colon cwd' id-rel-colon rel/bin "$colon_cwd" "" "$ID_RULE"
+# A relative value can look plain, so the refusal must name the other input.
+space_cwd="$TMP/w31/space cwd"
+mkdir -p "$space_cwd"
+check_id_refused 'relative INSTALL_DIR under a cwd with a space' id-rel-space rel/bin "$space_cwd" "" "$ID_REL_HINT"
+# An absolute value does not use the cwd, so the refusal must not name it.
+rc=0
+id_run "$space_cwd/a b" "$space_cwd" "" "$TMP/w31_pfx/id-abs-no-hint" || rc=$?
+if [ "$rc" = 1 ] && grep -qF -- "$ID_RULE" "$TMP/out.log" && ! grep -qF -- "$ID_REL_HINT" "$TMP/out.log"; then
+  printf '  ✓ absolute INSTALL_DIR: refusal does not name the current directory\n'
+  pass=$((pass + 1))
+else
+  prefix_fail 'absolute INSTALL_DIR refusal' id-abs-no-hint "rc=$rc, wanted the rule without: $ID_REL_HINT"
+fi
+# The ".." refusal runs first, so it must not echo the value either.
+dd31="$TMP/w31/dotdot"
+mkdir -p "$dd31"
+check_id_refused '".." in INSTALL_DIR with ESC' id-dotdot-esc "$dd31/a"$'\033'"b/../c" "$dd31" "" 'must not contain a ".." component'
+
+check_refused_quietly() { # $1 = label, $2 = tag, $3 = prefix, $4 = watched dir, $5 = refusal text
+  check_prefix_refused "$1" "$2" "$3" "$4" "$5"
+  if log_has_raw_bytes; then
+    prefix_fail "$1 echoed the value" "$2-echo" "raw bytes in the output"
+  else
+    printf '  ✓ %s: no value echoed\n' "$1"
+    pass=$((pass + 1))
+  fi
+}
+mkdir -p "$TMP/w31/pfx_dd" "$TMP/w31/pfx_esc"
+check_refused_quietly '".." in PREFIX with ESC' prefix-dotdot-esc "$TMP/w31/pfx_dd/a"$'\033'"b/../c" "$TMP/w31/pfx_dd" 'must not contain a ".." component'
+check_refused_quietly 'ESC in PREFIX' prefix-esc "$TMP/w31/pfx_esc/a"$'\033'"b" "$TMP/w31/pfx_esc" 'may hold only letters'
+
+# ── test 32: the printed lines for a plain dir, as exact text ───────
+printf '▸ printed setup lines\n'
+check_text() { # $1 = label, $2 = tag, $3 = got, $4 = wanted
+  if [ "$3" = "$4" ]; then
+    printf '  ✓ %s\n' "$1"
+    pass=$((pass + 1))
+  else
+    prefix_fail "$1" "$2" "got [$3], wanted [$4]"
+  fi
+}
+lines_after() { LC_ALL=C awk -v m="$1" 'index($0, m) { getline; print }' "$TMP/out.log"; }
+for runner in bash /bin/sh; do
+  for login in zsh bash fish; do
+    tag="$login-$(basename "$runner")"
+    d32="$TMP/w31/plain_$tag/a+b.c-d_e"
+    p32="$TMP/w31/pfx_$tag"
+    rc=0
+    id_run "$d32" "$TMP/w31" "" "$p32" "/x/$login" "$runner" || rc=$?
+    check_text "$tag: install succeeds" "id-plain-rc-$tag" "$rc" 0
+    # The hint is the first marker line; the profile step is the last.
+    hint=$(lines_after 'Add this to your shell profile:' | head -n 1)
+    profile=$(lines_after 'Add this to your shell profile:' | tail -n 1)
+    apply=$(lines_after 'Then apply it to this shell:')
+    posix="export MALT_PREFIX=$p32; eval \"\$($d32/malt shellenv)\""
+    fishline="set -gx MALT_PREFIX $p32; $d32/malt shellenv fish | source"
+    check_text "$tag: PATH hint" "id-hint-$tag" "$hint" "    export PATH=$d32:\"\$PATH\""
+    case "$login" in
+    zsh)
+      check_text "$tag: apply line" "id-apply-$tag" "$apply" "    $posix"
+      check_text "$tag: profile line" "id-profile-$tag" "$profile" "    printf '%s\\n' '$posix' >> ~/.zprofile"
+      ;;
+    bash)
+      check_text "$tag: apply line" "id-apply-$tag" "$apply" "    $posix"
+      check_text "$tag: profile line" "id-profile-$tag" "$profile" "    printf '%s\\n' '$posix' >> ~/.bash_profile"
+      ;;
+    fish)
+      check_text "$tag: apply line" "id-apply-$tag" "$apply" "    $fishline"
+      check_text "$tag: profile line" "id-profile-$tag" "$profile" "    $fishline    # in ~/.config/fish/config.fish"
+      ;;
+    esac
+    hint_cmd="${hint#    }"
+    check_text "$tag: hint pasted into bash" "id-paste-bash-$tag" \
+      "$(env -i HOME="$TMP/home_31" PATH=/E /bin/bash --noprofile --norc -c "$hint_cmd; printf '%s' \"\$PATH\"")" "$d32:/E"
+    check_text "$tag: hint pasted into zsh" "id-paste-zsh-$tag" \
+      "$(env -i HOME="$TMP/home_31" PATH=/E /bin/zsh -f -c "$hint_cmd; printf '%s' \"\$PATH\"")" "$d32:/E"
+  done
+done
+# Trailing slashes still work, and never reach PATH or the printed lines.
+d32s="$TMP/w31/slashes/bin"
+rc=0
+id_run "$d32s///" "$TMP/w31" "" "$TMP/w31/pfx_slashes" || rc=$?
+check_text 'trailing slashes: install succeeds' id-slashes-rc "$rc" 0
+check_text 'trailing slashes: binary installed' id-slashes-bin "$([ -x "$d32s/malt" ] && echo yes)" yes
+check_text 'trailing slashes: stripped from the hint' id-slashes-hint \
+  "$(lines_after 'Add this to your shell profile:' | head -n 1)" "    export PATH=$d32s:\"\$PATH\""
+# From cwd / a plain relative value must not pin to //rel, an empty component.
+d32r="$TMP/w31/from_root/bin"
+rc=0
+id_run "${d32r#/}" / "" "$TMP/w31/pfx_from_root" || rc=$?
+check_text 'relative INSTALL_DIR from cwd /: install succeeds' id-from-root-rc "$rc" 0
+check_text 'relative INSTALL_DIR from cwd /: binary installed' id-from-root-bin "$([ -x "$d32r/malt" ] && echo yes)" yes
+check_text 'relative INSTALL_DIR from cwd /: hint' id-from-root-hint \
+  "$(lines_after 'Add this to your shell profile:' | head -n 1)" "    export PATH=$d32r:\"\$PATH\""
+stop_server
 
 printf '\n── summary ──\n'
 printf 'pass: %d\n' "$pass"

@@ -13,12 +13,13 @@ INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 # A ".." component names a different dir than the path shows, so refuse it.
 case "/$INSTALL_DIR/" in
 */../*)
-  printf '  ✗ INSTALL_DIR must not contain a ".." component: %s\n' "$INSTALL_DIR" >&2
+  printf '  ✗ INSTALL_DIR must not contain a ".." component\n' >&2
   exit 1
   ;;
 esac
 # A quoted ~ reaches us unexpanded. Pinning it would create a dir named "~".
-# The source build cds away, so any other relative value is pinned first.
+# The source build cds away, so any other relative value is pinned first. At
+# cwd / the plain join would start with an empty component.
 case "$INSTALL_DIR" in
 /*) ;;
 "~"*)
@@ -26,14 +27,29 @@ case "$INSTALL_DIR" in
   printf '  ✗ INSTALL_DIR starts with "~", which the shell did not expand. Use $HOME instead.\n' >&2
   exit 1
   ;;
-*) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
+*) ID_RELATIVE=1 && if [ "$PWD" = / ]; then INSTALL_DIR="/$INSTALL_DIR"; else INSTALL_DIR="$PWD/$INSTALL_DIR"; fi ;;
+esac
+PLAIN_PATH_BYTES='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+/-' # a range follows the locale
+# Pasted lines print this value unquoted, so only plain paths pass. Strip only
+# a plain value: in EUC locales bash 3.2 can cut bytes in ${VAR%/}.
+case "$INSTALL_DIR" in
+*[!$PLAIN_PATH_BYTES]*) ;;
+*) while [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ]; do INSTALL_DIR="${INSTALL_DIR%/}"; done ;;
+esac
+# An empty result would print an empty PATH entry: the current directory.
+case "$INSTALL_DIR/" in
+/ | *//* | */./* | *[!$PLAIN_PATH_BYTES]*)
+  printf '  ✗ INSTALL_DIR may hold only letters, digits and . _ + - / with no empty or "." component\n' >&2
+  [ -z "${ID_RELATIVE:-}" ] || printf '    A relative INSTALL_DIR includes the current directory, which must obey the same rule\n' >&2
+  exit 1
+  ;;
 esac
 PREFIX="${PREFIX:-/opt/malt}"
 # Same rules as INSTALL_DIR: root creates PREFIX, so a ".." or an unexpanded
 # ~ must not steer it. The source build cds away, so pin a relative value.
 case "/$PREFIX/" in
 */../*)
-  printf '  ✗ PREFIX must not contain a ".." component: %s\n' "$PREFIX" >&2
+  printf '  ✗ PREFIX must not contain a ".." component\n' >&2
   exit 1
   ;;
 esac
@@ -55,11 +71,10 @@ if [ -z "$PREFIX" ]; then
   exit 1
 fi
 # malt refuses a MALT_PREFIX with any other byte, an empty or "." component,
-# or more than 493 bytes. Such a prefix would install here and then fail at
-# every malt call. The letters are spelled out: a range follows the locale.
+# or more than 493 bytes. Such a prefix would install, then fail at every call.
 case "$PREFIX/" in
-*//* | */./* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+/-]*)
-  printf '  ✗ PREFIX may hold only letters, digits and . _ + - / with no empty or "." component: %s\n' "$PREFIX" >&2
+*//* | */./* | *[!$PLAIN_PATH_BYTES]*)
+  printf '  ✗ PREFIX may hold only letters, digits and . _ + - / with no empty or "." component\n' >&2
   exit 1
   ;;
 esac
@@ -122,22 +137,6 @@ warn() { printf "${YELLOW}  ⚠ ${RESET}%s\n" "$*"; }
 error() {
   printf "${RED}  ✗ ${RESET}%s\n" "$*" >&2
   exit 1
-}
-# Shell-quote $1 for a line the user pastes. Single quotes keep any byte
-# literal, so no $'..' form can leak out. Plain words stay unquoted. sed, not
-# ${var//}: bash 3.2 and 5.x disagree on backslashes in a replacement.
-sq() {
-  case "$1" in
-  "" | *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
-  *) printf '%s' "$1" ;;
-  esac
-}
-# Same for fish, which reads \\ and \' as escapes inside single quotes.
-fq() {
-  case "$1" in
-  "" | *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")" ;;
-  *) printf '%s' "$1" ;;
-  esac
 }
 
 # ── Platform detection ──────────────────────────────────────────────
@@ -417,7 +416,8 @@ if command -v malt >/dev/null 2>&1; then
 else
   warn "malt was installed to ${INSTALL_DIR} but is not in PATH"
   echo "  Add this to your shell profile:"
-  echo "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+  # shellcheck disable=SC2016 # $PATH is literal text in the pasted line
+  printf '    export PATH=%s:"$PATH"\n' "$INSTALL_DIR"
 fi
 
 echo ""
@@ -430,18 +430,17 @@ case ":${PATH}:" in
   # Print only: a piped installer cannot ask before editing dotfiles.
   # Login-shell files, as Homebrew's installer uses. The full path works
   # even when a profile runs before INSTALL_DIR reaches PATH.
-  MALT_CMD=$(sq "${INSTALL_DIR}/${BINARY}")
+  MALT_CMD="${INSTALL_DIR}/${BINARY}"
   EVAL_LINE="eval \"\$(${MALT_CMD} shellenv)\""
-  FISH_LINE="$(fq "${INSTALL_DIR}/${BINARY}") shellenv fish | source"
+  FISH_LINE="${INSTALL_DIR}/${BINARY} shellenv fish | source"
   # shellenv does not export it, and the next malt call needs it.
   if [ "$PREFIX" != "/opt/malt" ]; then
     EVAL_LINE="export MALT_PREFIX=${PREFIX}; ${EVAL_LINE}"
     FISH_LINE="set -gx MALT_PREFIX ${PREFIX}; ${FISH_LINE}"
   fi
   case "$(basename "${SHELL:-}")" in
-  # printf, not echo: echo would expand a backslash in the line.
-  zsh) PROFILE_LINE="printf '%s\\n' $(sq "$EVAL_LINE") >> ~/.zprofile" ;;
-  bash) PROFILE_LINE="printf '%s\\n' $(sq "$EVAL_LINE") >> ~/.bash_profile" ;;
+  zsh) PROFILE_LINE="printf '%s\\n' '${EVAL_LINE}' >> ~/.zprofile" ;;
+  bash) PROFILE_LINE="printf '%s\\n' '${EVAL_LINE}' >> ~/.bash_profile" ;;
   fish)
     EVAL_LINE=$FISH_LINE
     PROFILE_LINE="${FISH_LINE}    # in ~/.config/fish/config.fish"
@@ -451,7 +450,7 @@ case ":${PATH}:" in
   printf '%s%smalt is installed, but one more step is needed%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
   echo "  ${PREFIX}/bin is not on your PATH, so installed commands will not be found."
   echo "  Add this to your shell profile:"
-  # printf, not echo: under sh, echo expands the backslashes sq/fq emit.
+  # printf, not echo: under sh, echo expands the \n in the profile line.
   printf '    %s\n' "${PROFILE_LINE}"
   echo "  Then apply it to this shell:"
   printf '    %s\n' "${EVAL_LINE}"
