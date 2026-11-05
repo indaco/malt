@@ -425,7 +425,8 @@ build_malt() {
 # from an older tree, which then publishes under the wrong release label.
 built_version_matches() {
   local want
-  want=$(tr -d '[:space:]' <"$1/.version" 2>/dev/null) || return 1
+  # The shell opens redirects in order, so 2>/dev/null must come before the <.
+  want=$(tr -d '[:space:]' 2>/dev/null <"$1/.version") || return 1
   [ -n "$want" ] && [ "$2" = "$want" ]
 }
 
