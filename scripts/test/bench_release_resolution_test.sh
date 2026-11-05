@@ -94,6 +94,10 @@ check_pred "stale cached build fails" 1 built_version_matches "$ver_src" "0.25.0
 check_pred "unreported version fails" 1 built_version_matches "$ver_src" ""
 command rm -f "$ver_src/.version"
 check_pred "missing .version fails" 1 built_version_matches "$ver_src" "0.25.2"
+# The caller reports this failure, so a shell error here only adds noise.
+# The check fails by design, so `|| true` keeps `set -e` from stopping the script.
+missing_output=$(built_version_matches "$ver_src" "0.25.2" 2>&1 || true)
+check "missing .version prints nothing" "" "$missing_output"
 rm -rf "$ver_src"
 
 echo "tree_zig_version:"
