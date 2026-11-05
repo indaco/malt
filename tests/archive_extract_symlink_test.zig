@@ -130,7 +130,20 @@ test "extractZip removes partial output when unzip cannot create an entry" {
     try run(io, &.{ "zip", "-q", arc, "hello", "blocked/child" }, .{ .dir = src });
 
     const dst = s.p("dest");
-    try testing.expectError(error.ExtractionFailed, archive.extractZip(io, arc, dst));
+    const result = blk: {
+        // unzip reports the blocked entry on the inherited stderr. Park fd 2 on
+        // /dev/null for this call only, so a failed assertion still prints.
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.Unexpected;
+        defer _ = std.c.close(saved);
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.Unexpected;
+        defer _ = std.c.close(devnull);
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.Unexpected;
+        defer _ = std.c.dup2(saved, std.posix.STDERR_FILENO);
+        break :blk archive.extractZip(io, arc, dst);
+    };
+    try testing.expectError(error.ExtractionFailed, result);
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, dst, .{}));
 }
 
