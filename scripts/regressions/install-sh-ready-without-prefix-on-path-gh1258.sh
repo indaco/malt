@@ -119,29 +119,24 @@ grep -qF "set -gx MALT_PREFIX $PFX; $BIN/malt shellenv fish | source" <<<"$outF"
 outN=$(run "$PFX/binx:$BIN:")
 ! grep -qF 'malt is ready!' <<<"$outN" || fail "ready banner printed for a near-miss PATH entry" "$outN"
 
-# --- malt itself off PATH, in a dir that needs quoting (a quote, a space and
-# a backslash that echo would expand)
-BIN="$T/it's a\\n bin"
+# --- malt itself off PATH
 outI=$(run "")
 paste_and_source "$outI" /bin/zsh .zprofile
 paste_and_source "$(run "" /bin/bash)" /bin/bash .bash_profile
-BIN="$T/bin"
 
 # --- run as `sh install.sh`: macOS sh is bash in POSIX mode, whose echo expands
-# the backslashes in the quoted lines unless the installer prints them with printf.
-BIN="$T/it's a\\n bin"
+# the \n in the profile line unless the installer prints it with printf.
 outP=$(RUNNER=/bin/sh run "")
-BIN="$T/bin"
 paste_and_source "$outP" /bin/zsh .zprofile
 
-# --- fish reads \\ and \' as escapes inside single quotes, unlike POSIX shells.
-# fish is not run here: the line is checked as text.
+# --- a dir that would need quoting is refused, so no such line is ever printed
 BIN="$T/it's a\\n bin"
-outQ=$(run "" /usr/local/bin/fish)
+if outQ=$(run ""); then
+  fail "dir that needs quoting was accepted" "$outQ"
+fi
+grep -qF 'INSTALL_DIR may hold only letters' <<<"$outQ" || fail "no refusal for a dir that needs quoting" "$outQ"
+[ ! -e "$BIN" ] || fail "refused dir was created" "$outQ"
 BIN="$T/bin"
-fish_dir="$T/it\\'s a\\\\n bin"
-grep -qF "set -gx MALT_PREFIX $PFX; '$fish_dir/malt' shellenv fish | source" <<<"$outQ" ||
-  fail "fish line does not use fish quoting" "$outQ"
 
 # --- prefix bin on PATH, with and without a trailing slash on the entry
 outB=$(run "$BIN:$PFX/bin/:")
