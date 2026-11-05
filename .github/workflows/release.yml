@@ -96,7 +96,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0
+          version: 0.17.1
           # Release runs rarely; a fresh compile takes a few extra
           # minutes but is worth it. A cancelled or crashed release
           # job (e.g. the one we killed while debugging the smoke
