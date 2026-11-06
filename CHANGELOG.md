@@ -4,6 +4,62 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.25.6 - 2026-11-06
+
+### Highlights
+
+v0.25.6 is a fix release: a first install of malt completes on more Macs and gives correct instructions.
+
+- **Install on more Macs.** The installer works on a Mac with no `/usr/local/bin`, and uses sudo only when you cannot create the bin directory yourself.
+- **A clear next step.** If the malt `bin` directory is not on your PATH, the installer and `mt doctor` show the `shellenv` line for your shell profile.
+- **Correct bypass hints.** The installer's hint to skip verification now gives a command that works.
+- **Stricter install paths.** `INSTALL_DIR` and `PREFIX` now accept only letters, digits and `._+-/`, so the installer refuses a path with a space or a `~`.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **install:** accept only plain INSTALL_DIR paths so the printed setup lines are safe to paste ([9bb084d77](https://github.com/indaco/malt/commit/9bb084d77)) ([#1260](https://github.com/indaco/malt/pull/1260))
+- **install:** tell new users the shellenv step instead of claiming malt is ready ([0c881a7f6](https://github.com/indaco/malt/commit/0c881a7f6)) ([#1259](https://github.com/indaco/malt/pull/1259))
+- **install:** create the prefix first so a new bin dir under it is always yours ([e5c1a164f](https://github.com/indaco/malt/commit/e5c1a164f)) ([#1256](https://github.com/indaco/malt/pull/1256))
+- **install:** create the bin directory when it does not exist yet ([cb5a078f8](https://github.com/indaco/malt/commit/cb5a078f8)) ([#1254](https://github.com/indaco/malt/pull/1254))
+- **install:** make the verification bypass hint actually reach the installer ([42bddaeff](https://github.com/indaco/malt/commit/42bddaeff)) ([#1253](https://github.com/indaco/malt/pull/1253))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-11-02 ([f35ce1782](https://github.com/indaco/malt/commit/f35ce1782)) ([#1255](https://github.com/indaco/malt/pull/1255))
+
+### ✅ Tests
+
+- keep deliberate failures from printing errors on a passing run ([4da082091](https://github.com/indaco/malt/commit/4da082091)) ([#1261](https://github.com/indaco/malt/pull/1261))
+
+### 🤖 CI
+
+- build and release malt with Zig 0.17.1 ([ec749c447](https://github.com/indaco/malt/commit/ec749c447)) ([#1262](https://github.com/indaco/malt/pull/1262))
+- bump taiki-e/install-action from 2.87.21 to 2.88.0 ([ba7262d9c](https://github.com/indaco/malt/commit/ba7262d9c)) ([#1250](https://github.com/indaco/malt/pull/1250))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+
 ## v0.25.5 - 2026-10-30
 
 ### Highlights
