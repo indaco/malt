@@ -807,7 +807,10 @@ prep_cold_brew() {
     installed=$(printf '%s\n' "$pkg" $deps | grep -Fxf - <(brew list --formula -1) || true)
     # shellcheck disable=SC2086
     [ -z "$installed" ] || brew uninstall --ignore-dependencies --force $installed >/dev/null 2>&1 || true
-    rm -rf "$(brew --cache)/api"
+    # brew caches its curl and git choice by binary, not by the dylibs the
+    # uninstall above can remove. Drop it so brew probes again and falls
+    # back to the system tool when its own one no longer loads.
+    rm -rf "$(brew --cache)/api" "$(brew --cache)/tool-selection"
   fi
   # `brew --cache <formula>` prints the bottle path even if absent, so
   # `rm -f` is safe against missing files.
