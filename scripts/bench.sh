@@ -637,6 +637,8 @@ time_brew_install() {
   fi
   if [ "$rc" -ne 0 ]; then
     warn "brew install $pkg FAILED (exit=$rc)"
+    # The CI log is the only record: the runner deletes this file.
+    tail -n 40 /tmp/malt-bench.out >&2
     printf 'FAIL'
     return
   fi
