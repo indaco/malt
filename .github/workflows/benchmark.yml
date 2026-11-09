@@ -340,6 +340,20 @@ jobs:
           STEPS_OPENJDK_OUTPUTS_ZB_WARM: ${{ steps.openjdk.outputs.zb_warm }}
           STEPS_TESSERACT_OUTPUTS_ZB_WARM: ${{ steps.tesseract.outputs.zb_warm }}
 
+      - name: Restore runner Homebrew dependencies
+        # The cold brew prep uninstalls dependency closures with
+        # --ignore-dependencies. This can remove a library that a formula of
+        # the runner image needs (Homebrew git links gettext), so later git
+        # calls abort. Reinstall each dependency that is missing.
+        run: |
+          missing=$(brew missing | cut -d: -f2 | tr ' ' '\n' | sed '/^$/d' | sort -u)
+          if [ -n "$missing" ]; then
+            echo "Restoring: $missing"
+            # shellcheck disable=SC2086  # intentional: one formula per word
+            brew install $missing
+          fi
+          git --version
+
       - name: Open PR with benchmark results
         # Only publish the README refresh when the workflow runs against
         # the canonical branch. A manual `workflow_dispatch` against any
