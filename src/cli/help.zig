@@ -620,7 +620,7 @@ const purge_help =
     \\Scopes (one or more required):
     \\  --store-orphans      Store blobs no installed keg references
     \\  --unused-deps        Indirect-install kegs no other package needs
-    \\  --cache[=DAYS]       Cache files older than DAYS (default 30)
+    \\  --cache[=DAYS]       Cache files older than DAYS (default 30) and relocated kegs that no bottle backs
     \\  --downloads          Wipe {cache}/downloads entirely        (typed confirm)
     \\  --stale-casks        Cask cache + Caskroom for uninstalled casks
     \\  --old-versions       Non-latest Cellar versions + retained cask history (typed confirm)

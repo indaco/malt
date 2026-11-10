@@ -315,7 +315,7 @@ fn orphanStillLinked(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Datab
 
 // ── Tier: --cache[=DAYS] (was `cleanup --prune=`) ───────────────────────────
 
-pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, prefix: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
+pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, prefix: []const u8, max_age_days: i64, dry_run: bool, locked: bool) !TierResult {
     var result: TierResult = .{};
 
     var rep = report.Reporter.init("cache", dry_run);
@@ -341,7 +341,26 @@ pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []c
         result.bytes += reaped.bytes;
     }
 
-    rep.done(result.removed);
+    // A store-less snapshot is only dead while no install can add its store
+    // entry, so the sweep needs the lock. A dry run counts only the orphans
+    // that are store-less now.
+    if (!locked) rep.note("skipping orphaned snapshots: malt.lock was not taken", .{});
+    const orphans: relocated_store.Reaped = if (locked)
+        relocated_store.reapOrphans(ctx.io, allocator, prefix, !dry_run)
+    else
+        .{};
+    if (orphans.removed > 0) {
+        var lbl: [96]u8 = undefined;
+        const label = std.mem.print(&lbl, "store-relocated: {d} orphaned {s}", .{
+            orphans.removed,
+            report.pluralize(orphans.removed, "snapshot", "snapshots"),
+        }) catch "store-relocated: orphaned snapshots";
+        rep.item(label);
+        result.removed += orphans.removed;
+        result.bytes += orphans.bytes;
+    }
+
+    rep.done(rep.seen);
     return result;
 }
 
@@ -1328,19 +1347,59 @@ test "runCache reclaims relocated kegs orphaned by a past logic-version bump" {
     // A version segment that is clearly not the current one → stale.
     const stale_root = s.p("/store-relocated/v999999");
     try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store-relocated/v999999/" ++ sha));
-    // The live version segment must survive the sweep.
+    // The live version segment must survive the sweep while its bottle is
+    // in the store.
     const current = try allocator.print("{s}/store-relocated/v{d}/{s}", .{
         prefix, relocated_store.RELOC_LOGIC_VERSION, sha,
     });
     defer allocator.free(current);
     try std.Io.Dir.cwd().createDirPath(fs_test_io, current);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store/" ++ sha));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runCache(&ctx, allocator, cache_dir, prefix, 30, false);
+    const result = try runCache(&ctx, allocator, cache_dir, prefix, 30, false, true);
 
     try testing.expectEqual(@as(u32, 1), result.removed);
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, stale_root, .{}));
     try std.Io.Dir.accessAbsolute(fs_test_io, current, .{});
+}
+
+test "runCache reclaims unversioned and store-less relocated snapshots" {
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runCache_reloc_orphans");
+    defer s.deinit();
+    const prefix = s.base;
+
+    const cache_dir = s.p("/cache");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+
+    const legacy_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const orphan_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const live_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const legacy = s.p("/store-relocated/" ++ legacy_sha);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, legacy);
+    const v = relocated_store.RELOC_LOGIC_VERSION;
+    const orphan = try allocator.print("{s}/store-relocated/v{d}/{s}", .{ prefix, v, orphan_sha });
+    defer allocator.free(orphan);
+    const live = try allocator.print("{s}/store-relocated/v{d}/{s}", .{ prefix, v, live_sha });
+    defer allocator.free(live);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, orphan);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, live);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store/" ++ live_sha));
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+
+    const dry = try runCache(&ctx, allocator, cache_dir, prefix, 30, true, true);
+    try testing.expectEqual(@as(u32, 2), dry.removed);
+    try std.Io.Dir.accessAbsolute(fs_test_io, legacy, .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, orphan, .{});
+
+    const result = try runCache(&ctx, allocator, cache_dir, prefix, 30, false, true);
+    try testing.expectEqual(@as(u32, 2), result.removed);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, legacy, .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, orphan, .{}));
+    try std.Io.Dir.accessAbsolute(fs_test_io, live, .{});
 }
 
 // ── runOldVersions cask history sweep ──────────────────────────────────────
@@ -2265,4 +2324,73 @@ test "removeOptLink drops a link into the removed keg and keeps one into another
     removeOptLink(io, base, "depx", keg);
     const n = try std.Io.Dir.cwd().readLink(io, link, &a_buf);
     try testing.expectEqualStrings(other, a_buf[0..n]);
+}
+
+test "runCache without the lock keeps a store-less relocated snapshot" {
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runCache_reloc_unlocked");
+    defer s.deinit();
+    const prefix = s.base;
+
+    const cache_dir = s.p("/cache");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+
+    // A concurrent install may be about to add the store entry.
+    const sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const orphan = try allocator.print("{s}/store-relocated/v{d}/{s}", .{
+        prefix, relocated_store.RELOC_LOGIC_VERSION, sha,
+    });
+    defer allocator.free(orphan);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, orphan);
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &buf);
+    defer output.endStderrCapture();
+
+    const result = try runCache(&ctx, allocator, cache_dir, prefix, 30, false, false);
+
+    try testing.expectEqual(@as(u32, 0), result.removed);
+    try std.Io.Dir.accessAbsolute(fs_test_io, orphan, .{});
+    // The user is told why the sweep did not run.
+    try testing.expect(std.mem.find(u8, buf.items, "malt.lock was not taken") != null);
+}
+
+test "runCache lists orphaned snapshots as one line and prints no false 'more' hint" {
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runCache_reloc_more_hint");
+    defer s.deinit();
+    const prefix = s.base;
+
+    const cache_dir = s.p("/cache");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+
+    // More orphans than the item cap, and no cache files at all.
+    var i: usize = 0;
+    while (i < report.default_item_cap + 2) : (i += 1) {
+        var sha: [64]u8 = undefined;
+        @memset(&sha, 'a');
+        sha[0] = "0123456789abcdef"[i];
+        const dir = try allocator.print("{s}/store-relocated/v{d}/{s}", .{
+            prefix, relocated_store.RELOC_LOGIC_VERSION, sha,
+        });
+        defer allocator.free(dir);
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, dir);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &buf);
+    defer output.endStderrCapture();
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runCache(&ctx, allocator, cache_dir, prefix, 30, false, true);
+
+    try testing.expectEqual(@as(u32, report.default_item_cap + 2), result.removed);
+    try testing.expect(std.mem.find(u8, buf.items, "orphaned snapshots") != null);
+    // One line was printed, so nothing was clipped.
+    try testing.expect(std.mem.find(u8, buf.items, "more (use --verbose") == null);
 }

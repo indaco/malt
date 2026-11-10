@@ -485,8 +485,8 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--store-orphans[Store blobs no installed keg references]' \
     \\                        '--unused-deps[Orphaned dependency kegs]' \
-    \\                        '--cache=-[Prune cache files older than N days]::days:' \
-    \\                        '--cache[Prune cache files older than 30 days]' \
+    \\                        '--cache=-[Prune cache files older than N days, and relocated kegs that no bottle backs]::days:' \
+    \\                        '--cache[Prune cache files older than 30 days, and relocated kegs that no bottle backs]' \
     \\                        '--downloads[Wipe the downloads cache]' \
     \\                        '--stale-casks[Remove cache + Caskroom for uninstalled casks]' \
     \\                        '--old-versions[Remove non-latest Cellar versions + retained cask history]' \
@@ -880,7 +880,7 @@ pub const fish_script =
     \\    # purge — scope flags
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l store-orphans    -d 'Store blobs no installed keg references'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l unused-deps      -d 'Orphaned dependency kegs'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l cache            -d 'Prune cache files older than 30 days (or N via --cache=N)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l cache            -d 'Prune cache files older than 30 days (or N via --cache=N), and relocated kegs that no bottle backs'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l downloads        -d 'Wipe the downloads cache (typed confirm)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l stale-casks      -d 'Cask cache + Caskroom for uninstalled casks'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions + retained cask history (typed confirm)'

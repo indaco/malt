@@ -802,3 +802,54 @@ test "--json summary marks errored scopes with status:error and bumps schema ver
     try testing.expect(scope_obj.get("error_kind") != null);
     try testing.expectEqualStrings("error", obj.get("status").?.string);
 }
+
+// ── orphan sweep follows the lock state ────────────────────────────────────
+
+/// Seeds `store-relocated/v<N>/<sha>` with no `store/<sha>`: an orphan.
+fn seedOrphanSnapshot(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
+    const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const dir = try allocator.print("{s}/store-relocated/v{d}/{s}", .{ prefix, malt.relocated_store.RELOC_LOGIC_VERSION, sha });
+    errdefer allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    return dir;
+}
+
+fn runCacheScope(allocator: std.mem.Allocator) !void {
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--cache"});
+}
+
+test "--cache reaps an orphaned relocated snapshot when purge holds malt.lock" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "orphan_locked");
+    defer prefix.deinit(allocator);
+    const snap = try seedOrphanSnapshot(allocator, prefix.path);
+    defer allocator.free(snap);
+
+    try runCacheScope(allocator);
+
+    // The sweep runs only under the lock; a dropped `lk_maybe != null` would keep it.
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, snap, .{}));
+}
+
+test "--cache keeps an orphaned relocated snapshot when purge cannot take malt.lock" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "orphan_lockless");
+    defer prefix.deinit(allocator);
+    const snap = try seedOrphanSnapshot(allocator, prefix.path);
+    defer allocator.free(snap);
+    // A missing db dir makes `acquire` fail at once (DirMissing), so no 30 s wait.
+    const db_dir = try allocator.print("{s}/db", .{prefix.path});
+    defer allocator.free(db_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
+
+    try runCacheScope(allocator);
+
+    try test_io.accessAbsolute(std.Options.debug_io, snap, .{});
+}

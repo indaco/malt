@@ -480,17 +480,17 @@ mt purge --wipe
 mt purge --wipe --backup ~/snapshot.txt --remove-binary --yes
 ```
 
-| Scope               | Removes                                                                   | Confirm gate        |
-| ------------------- | ------------------------------------------------------------------------- | ------------------- |
-| `--store-orphans`   | Store blobs no installed keg references                                   | none                |
-| `--unused-deps`     | Indirect-install kegs no other package needs                              | none                |
-| `--cache[=DAYS]`    | Cache files older than DAYS (default 30)                                  | none                |
-| `--downloads`       | Entire `{cache}/downloads` directory                                      | type `downloads`    |
-| `--stale-casks`     | Cask cache + Caskroom entries for uninstalled casks                       | none                |
-| `--old-versions`    | Non-latest version directories in `{prefix}/Cellar`                       | type `old-versions` |
-| `--broken-symlinks` | Prefix symlinks whose target no longer exists                             | none                |
-| `--housekeeping`    | = `--store-orphans --unused-deps --cache --stale-casks --broken-symlinks` | none                |
-| `--wipe`            | Every malt artefact on disk except `{prefix}/var` (mutually exclusive)    | type `purge`        |
+| Scope               | Removes                                                                          | Confirm gate        |
+| ------------------- | -------------------------------------------------------------------------------- | ------------------- |
+| `--store-orphans`   | Store blobs no installed keg references                                          | none                |
+| `--unused-deps`     | Indirect-install kegs no other package needs                                     | none                |
+| `--cache[=DAYS]`    | Cache files older than DAYS (default 30) and relocated kegs that no bottle backs | none                |
+| `--downloads`       | Entire `{cache}/downloads` directory                                             | type `downloads`    |
+| `--stale-casks`     | Cask cache + Caskroom entries for uninstalled casks                              | none                |
+| `--old-versions`    | Non-latest version directories in `{prefix}/Cellar`                              | type `old-versions` |
+| `--broken-symlinks` | Prefix symlinks whose target no longer exists                                    | none                |
+| `--housekeeping`    | = `--store-orphans --unused-deps --cache --stale-casks --broken-symlinks`        | none                |
+| `--wipe`            | Every malt artefact on disk except `{prefix}/var` (mutually exclusive)           | type `purge`        |
 
 - **Before you delete.** `--dry-run` (`-n`) shows a preview. `--yes` (`-y`) skips the typed confirmation. `--backup <path>` first writes a manifest that `mt restore` can read. Only `--wipe` accepts `--keep-cache` and `--remove-binary`.
 - **Scripts.** `--json` prints one summary object. `--output-format=ndjson` streams events, one per line. The output on stderr stays human-readable. If a scope cannot run, the command exits with 1. If a newer malt wrote the database, it exits with 4. Thus, a script can tell a refusal from a run with nothing to remove.
