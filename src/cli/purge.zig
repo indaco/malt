@@ -174,6 +174,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("lock path too long", .{});
         return error.Aborted;
     };
+    // `lk_maybe == null` means no lock was taken; `runCache` then skips the
+    // sweep that needs it.
     var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 30_000) catch null;
     defer if (lk_maybe) |*lk| lk.release(ctx.io);
 
@@ -233,7 +235,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             r = try switch (k) {
                 .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, cache_dir, dry_run),
                 .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
-                .cache => scopes_mod.runCache(ctx, allocator, cache_dir, prefix, opts.cache_days, dry_run),
+                .cache => scopes_mod.runCache(ctx, allocator, cache_dir, prefix, opts.cache_days, dry_run, lk_maybe != null),
                 .downloads => scopes_mod.runDownloads(ctx, cache_dir, dry_run),
                 .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, cache_dir, dry_run),
                 .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, cache_dir, dry_run),

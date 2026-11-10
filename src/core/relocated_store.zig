@@ -27,7 +27,8 @@ pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, Materiali
 /// the bottle sha. Bump this whenever `relocateKegTree` / `patchTextFiles` /
 /// the `@@HOMEBREW_*@@` replacement set / codesign behaviour changes: the bump
 /// turns every prior `v<N-1>/` entry into a cache miss, forcing correct
-/// re-relocation. Prior `v<N-1>/` trees are reclaimed by `reapStaleVersions`
+/// re-relocation. Prior `v<N-1>/` trees and the unversioned
+/// `store-relocated/<sha>/` layout are reclaimed by `reapStaleVersions`
 /// on the next fresh `save`, so a bump trades one cold reinstall per cached
 /// bottle for correctness; bumps are rare (only on relocation-logic change).
 ///
@@ -301,6 +302,9 @@ pub const Reaped = struct { removed: u32 = 0, bytes: u64 = 0 };
 /// failure never aborts the caller (an install's opportunistic sweep or
 /// `purge`). Race-safe: same-version peers only ever touch the current
 /// `v<N>/`, so an older version has no live reader to disturb.
+///
+/// The layout before versioning (`store-relocated/<sha>/`) is a stale version
+/// too. All such dirs count as one tree.
 pub fn reapStaleVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, do_remove: bool) Reaped {
     var root_buf: [512]u8 = undefined;
     const root = std.mem.print(&root_buf, "{s}/store-relocated", .{prefix}) catch return .{};
@@ -317,8 +321,9 @@ pub fn reapStaleVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []con
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
-        const ver = parseVersionSegment(entry.name) orelse continue;
-        if (ver == RELOC_LOGIC_VERSION) continue;
+        if (parseVersionSegment(entry.name)) |ver| {
+            if (ver == RELOC_LOGIC_VERSION) continue;
+        } else if (!isShaName(prefix, entry.name)) continue;
         const owned = allocator.dupe(u8, entry.name) catch continue;
         stale.append(allocator, owned) catch {
             allocator.free(owned);
@@ -327,15 +332,116 @@ pub fn reapStaleVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []con
     }
 
     var reaped: Reaped = .{};
+    var legacy = false;
     for (stale.items) |name| {
         var child_buf: [512]u8 = undefined;
         const child = std.mem.print(&child_buf, "{s}/{s}", .{ root, name }) catch continue;
         const bytes = dirsize.dirSizeBytes(io, child);
         if (do_remove) std.Io.Dir.cwd().deleteTree(io, child) catch continue;
+        if (parseVersionSegment(name) == null) legacy = true else reaped.removed += 1;
+        reaped.bytes +|= bytes;
+    }
+    if (legacy) reaped.removed += 1;
+    return reaped;
+}
+
+/// Remove current-version snapshots that have no `store/<sha>`, with their
+/// sidecars (with `do_remove` false, only measure). A snapshot is never read
+/// without its store entry, so it cannot be restored. An in-flight save has a
+/// store entry, so the sweep cannot race one.
+pub fn reapOrphans(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, do_remove: bool) Reaped {
+    var root_buf: [512]u8 = undefined;
+    const root = std.mem.print(&root_buf, "{s}/store-relocated/v{d}", .{ prefix, RELOC_LOGIC_VERSION }) catch return .{};
+    var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return .{};
+    defer dir.close(io);
+
+    // Collect before deleting — mutating a directory mid-iteration can
+    // invalidate its cursor.
+    var orphans: std.ArrayList([]u8) = .empty;
+    defer {
+        for (orphans.items) |n| allocator.free(n);
+        orphans.deinit(allocator);
+    }
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        const sha = switch (entry.kind) {
+            .directory => entry.name,
+            // The dir pass judges a sidecar that still has its dir.
+            .file => blk: {
+                const stem = sidecarStem(entry.name) orelse continue;
+                if (dir.access(io, stem, .{})) |_| continue else |_| {}
+                break :blk stem;
+            },
+            else => continue,
+        };
+        if (!isShaName(prefix, sha) or hasStoreEntry(io, prefix, sha)) continue;
+        // Both sidecars of one snapshot name the same stem.
+        if (for (orphans.items) |seen| {
+            if (std.mem.eql(u8, seen, sha)) break true;
+        } else false) continue;
+        const owned = allocator.dupe(u8, sha) catch continue;
+        orphans.append(allocator, owned) catch {
+            allocator.free(owned);
+            continue;
+        };
+    }
+
+    var reaped: Reaped = .{};
+    for (orphans.items) |sha| {
+        var child_buf: [512]u8 = undefined;
+        const child = std.mem.print(&child_buf, "{s}/{s}", .{ root, sha }) catch continue;
+        const bytes = dirsize.dirSizeBytes(io, child);
+        if (do_remove) {
+            remove(io, prefix, sha) catch continue;
+            // `remove` hides a failed delete, so count only what is gone.
+            if (!snapshotGone(io, prefix, sha)) continue;
+        }
         reaped.removed += 1;
         reaped.bytes +|= bytes;
     }
     return reaped;
+}
+
+/// True only when the snapshot dir and both sidecars are definitely absent.
+fn snapshotGone(io: std.Io, prefix: []const u8, sha: []const u8) bool {
+    var dir_buf: [512]u8 = undefined;
+    var verified_buf: [512]u8 = undefined;
+    var label_buf: [512]u8 = undefined;
+    const paths = [_][]const u8{
+        cacheDir(&dir_buf, prefix, RELOC_LOGIC_VERSION, sha) catch return false,
+        verifiedMark(&verified_buf, prefix, sha) catch return false,
+        labelMark(&label_buf, prefix, sha) catch return false,
+    };
+    for (paths) |path| {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch |e| {
+            if (e == error.FileNotFound) continue;
+            return false;
+        };
+        return false;
+    }
+    return true;
+}
+
+fn isShaName(prefix: []const u8, name: []const u8) bool {
+    var buf: [store_path.entry_buf_len]u8 = undefined;
+    checkSha(&buf, prefix, name) catch return false;
+    return true;
+}
+
+fn hasStoreEntry(io: std.Io, prefix: []const u8, sha: []const u8) bool {
+    var buf: [store_path.entry_buf_len]u8 = undefined;
+    const path = store_path.entry(&buf, prefix, sha) catch return true;
+    // Only a definite miss counts: any other error keeps the snapshot.
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch |e| return e != error.FileNotFound;
+    return true;
+}
+
+/// The `<sha>` of a `<sha>.verified` / `<sha>.keg` sidecar name, else null.
+fn sidecarStem(name: []const u8) ?[]const u8 {
+    inline for (.{ ".verified", ".keg" }) |ext| {
+        if (std.mem.endsWith(u8, name, ext)) return name[0 .. name.len - ext.len];
+    }
+    return null;
 }
 
 /// Parse a `v<digits>` cache segment name into its version, else null so
@@ -807,6 +913,244 @@ test "reapStaleVersions ignores foreign entries and a missing store" {
     try std.Io.Dir.cwd().createDirPath(testIo(), foreign);
     try testing.expectEqual(@as(u32, 0), reapStaleVersions(testIo(), testing.allocator, prefix, true).removed);
     try std.Io.Dir.accessAbsolute(testIo(), foreign, .{});
+}
+
+const other_sha_for_tests = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const stray_sha_for_tests = "1111111111111111111111111111111111111111111111111111111111111111";
+
+fn existsForTests(prefix: []const u8, rel: []const u8) !bool {
+    const path = try testing.allocator.print("{s}/{s}", .{ prefix, rel });
+    defer testing.allocator.free(path);
+    std.Io.Dir.accessAbsolute(testIo(), path, .{}) catch return false;
+    return true;
+}
+
+fn curExistsForTests(prefix: []const u8, tail: []const u8) !bool {
+    const rel = try testing.allocator.print("store-relocated/v{d}/{s}", .{ RELOC_LOGIC_VERSION, tail });
+    defer testing.allocator.free(rel);
+    return existsForTests(prefix, rel);
+}
+
+/// Current-version snapshot `sha` with a payload and both sidecars.
+fn seedSnapshotForTests(prefix: []const u8, sha: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const dir = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha);
+    try writeFileForTests(testing.allocator, dir, "bin/tool", fixture_script);
+    var mark_buf: [512]u8 = undefined;
+    const verified = try verifiedMark(&mark_buf, prefix, sha);
+    (try std.Io.Dir.createFileAbsolute(testIo(), verified, .{})).close(testIo());
+    const label = try labelMark(&mark_buf, prefix, sha);
+    (try std.Io.Dir.createFileAbsolute(testIo(), label, .{})).close(testIo());
+}
+
+fn seedStoreEntryForTests(prefix: []const u8, sha: []const u8) !void {
+    var buf: [store_path.entry_buf_len]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(testIo(), try store_path.entry(&buf, prefix, sha));
+}
+
+test "reapStaleVersions reclaims the unversioned layout as one stale tree" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "reap_legacy");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // Pre-versioning layout: `store-relocated/<sha>/` with no `v<N>` segment.
+    const legacy_a = try testing.allocator.print("{s}/store-relocated/{s}", .{ prefix, valid_sha_for_tests });
+    defer testing.allocator.free(legacy_a);
+    const legacy_b = try testing.allocator.print("{s}/store-relocated/{s}", .{ prefix, other_sha_for_tests });
+    defer testing.allocator.free(legacy_b);
+    try writeFileForTests(testing.allocator, legacy_a, "bin/tool", fixture_script);
+    try writeFileForTests(testing.allocator, legacy_b, "bin/tool", fixture_script);
+    // A hex-named *file* and a foreign dir are not snapshots.
+    try writeFileForTests(testing.allocator, prefix, "store-relocated/" ++ stray_sha_for_tests, "x");
+    try writeFileForTests(testing.allocator, prefix, "store-relocated/notes/f", "x");
+
+    const dry = reapStaleVersions(testIo(), testing.allocator, prefix, false);
+    try testing.expectEqual(@as(u32, 1), dry.removed);
+    try testing.expect(dry.bytes > 0);
+    try std.Io.Dir.accessAbsolute(testIo(), legacy_a, .{});
+
+    const reaped = reapStaleVersions(testIo(), testing.allocator, prefix, true);
+    try testing.expectEqual(@as(u32, 1), reaped.removed);
+    try testing.expectEqual(dry.bytes, reaped.bytes);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), legacy_a, .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), legacy_b, .{}));
+    try testing.expect(try existsForTests(prefix, "store-relocated/notes"));
+    try testing.expect(try existsForTests(prefix, "store-relocated/" ++ stray_sha_for_tests));
+}
+
+test "reapOrphans removes a snapshot with no store entry together with its sidecars" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_remove");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try seedSnapshotForTests(prefix, valid_sha_for_tests);
+
+    const reaped = reapOrphans(testIo(), testing.allocator, prefix, true);
+    try testing.expectEqual(@as(u32, 1), reaped.removed);
+    try testing.expect(reaped.bytes > 0);
+    try testing.expect(!try curExistsForTests(prefix, valid_sha_for_tests));
+    try testing.expect(!try curExistsForTests(prefix, valid_sha_for_tests ++ ".verified"));
+    try testing.expect(!try curExistsForTests(prefix, valid_sha_for_tests ++ ".keg"));
+}
+
+test "reapOrphans keeps a snapshot that has a store entry and an in-flight save" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_keep");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try seedSnapshotForTests(prefix, valid_sha_for_tests);
+    try seedStoreEntryForTests(prefix, valid_sha_for_tests);
+    // `<sha>.tmp.<hex>` is a save in progress; it has no store entry by name.
+    const tmp_rel = try testing.allocator.print("store-relocated/v{d}/{s}.tmp.deadbeef/f", .{ RELOC_LOGIC_VERSION, other_sha_for_tests });
+    defer testing.allocator.free(tmp_rel);
+    try writeFileForTests(testing.allocator, prefix, tmp_rel, "x");
+
+    const reaped = reapOrphans(testIo(), testing.allocator, prefix, true);
+    try testing.expectEqual(@as(u32, 0), reaped.removed);
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests));
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests ++ ".verified"));
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests ++ ".keg"));
+    try testing.expect(try curExistsForTests(prefix, other_sha_for_tests ++ ".tmp.deadbeef"));
+}
+
+test "reapOrphans reclaims a stray sidecar whose snapshot and store entry are gone" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_stray");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try seedSnapshotForTests(prefix, valid_sha_for_tests);
+    try seedStoreEntryForTests(prefix, valid_sha_for_tests);
+    // A sidecar left when a concurrent sweep removed the tree mid-restore.
+    const stray = try testing.allocator.print("{s}/store-relocated/v{d}/{s}.verified", .{ prefix, RELOC_LOGIC_VERSION, stray_sha_for_tests });
+    defer testing.allocator.free(stray);
+    (try std.Io.Dir.createFileAbsolute(testIo(), stray, .{})).close(testIo());
+
+    const stray_keg = try testing.allocator.print("{s}/store-relocated/v{d}/{s}.keg", .{ prefix, RELOC_LOGIC_VERSION, stray_sha_for_tests });
+    defer testing.allocator.free(stray_keg);
+    (try std.Io.Dir.createFileAbsolute(testIo(), stray_keg, .{})).close(testIo());
+
+    // Two sidecars of one snapshot are one reclaimed item.
+    const reaped = reapOrphans(testIo(), testing.allocator, prefix, true);
+    try testing.expectEqual(@as(u32, 1), reaped.removed);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), stray_keg, .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), stray, .{}));
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests));
+}
+
+test "reapOrphans with do_remove=false measures without deleting; a missing store is a no-op" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_dry");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try testing.expectEqual(@as(u32, 0), reapOrphans(testIo(), testing.allocator, prefix, true).removed);
+
+    try seedSnapshotForTests(prefix, valid_sha_for_tests);
+    const reaped = reapOrphans(testIo(), testing.allocator, prefix, false);
+    try testing.expectEqual(@as(u32, 1), reaped.removed);
+    try testing.expect(reaped.bytes > 0);
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests));
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests ++ ".verified"));
+}
+
+test "reapOrphans leaves names that are not a lowercase sha untouched" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_foreign");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    const upper = "ABCDEF9876543210ABCDEF9876543210ABCDEF9876543210ABCDEF9876543210";
+    const upper_rel = try testing.allocator.print("store-relocated/v{d}/{s}/f", .{ RELOC_LOGIC_VERSION, upper });
+    defer testing.allocator.free(upper_rel);
+    try writeFileForTests(testing.allocator, prefix, upper_rel, "x");
+    const keg_rel = try testing.allocator.print("store-relocated/v{d}/notes.keg", .{RELOC_LOGIC_VERSION});
+    defer testing.allocator.free(keg_rel);
+    try writeFileForTests(testing.allocator, prefix, keg_rel, "x");
+
+    try testing.expectEqual(@as(u32, 0), reapOrphans(testIo(), testing.allocator, prefix, true).removed);
+    try testing.expect(try curExistsForTests(prefix, upper));
+    try testing.expect(try curExistsForTests(prefix, "notes.keg"));
+}
+
+test "reapOrphans keeps a snapshot when the store cannot be probed" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_unprobeable");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try seedSnapshotForTests(prefix, valid_sha_for_tests);
+    // An unreadable `store/` is not proof that the bottle is gone.
+    const store_dir = try testing.allocator.print("{s}/store", .{prefix});
+    defer testing.allocator.free(store_dir);
+    try std.Io.Dir.cwd().createDirPath(testIo(), store_dir);
+    var sd = try std.Io.Dir.openDirAbsolute(testIo(), store_dir, .{});
+    defer sd.close(testIo());
+    try sd.setPermissions(testIo(), std.Io.File.Permissions.fromMode(0));
+    defer sd.setPermissions(testIo(), std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    // Root bypasses the mode, so the probe would answer "missing" correctly.
+    const probe = try testing.allocator.print("{s}/x", .{store_dir});
+    defer testing.allocator.free(probe);
+    if (std.Io.Dir.accessAbsolute(testIo(), probe, .{})) |_| {} else |e| {
+        if (e == error.FileNotFound) return error.SkipZigTest;
+    }
+    try testing.expectEqual(@as(u32, 0), reapOrphans(testIo(), testing.allocator, prefix, true).removed);
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests));
+}
+
+test "reapOrphans does not count a snapshot it could not delete" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "orphan_undeletable");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try seedSnapshotForTests(prefix, valid_sha_for_tests);
+    const sub = try testing.allocator.print("{s}/store-relocated/v{d}/{s}/locked", .{ prefix, RELOC_LOGIC_VERSION, valid_sha_for_tests });
+    defer testing.allocator.free(sub);
+    try writeFileForTests(testing.allocator, sub, "f", "x");
+    var sd = try std.Io.Dir.openDirAbsolute(testIo(), sub, .{});
+    defer sd.close(testIo());
+    try sd.setPermissions(testIo(), std.Io.File.Permissions.fromMode(0));
+    defer sd.setPermissions(testIo(), std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    // Root bypasses the mode, so the delete would succeed.
+    if (std.Io.Dir.openDirAbsolute(testIo(), sub, .{ .iterate = true })) |d| {
+        var probe = d;
+        probe.close(testIo());
+        return error.SkipZigTest;
+    } else |_| {}
+    try testing.expectEqual(@as(u32, 0), reapOrphans(testIo(), testing.allocator, prefix, true).removed);
+    try testing.expect(try curExistsForTests(prefix, valid_sha_for_tests));
+}
+
+test "snapshotGone is false while the dir or either sidecar remains" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "gone_probe");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try testing.expect(snapshotGone(testIo(), prefix, valid_sha_for_tests));
+
+    var buf: [512]u8 = undefined;
+    // A sidecar alone, with no dir, still means the snapshot is not gone.
+    const verified = try verifiedMark(&buf, prefix, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), std.Io.Dir.path.dirname(verified).?);
+    (try std.Io.Dir.createFileAbsolute(testIo(), verified, .{})).close(testIo());
+    try testing.expect(!snapshotGone(testIo(), prefix, valid_sha_for_tests));
+    try std.Io.Dir.cwd().deleteFile(testIo(), verified);
+
+    const label = try labelMark(&buf, prefix, valid_sha_for_tests);
+    (try std.Io.Dir.createFileAbsolute(testIo(), label, .{})).close(testIo());
+    try testing.expect(!snapshotGone(testIo(), prefix, valid_sha_for_tests));
+    try std.Io.Dir.cwd().deleteFile(testIo(), label);
+
+    const dir = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), dir);
+    try testing.expect(!snapshotGone(testIo(), prefix, valid_sha_for_tests));
 }
 
 test "save self-heals a prior-version entry" {
