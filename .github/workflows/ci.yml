@@ -211,6 +211,9 @@ jobs:
       - name: Regression guard - store entries no keg holds are reclaimable
         run: ./scripts/regressions/store-orphans-trust-kegs-over-counter-failed-migrate-inflates-store-refcount-permanently.sh
 
+      - name: Regression guard - purge --cache reclaims relocated kegs no bottle backs
+        run: ./scripts/regressions/relocated-store-reclaim-relocated-store-entries-are-never-reclaimed.sh
+
       - name: Regression guard - parallel migrate offline serves a stale API cache entry
         run: ./scripts/regressions/parallel-migrate-offline-serves-stale-cache-parallel-migrate-ignores-offline-for-api-fetches.sh
 
