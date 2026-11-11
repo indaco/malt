@@ -1,6 +1,6 @@
 .{
     .name = .malt,
-    .version = "0.25.6",
+    .version = "0.25.7",
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0x3f3dc05b6471e587,
 
