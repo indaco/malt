@@ -1613,3 +1613,173 @@ test "a successful rollback reclaims the outgoing version's Caskroom dir" {
     try testing.expect(!exists(io, fx.p("Caskroom/pad/2.0")));
     try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
 }
+
+const wrapper_json =
+    \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","sha256":"no_check",
+    \\ "artifacts":[{"command_wrapper":["tool",{"executable":"$HOMEBREW_PREFIX/Caskroom/tool/1.0/payload","env":{"WRAPPER_TEST":"a'b $(echo unsafe)"},"args":["fixed argument",""]}],"target":"$HOMEBREW_PREFIX/bin/tool"}]}
+;
+
+test "command_wrapper participates in binary link conflict checks" {
+    var fx = try Fixture.init("wrapper_conflict");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("bin/tool"), "user's executable");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.LinkConflict, installer.checkLinkConflicts(&c));
+}
+
+test "command_wrapper preserves env and argv through install rollback and uninstall" {
+    try wrapperLifecycle(false);
+}
+
+test "command_wrapper tarball preserves env and argv through offline rollback" {
+    try wrapperLifecycle(true);
+}
+
+fn wrapperLifecycle(tarball: bool) !void {
+    var fx = try Fixture.init("wrapper_lifecycle");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("stage/payload"), "#!/bin/sh\nprintf '<%s>\\n' \"$WRAPPER_TEST\" \"$@\"\nexit 7\n");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const zip = fx.p(if (tarball) "cache/Cask/tool-1.0.tar.gz" else "cache/Cask/tool-1.0.zip");
+    if (tarball) {
+        c.url = "https://example.invalid/tool.tar.gz";
+        try runTool(&.{ "/usr/bin/tar", "-czf", zip, "-C", fx.p("stage"), "payload" });
+    } else try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const digest = try cask.hashFileSha256(io, zip);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.retain_history = true;
+    installer.prefetched_artifact = zip;
+    const placed = try installer.install(&c);
+    defer testing.allocator.free(placed);
+    try cask.recordInstall(&db, &c, placed, null);
+    try expectWrapperOutput(io, placed);
+    try installer.uninstall("tool");
+    try testing.expect(!exists(io, placed));
+    installer.prefetched_artifact = null;
+    try installer.reinstallFromHistory("tool", "1.0");
+    try expectWrapperOutput(io, placed);
+    try installer.uninstall("tool");
+    try testing.expect(!exists(io, placed));
+}
+
+fn expectWrapperOutput(io: std.Io, path: []const u8) !void {
+    const result = try std.process.run(testing.allocator, io, .{
+        .argv = &.{ path, "user's argument", "$(echo unsafe)", "" },
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
+    try testing.expectEqualStrings("<a'b $(echo unsafe)>\n<fixed argument>\n<>\n<user's argument>\n<$(echo unsafe)>\n<>\n", result.stdout);
+}
+
+fn expectInvalidWrapper(value: []const u8) !void {
+    const json = try testing.allocator.print("{{\"token\":\"tool\",\"version\":\"1\",\"url\":\"https://example.invalid/tool.zip\",\"artifacts\":[{{\"command_wrapper\":{s}}}]}}", .{value});
+    defer testing.allocator.free(json);
+    if (cask.parseCask(testing.allocator, json)) |parsed| {
+        var c = parsed;
+        c.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try testing.expectEqual(error.ParseFailed, err);
+}
+
+test "command_wrapper refuses a name escaping bin" {
+    try expectInvalidWrapper(
+        \\["../escape",{"executable":"payload"}]
+    );
+}
+test "command_wrapper refuses an executable escaping the stage" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"../../escape"}]
+    );
+}
+test "command_wrapper refuses an executable escaping the prefix" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"$HOMEBREW_PREFIX/../escape"}]
+    );
+}
+test "command_wrapper refuses invalid environment names" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","env":{"INVALID=NAME":"x"}}]
+    );
+}
+test "command_wrapper refuses non-string environment values" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","env":{"OK":true}}]
+    );
+}
+test "command_wrapper refuses non-string arguments" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","args":[42]}]
+    );
+}
+test "command_wrapper refuses NUL in arguments" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","args":["\u0000"]}]
+    );
+}
+test "command_wrapper refuses custom script content" {
+    try expectInvalidWrapper(
+        \\["tool",{"content":"arbitrary script"}]
+    );
+}
+
+test "command_wrapper links an APPDIR executable with a single fixed argument" {
+    var fx = try Fixture.init("wrapper_appdir");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","artifacts":[{"app":["Tool.app"]},{"command_wrapper":["tool",{"executable":"$APPDIR/Tool.app/Contents/MacOS/payload","args":"a'b"}]}]}
+    );
+    defer c.deinit();
+    try putFile(io, fx.p("Applications/Tool.app/Contents/MacOS/payload"), "#!/bin/sh\nprintf '%s' \"$1\"\n");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Tool.app"));
+    const result = try std.process.run(testing.allocator, io, .{ .argv = &.{fx.p("bin/tool")} });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try testing.expectEqualStrings("a'b", result.stdout);
+}
+
+test "command_wrapper refuses a symlinked executable outside its cask" {
+    var fx = try Fixture.init("wrapper_escape");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("outside"), "untouched");
+    try test_io.cwd().createDirPath(io, fx.p("extract"));
+    try std.Io.Dir.symLinkAbsolute(io, fx.p("outside"), fx.p("extract/payload"), .{});
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.AccessDenied, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+    try testing.expect(!exists(io, fx.p("bin/tool")));
+}

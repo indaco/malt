@@ -21,3 +21,5 @@ src/core/patch\.zig:[0-9]+:.*expectEqualStrings\("install_name_tool"
 src/core/post_install_steps\.zig:[0-9]+:.*obj\.get\("sudo"\)
 src/core/post_install_steps\.zig:[0-9]+:.*"args", "sudo"
 src/core/post_install_steps\.zig:[0-9]+:.*"sudo":
+# A generated wrapper's literal shebang is file content, never a spawn argv.
+src/core/cask\.zig:[0-9]+: *try bytes\.appendSlice\(self\.allocator, "#!/bin/sh\\n"\);

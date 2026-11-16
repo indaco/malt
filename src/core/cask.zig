@@ -8,6 +8,7 @@ const system_tools = @import("../system_tools.zig");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
+const atomic = @import("../fs/atomic.zig");
 const path_component = @import("../fs/path_component.zig");
 const tap_slug = @import("../tap_slug.zig");
 const confined_source = @import("../fs/confined_source.zig");
@@ -690,6 +691,7 @@ pub fn parseAppName(obj: std.json.ObjectMap) ?[]const u8 {
 pub const BinaryEntry = struct {
     source: []const u8,
     target: ?[]const u8,
+    wrapper: ?std.json.Value = null,
 };
 
 /// Every `binary` stanza in artifact order: a cask may declare one per
@@ -709,6 +711,10 @@ pub fn collectBinaryArtifacts(alloc: std.mem.Allocator, obj: std.json.ObjectMap)
             .object => |o| o,
             else => continue,
         };
+        if (try parseCommandWrapper(art)) |entry| {
+            try entries.append(alloc, entry);
+            continue;
+        }
         const arr = switch (art.get("binary") orelse continue) {
             .array => |a| a,
             else => continue,
@@ -776,6 +782,68 @@ fn binaryLinkName(target: []const u8) ?[]const u8 {
     return if (path_component.isPathComponent(name) and !path_component.hasControlByte(name)) name else null;
 }
 
+/// Wrappers share binary ownership and history, but retain their launch options.
+fn parseCommandWrapper(art: std.json.ObjectMap) CaskError!?BinaryEntry {
+    const val = art.get("command_wrapper") orelse return null;
+    if (val != .array or val.array.items.len != 2) return error.ParseFailed;
+    const name = val.array.items[0];
+    const options = val.array.items[1];
+    if (name != .string or binaryLinkName(name.string) == null or
+        !path_component.isPathComponent(name.string)) return error.ParseFailed;
+    try validateWrapperOptions(options);
+    if (art.get("target")) |target| {
+        if (target != .string) return error.ParseFailed;
+        const link_name = binaryLinkName(target.string) orelse return error.ParseFailed;
+        if (!std.mem.eql(u8, link_name, name.string)) return error.ParseFailed;
+    }
+    return .{ .source = options.object.get("executable").?.string, .target = name.string, .wrapper = options };
+}
+
+fn validateWrapperOptions(options: std.json.Value) CaskError!void {
+    if (options != .object) return error.ParseFailed;
+    for (options.object.keys()) |key| {
+        if (!std.mem.eql(u8, key, "executable") and !std.mem.eql(u8, key, "env") and
+            !std.mem.eql(u8, key, "args")) return error.ParseFailed;
+    }
+    const exe = options.object.get("executable") orelse return error.ParseFailed;
+    if (exe != .string) return error.ParseFailed;
+    const rel = if (std.mem.startsWith(u8, exe.string, homebrew_prefix_var))
+        exe.string[homebrew_prefix_var.len..]
+    else
+        exe.string;
+    if (!path_component.isRelativeSubpath(rel) or path_component.hasControlByte(rel)) return error.ParseFailed;
+    if (options.object.get("env")) |env| {
+        if (env != .object) return error.ParseFailed;
+        var it = env.object.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            if (key.len == 0) return error.ParseFailed;
+            for (key, 0..) |ch, i| {
+                if (ch != '_' and !std.ascii.isAlphabetic(ch) and
+                    !(i > 0 and std.ascii.isDigit(ch))) return error.ParseFailed;
+            }
+            try validateWrapperString(kv.value_ptr.*);
+        }
+    }
+    if (options.object.get("args")) |args| switch (args) {
+        .array => |arr| for (arr.items) |arg| try validateWrapperString(arg),
+        .string => try validateWrapperString(args),
+        else => return error.ParseFailed,
+    };
+}
+
+fn validateWrapperString(value: std.json.Value) CaskError!void {
+    if (value != .string or std.mem.findScalar(u8, value.string, 0) != null) return error.ParseFailed;
+}
+
+fn appendShellWord(out: *std.ArrayList(u8), allocator: std.mem.Allocator, word: []const u8) !void {
+    try out.append(allocator, '\'');
+    for (word) |ch| {
+        if (ch == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, ch);
+    }
+    try out.append(allocator, '\'');
+}
+
 /// Reject any `app` or `binary` artifact string that would escape the directory
 /// it is resolved against. Only the artifact kinds malt actually turns into
 /// paths are screened: `font` has its own sanitizer in `cask_font.zig`, and
@@ -791,6 +859,8 @@ fn validateArtifactPaths(obj: std.json.ObjectMap) CaskError!void {
             .object => |o| o,
             else => continue,
         };
+
+        _ = try parseCommandWrapper(art);
 
         // `app` — every string entry becomes `<app_dir>/<name>`.
         if (art.get("app")) |val| if (val == .array) {
@@ -1867,9 +1937,10 @@ pub const CaskInstaller = struct {
         return struct {
             bytes: []u8,
             entries: []Entry,
+            json: ?std.json.Parsed([]Entry) = null,
 
             pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-                allocator.free(self.entries);
+                if (self.json) |*parsed| parsed.deinit() else allocator.free(self.entries);
                 allocator.free(self.bytes);
             }
         };
@@ -1886,6 +1957,16 @@ pub const CaskInstaller = struct {
     fn writeLinkedBinarySpec(self: *CaskInstaller, cask: *const Cask) !void {
         const entries = (try self.binaryStanzas(cask)) orelse return;
         defer self.allocator.free(entries);
+        for (entries) |entry| if (entry.wrapper != null) {
+            const json = try std.json.Stringify.valueAlloc(self.allocator, entries, .{});
+            defer self.allocator.free(json);
+            const bytes = try self.allocator.print("\x00json\n{s}", .{json});
+            defer self.allocator.free(bytes);
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = try self.specPath(cask.token, cask.version, ".binaries", &buf);
+            try atomic.atomicWriteFile(self.io, path, bytes);
+            return;
+        };
         if (entries.len != 0) try self.writeSpec(cask.token, cask.version, ".binaries", entries);
     }
 
@@ -1936,6 +2017,11 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(bytes);
         const n = try file.readPositionalAll(self.io, bytes, 0);
         const data = bytes[0..n];
+        // The NUL marker cannot collide with the legacy line-based paths.
+        if (Entry == BinaryEntry and std.mem.startsWith(u8, data, "\x00json\n")) {
+            const parsed = try std.json.parseFromSlice([]Entry, self.allocator, data[6..], .{});
+            return .{ .bytes = bytes, .entries = parsed.value, .json = parsed };
+        }
 
         var count: usize = 0;
         var counter = std.mem.splitScalar(u8, data, '\n');
@@ -2090,7 +2176,11 @@ pub const CaskInstaller = struct {
                 (bundle != null and std.mem.eql(u8, firstComponent(e.source), std.Io.Dir.path.basename(bundle.?)));
             const root = if (in_bundle) bundle orelse return error.InstallFailed else caskroom_ver;
             const root_kind: BinaryRoot = if (in_bundle) .bundle else .caskroom;
-            const link = try self.linkCaskBinary(cask.token, root, root_kind, e.source, e.target orelse std.Io.Dir.path.basename(e.source));
+            const name = e.target orelse std.Io.Dir.path.basename(e.source);
+            const link = if (e.wrapper) |options|
+                try self.linkCommandWrapper(cask.token, caskroom_ver, root, root_kind, e.source, name, options)
+            else
+                try self.linkCaskBinary(cask.token, root, root_kind, e.source, name);
             try manifest.appendSlice(self.allocator, link);
             try manifest.append(self.allocator, '\n');
             if (first == null) first = link else self.allocator.free(link);
@@ -2199,6 +2289,59 @@ pub const CaskInstaller = struct {
         std.Io.Dir.cwd().deleteFile(self.io, link_path) catch {};
         std.Io.Dir.symLinkAbsolute(self.io, source.path, link_path, .{}) catch return error.InstallFailed;
         return link_path;
+    }
+
+    fn linkCommandWrapper(
+        self: *CaskInstaller,
+        token: []const u8,
+        caskroom: []const u8,
+        root: []const u8,
+        root_kind: BinaryRoot,
+        executable: []const u8,
+        name: []const u8,
+        options: std.json.Value,
+    ) ![]const u8 {
+        try validateWrapperOptions(options);
+        if (!path_component.isPathComponent(name) or path_component.hasControlByte(name)) return error.InstallFailed;
+        const candidate = try self.resolveCaskBinaryPath(root, root_kind, executable);
+        defer self.allocator.free(candidate);
+        var source = try confined_source.openFile(self.io, self.allocator, root, candidate, .read_write);
+        defer source.deinit(self.io);
+        try source.file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755));
+
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(self.allocator);
+        // File contents only: installation never invokes an interpreter.
+        try bytes.appendSlice(self.allocator, "#!/bin/sh\n");
+        if (options.object.get("env")) |env| {
+            var it = env.object.iterator();
+            while (it.next()) |kv| {
+                try bytes.appendSlice(self.allocator, "export ");
+                try bytes.appendSlice(self.allocator, kv.key_ptr.*);
+                try bytes.append(self.allocator, '=');
+                try appendShellWord(&bytes, self.allocator, kv.value_ptr.string);
+                try bytes.append(self.allocator, '\n');
+            }
+        }
+        try bytes.appendSlice(self.allocator, "exec ");
+        try appendShellWord(&bytes, self.allocator, source.path);
+        if (options.object.get("args")) |args| {
+            const values = if (args == .array) args.array.items else &.{args};
+            for (values) |arg| {
+                try bytes.append(self.allocator, ' ');
+                try appendShellWord(&bytes, self.allocator, arg.string);
+            }
+        }
+        try bytes.appendSlice(self.allocator, " \"$@\"\n");
+
+        try std.Io.Dir.cwd().createDirPath(self.io, caskroom);
+        const wrapper_name = try self.allocator.print(".malt-wrapper-{s}", .{name});
+        defer self.allocator.free(wrapper_name);
+        const path = try self.allocator.print("{s}/{s}", .{ caskroom, wrapper_name });
+        defer self.allocator.free(path);
+        if (std.mem.eql(u8, std.Io.Dir.path.basename(source.path), wrapper_name)) return error.InstallFailed;
+        try atomic.atomicWriteFileMode(self.io, path, bytes.items, std.Io.File.Permissions.fromMode(0o755));
+        return self.linkCaskBinary(token, caskroom, .caskroom, wrapper_name, name);
     }
 
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {

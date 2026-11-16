@@ -38,6 +38,12 @@ fn stripLineComment(line: []const u8) []const u8 {
 // interpreter paths in forbidden_heads — they're the *rejection list*
 // for formula-declared services. Exempt that exact context.
 fn allowedContext(path: []const u8, line: []const u8) bool {
+    // Only the generated file header, never a process invocation.
+    if (std.mem.endsWith(u8, path, "core/cask.zig") and std.mem.eql(
+        u8,
+        std.mem.trim(u8, line, " \t"),
+        "try bytes.appendSlice(self.allocator, \"#!/bin/sh\\n\");",
+    )) return true;
     if (std.mem.endsWith(u8, path, "core/services/plist.zig")) {
         // forbidden_heads declaration + error docstrings — both live in
         // that file by design. Any other usage still has to pass.
