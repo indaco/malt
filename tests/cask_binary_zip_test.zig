@@ -1613,3 +1613,433 @@ test "a successful rollback reclaims the outgoing version's Caskroom dir" {
     try testing.expect(!exists(io, fx.p("Caskroom/pad/2.0")));
     try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
 }
+
+const wrapper_json =
+    \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","sha256":"no_check",
+    \\ "artifacts":[{"command_wrapper":["tool",{"executable":"$HOMEBREW_PREFIX/Caskroom/tool/1.0/payload","env":{"WRAPPER_TEST":"a'b $(echo unsafe)"},"args":["fixed argument",""]}],"target":"$HOMEBREW_PREFIX/bin/tool"}]}
+;
+
+test "command_wrapper participates in binary link conflict checks" {
+    var fx = try Fixture.init("wrapper_conflict");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("bin/tool"), "user's executable");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.LinkConflict, installer.checkLinkConflicts(&c));
+}
+
+test "command_wrapper preserves env and argv through install rollback and uninstall" {
+    try wrapperLifecycle(false);
+}
+
+test "command_wrapper tarball preserves env and argv through offline rollback" {
+    try wrapperLifecycle(true);
+}
+
+fn wrapperLifecycle(tarball: bool) !void {
+    var fx = try Fixture.init("wrapper_lifecycle");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("stage/payload"), "#!/bin/sh\nprintf '<%s>\\n' \"$WRAPPER_TEST\" \"$@\"\nexit 7\n");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const zip = fx.p(if (tarball) "cache/Cask/tool-1.0.tar.gz" else "cache/Cask/tool-1.0.zip");
+    if (tarball) {
+        c.url = "https://example.invalid/tool.tar.gz";
+        try runTool(&.{ "/usr/bin/tar", "-czf", zip, "-C", fx.p("stage"), "payload" });
+    } else try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const digest = try cask.hashFileSha256(io, zip);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.retain_history = true;
+    installer.prefetched_artifact = zip;
+    const placed = try installer.install(&c);
+    defer testing.allocator.free(placed);
+    try cask.recordInstall(&db, &c, placed, null);
+    try expectWrapperOutput(io, placed);
+    try installer.uninstall("tool");
+    try testing.expect(!exists(io, placed));
+    installer.prefetched_artifact = null;
+    try installer.reinstallFromHistory("tool", "1.0");
+    try expectWrapperOutput(io, placed);
+    try installer.uninstall("tool");
+    try testing.expect(!exists(io, placed));
+}
+
+fn expectWrapperOutput(io: std.Io, path: []const u8) !void {
+    const result = try std.process.run(testing.allocator, io, .{
+        .argv = &.{ path, "user's argument", "$(echo unsafe)", "" },
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
+    try testing.expectEqualStrings("<a'b $(echo unsafe)>\n<fixed argument>\n<>\n<user's argument>\n<$(echo unsafe)>\n<>\n", result.stdout);
+}
+
+fn expectInvalidWrapper(value: []const u8) !void {
+    const json = try testing.allocator.print("{{\"token\":\"tool\",\"version\":\"1\",\"url\":\"https://example.invalid/tool.zip\",\"artifacts\":[{{\"command_wrapper\":{s}}}]}}", .{value});
+    defer testing.allocator.free(json);
+    if (cask.parseCask(testing.allocator, json)) |parsed| {
+        var c = parsed;
+        c.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try testing.expectEqual(error.ParseFailed, err);
+}
+
+test "command_wrapper refuses a name escaping bin" {
+    try expectInvalidWrapper(
+        \\["../escape",{"executable":"payload"}]
+    );
+}
+test "command_wrapper refuses an executable escaping the stage" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"../../escape"}]
+    );
+}
+test "command_wrapper refuses an executable escaping the prefix" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"$HOMEBREW_PREFIX/../escape"}]
+    );
+}
+test "command_wrapper refuses invalid environment names" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","env":{"INVALID=NAME":"x"}}]
+    );
+}
+test "command_wrapper refuses non-string environment values" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","env":{"OK":true}}]
+    );
+}
+test "command_wrapper refuses non-string arguments" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","args":[42]}]
+    );
+}
+test "command_wrapper refuses NUL in arguments" {
+    try expectInvalidWrapper(
+        \\["tool",{"executable":"payload","args":["\u0000"]}]
+    );
+}
+// A wrapper form malt does not run must not hide the rest of the cask from
+// parse, so info, outdated and the app install still work.
+fn expectSkippedWrapper(json: []const u8) !void {
+    var c = try cask.parseCask(testing.allocator, json);
+    defer c.deinit();
+    try testing.expect((try cask.collectBinaryArtifacts(testing.allocator, c.parsed.value.object)) == null);
+}
+
+test "command_wrapper with custom script content is skipped, not a parse failure" {
+    try expectSkippedWrapper(
+        \\{"token":"tool","version":"1","url":"https://example.invalid/tool.zip","artifacts":[{"command_wrapper":["tool",{"content":"arbitrary script"}]}]}
+    );
+}
+
+test "command_wrapper with an absolute system executable is skipped, not a parse failure" {
+    try expectSkippedWrapper(
+        \\{"token":"ide","version":"1","url":"https://example.invalid/ide.dmg","artifacts":[{"app":["IDE.app"]},{"command_wrapper":["ide",{"executable":"/usr/bin/open","args":["-na","IDE.app","--args"]}],"target":"$HOMEBREW_PREFIX/bin/ide"}]}
+    );
+}
+
+test "command_wrapper shapes without a runnable executable are skipped" {
+    const shapes = [_][]const u8{
+        \\"tool"
+        ,
+        \\["tool"]
+        ,
+        \\["tool","payload"]
+        ,
+        \\["tool",{"args":["a"]}]
+        ,
+        \\["tool",{"executable":42}]
+        ,
+        \\["tool",{"executable":"payload","content":"echo"}]
+        ,
+        \\["tool",{"executable":"/Applications/Tool.app/Contents/MacOS/tool"}]
+        ,
+        // A prefix path outside the Caskroom only exists after a flight step.
+        \\["tool",{"executable":"$HOMEBREW_PREFIX/share/tool/run"}]
+        ,
+        \\["tool",{"executable":"$HOMEBREW_PREFIX/Caskroomx/run"}]
+    };
+    for (shapes) |shape| {
+        const json = try testing.allocator.print("{{\"token\":\"tool\",\"version\":\"1\",\"url\":\"https://example.invalid/tool.zip\",\"artifacts\":[{{\"command_wrapper\":{s}}}]}}", .{shape});
+        defer testing.allocator.free(json);
+        expectSkippedWrapper(json) catch |e| {
+            std.debug.print("shape: {s}\n", .{shape});
+            return e;
+        };
+    }
+}
+
+test "command_wrapper expands the prefix placeholder in env and args" {
+    var fx = try Fixture.init("wrapper_placeholder");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","artifacts":[{"command_wrapper":["tool",{"executable":"payload","env":{"TOOL_HOME":"$HOMEBREW_PREFIX/share/tool"},"args":["--prefix","$HOMEBREW_PREFIX/lib"]}]}]}
+    );
+    defer c.deinit();
+    try putFile(io, fx.p("Caskroom/tool/1.0/payload"), "#!/bin/sh\nprintf '<%s>' \"$TOOL_HOME\" \"$@\"\n");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Tool.app"));
+    const result = try std.process.run(testing.allocator, io, .{ .argv = &.{fx.p("bin/tool")} });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    const want = try fx.arena.allocator().print("<{s}/share/tool><--prefix><{s}/lib>", .{ fx.base, fx.base });
+    try testing.expectEqualStrings(want, result.stdout);
+    // Resolving the app dir creates it, and nothing here names it.
+    try testing.expect(!exists(io, fx.p("Applications")));
+}
+
+test "command_wrapper without a placed bundle expands APPDIR in env and args to the app dir" {
+    var fx = try Fixture.init("wrapper_appdir_arg");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","artifacts":[{"command_wrapper":["tool",{"executable":"payload","args":["$APPDIR/Other.app"]}]},{"command_wrapper":["envtool",{"executable":"payload","env":{"APP":"$APPDIR/Env.app"}}]}]}
+    );
+    defer c.deinit();
+    try putFile(io, fx.p("Caskroom/tool/1.0/payload"), "#!/bin/sh\nprintf '<%s>' \"$APP\" \"$@\"\n");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Tool.app"));
+    // A non-default prefix keeps its apps under `<prefix>/Applications`.
+    // Each wrapper names the app dir in one place only, so each place is checked.
+    const cases = [_]struct { bin: []const u8, want: []const u8 }{
+        .{ .bin = "bin/tool", .want = "<><{s}/Applications/Other.app>" },
+        .{ .bin = "bin/envtool", .want = "<{s}/Applications/Env.app>" },
+    };
+    inline for (cases) |case| {
+        const result = try std.process.run(testing.allocator, io, .{ .argv = &.{fx.p(case.bin)} });
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        const want = try fx.arena.allocator().print(case.want, .{fx.base});
+        try testing.expectEqualStrings(want, result.stdout);
+    }
+}
+
+test "several command_wrappers and a binary in one cask each link and uninstall" {
+    var fx = try Fixture.init("wrapper_many");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"multi","version":"1.0","url":"https://example.invalid/multi.zip","sha256":"no_check","artifacts":[
+        \\ {"command_wrapper":["one",{"executable":"run","args":["first"]}],"target":"$HOMEBREW_PREFIX/bin/one"},
+        \\ {"binary":["plain"],"target":"$HOMEBREW_PREFIX/bin/plain"},
+        \\ {"command_wrapper":["two",{"executable":"run","args":["second"]}],"target":"$HOMEBREW_PREFIX/bin/two"}]}
+    );
+    defer c.deinit();
+    try putFile(io, fx.p("stage/run"), "#!/bin/sh\nprintf '%s' \"$1\"\n");
+    try putFile(io, fx.p("stage/plain"), "#!/bin/sh\n");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const zip = fx.p("cache/Cask/multi-1.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const digest = try cask.hashFileSha256(io, zip);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = zip;
+    const placed = try installer.install(&c);
+    defer testing.allocator.free(placed);
+    try cask.recordInstall(&db, &c, placed, null);
+
+    // Each wrapper keeps its own args, so neither file overwrote the other.
+    for ([_][2][]const u8{ .{ "one", "first" }, .{ "two", "second" } }) |pair| {
+        try expectLinkInto(io, fx.p(try fx.arena.allocator().print("bin/{s}", .{pair[0]})), fx.p(try fx.arena.allocator().print("Caskroom/multi/1.0/.malt-wrapper-{s}", .{pair[0]})));
+        const result = try std.process.run(testing.allocator, io, .{ .argv = &.{fx.p(try fx.arena.allocator().print("bin/{s}", .{pair[0]}))} });
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        try testing.expectEqualStrings(pair[1], result.stdout);
+    }
+    try expectLinkInto(io, fx.p("bin/plain"), fx.p("Caskroom/multi/1.0/plain"));
+    const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/multi/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
+    defer testing.allocator.free(manifest);
+    try testing.expectEqualStrings(try fx.arena.allocator().print("{s}\n{s}\n{s}\n", .{ fx.p("bin/one"), fx.p("bin/plain"), fx.p("bin/two") }), manifest);
+
+    try installer.uninstall("multi");
+    for ([_][]const u8{ "bin/one", "bin/plain", "bin/two", "Caskroom/multi" }) |gone| try testing.expect(!exists(io, fx.p(gone)));
+}
+
+test "command_wrapper links the generated wrapper, not a same-named payload file" {
+    var fx = try Fixture.init("wrapper_decoy");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("Caskroom/tool/1.0/payload"), "#!/bin/sh\n");
+    // Archive entries with the wrapper's name sort before and after the
+    // top-level file, so any walk order meets one of them first.
+    for ([_][]const u8{ "a", "m", "z", ".a", "_" }) |d| {
+        try putFile(io, try fx.arena.allocator().print("{s}/Caskroom/tool/1.0/{s}/.malt-wrapper-tool", .{ fx.base, d }), "decoy");
+    }
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Tool.app"));
+    try expectLinkInto(io, fx.p("bin/tool"), fx.p("Caskroom/tool/1.0/.malt-wrapper-tool"));
+}
+
+test "a command_wrapper whose executable is its own wrapper file is refused" {
+    var fx = try Fixture.init("wrapper_self_exec");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","artifacts":[{"command_wrapper":["tool",{"executable":".malt-wrapper-tool"}]}]}
+    );
+    defer c.deinit();
+    // A reinstall finds the wrapper from the last install. A wrapper that
+    // runs itself would loop forever, so the link must fail.
+    try putFile(io, fx.p("Caskroom/tool/1.0/.malt-wrapper-tool"), "#!/bin/sh\n");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.InstallFailed, installer.linkPlacedBinaries(&c, fx.p("Applications/Tool.app")));
+    try testing.expect(!exists(io, fx.p("bin/tool")));
+}
+
+test "an upgrade from a binary stanza to a command_wrapper takes over the old link" {
+    var fx = try Fixture.init("wrapper_upgrade");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    const block = try a.allocSentinel(?[*:0]const u8, 1, null);
+    block[0] = (try a.printSentinel("MALT_APPDIR={s}/Applications", .{fx.base}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 1.0 as a binary install leaves it: Caskroom copy, link, manifest, row.
+    try putFile(io, fx.p("Caskroom/tool/1.0/tool"), "#!/bin/sh\necho 1.0\n");
+    try test_io.cwd().createDirPath(io, fx.p("bin"));
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const real_tool = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Caskroom/tool/1.0/tool"), &real_buf)];
+    try std.Io.Dir.symLinkAbsolute(io, real_tool, fx.p("bin/tool"), .{});
+    try putFile(io, fx.p("Caskroom/tool/1.0/" ++ cask.LINKS_MANIFEST_NAME), try a.print("{s}\n", .{fx.p("bin/tool")}));
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c1 = try cask.parseCask(testing.allocator,
+            \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool-1.0.zip","sha256":"no_check",
+            \\ "artifacts":[{"binary":["tool"],"target":"$HOMEBREW_PREFIX/bin/tool"}]}
+        );
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, fx.p("bin/tool"), null);
+    }
+
+    // 2.0 swaps the binary for a wrapper around a payload.
+    try putFile(io, fx.p("stage/payload"), "#!/bin/sh\nprintf '<%s>' \"$TOOL_MODE\" \"$@\"\n");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const zip = fx.p("cache/Cask/tool-2.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const digest = try cask.hashFileSha256(io, zip);
+    try putFile(io, fx.p("cache/api/cask_tool.json"), try a.print(
+        \\{{"token":"tool","version":"2.0","url":"https://example.invalid/tool-2.0.zip","sha256":"{s}",
+        \\ "artifacts":[{{"command_wrapper":["tool",{{"executable":"$HOMEBREW_PREFIX/Caskroom/tool/2.0/payload","env":{{"TOOL_MODE":"wrapped"}},"args":["fixed"]}}],"target":"$HOMEBREW_PREFIX/bin/tool"}}]}}
+    , .{digest}));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
+    malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "tool" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try expectLinkInto(io, fx.p("bin/tool"), fx.p("Caskroom/tool/2.0/.malt-wrapper-tool"));
+    const result = try std.process.run(testing.allocator, io, .{ .argv = &.{ fx.p("bin/tool"), "user" } });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqualStrings("<wrapped><fixed><user>", result.stdout);
+    try testing.expect(!exists(io, fx.p("Caskroom/tool/1.0")));
+}
+
+test "command_wrapper links an APPDIR executable with a single fixed argument" {
+    var fx = try Fixture.init("wrapper_appdir");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"tool","version":"1.0","url":"https://example.invalid/tool.zip","artifacts":[{"app":["Tool.app"]},{"command_wrapper":["tool",{"executable":"$APPDIR/Tool.app/Contents/MacOS/payload","args":"a'b"}]}]}
+    );
+    defer c.deinit();
+    try putFile(io, fx.p("Applications/Tool.app/Contents/MacOS/payload"), "#!/bin/sh\nprintf '%s' \"$1\"\n");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Tool.app"));
+    const result = try std.process.run(testing.allocator, io, .{ .argv = &.{fx.p("bin/tool")} });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try testing.expectEqualStrings("a'b", result.stdout);
+}
+
+test "command_wrapper refuses a symlinked executable outside its cask" {
+    var fx = try Fixture.init("wrapper_escape");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, wrapper_json);
+    defer c.deinit();
+    try putFile(io, fx.p("outside"), "untouched");
+    try test_io.cwd().createDirPath(io, fx.p("extract"));
+    try std.Io.Dir.symLinkAbsolute(io, fx.p("outside"), fx.p("extract/payload"), .{});
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.AccessDenied, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+    try testing.expect(!exists(io, fx.p("bin/tool")));
+}
