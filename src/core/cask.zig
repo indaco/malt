@@ -785,7 +785,9 @@ fn binaryLinkName(target: []const u8) ?[]const u8 {
 /// Wrappers share binary ownership and history, but retain their launch options.
 fn parseCommandWrapper(art: std.json.ObjectMap) CaskError!?BinaryEntry {
     const val = art.get("command_wrapper") orelse return null;
-    if (val != .array or val.array.items.len != 2) return error.ParseFailed;
+    // A form malt does not run is skipped, so the rest of the cask still
+    // parses and installs.
+    if (!isRunnableWrapper(val)) return null;
     const name = val.array.items[0];
     const options = val.array.items[1];
     if (name != .string or binaryLinkName(name.string) == null or
@@ -799,12 +801,30 @@ fn parseCommandWrapper(art: std.json.ObjectMap) CaskError!?BinaryEntry {
     return .{ .source = options.object.get("executable").?.string, .target = name.string, .wrapper = options };
 }
 
+const wrapper_option_keys = std.StaticStringMap(void).initComptime(.{ .{"executable"}, .{"env"}, .{"args"} });
+
+/// The forms malt runs: an `executable` inside the cask, with optional `env`
+/// and `args`. Custom script `content`, a system executable and a prefix path
+/// outside the Caskroom are not.
+fn isRunnableWrapper(val: std.json.Value) bool {
+    if (val != .array or val.array.items.len != 2) return false;
+    const options = val.array.items[1];
+    if (options != .object) return false;
+    for (options.object.keys()) |key| if (!wrapper_option_keys.has(key)) return false;
+    const exe = options.object.get("executable") orelse return false;
+    if (exe != .string or std.mem.startsWith(u8, exe.string, "/")) return false;
+    if (std.mem.startsWith(u8, exe.string, homebrew_prefix_var)) {
+        const rel = exe.string[homebrew_prefix_var.len..];
+        // Only a flight step makes such a path, and the link opens the
+        // executable inside the Caskroom. An escaping path is still refused.
+        if (path_component.isRelativeSubpath(rel) and !std.mem.startsWith(u8, rel, "Caskroom/")) return false;
+    }
+    return true;
+}
+
 fn validateWrapperOptions(options: std.json.Value) CaskError!void {
     if (options != .object) return error.ParseFailed;
-    for (options.object.keys()) |key| {
-        if (!std.mem.eql(u8, key, "executable") and !std.mem.eql(u8, key, "env") and
-            !std.mem.eql(u8, key, "args")) return error.ParseFailed;
-    }
+    for (options.object.keys()) |key| if (!wrapper_option_keys.has(key)) return error.ParseFailed;
     const exe = options.object.get("executable") orelse return error.ParseFailed;
     if (exe != .string) return error.ParseFailed;
     const rel = if (std.mem.startsWith(u8, exe.string, homebrew_prefix_var))
@@ -832,6 +852,20 @@ fn validateWrapperOptions(options: std.json.Value) CaskError!void {
     };
 }
 
+/// True when an `env` value or an arg holds `$APPDIR`. Call only after
+/// `validateWrapperOptions`, which makes sure each value is a string.
+fn wrapperNamesAppDir(options: std.json.Value) bool {
+    const token = "$APPDIR";
+    if (options.object.get("env")) |env| {
+        for (env.object.values()) |v| if (std.mem.find(u8, v.string, token) != null) return true;
+    }
+    if (options.object.get("args")) |args| {
+        const values = if (args == .array) args.array.items else &.{args};
+        for (values) |arg| if (std.mem.find(u8, arg.string, token) != null) return true;
+    }
+    return false;
+}
+
 fn validateWrapperString(value: std.json.Value) CaskError!void {
     if (value != .string or std.mem.findScalar(u8, value.string, 0) != null) return error.ParseFailed;
 }
@@ -844,10 +878,11 @@ fn appendShellWord(out: *std.ArrayList(u8), allocator: std.mem.Allocator, word: 
     try out.append(allocator, '\'');
 }
 
-/// Reject any `app` or `binary` artifact string that would escape the directory
-/// it is resolved against. Only the artifact kinds malt actually turns into
-/// paths are screened: `font` has its own sanitizer in `cask_font.zig`, and
-/// `pkg` reaches the installer as the cached download path, not as a name.
+/// Reject any `app`, `binary` or `command_wrapper` artifact string that would
+/// escape the directory it is resolved against. Only the artifact kinds malt
+/// actually turns into paths are screened: `font` has its own sanitizer in
+/// `cask_font.zig`, and `pkg` reaches the installer as the cached download
+/// path, not as a name.
 fn validateArtifactPaths(obj: std.json.ObjectMap) CaskError!void {
     const artifacts = switch (obj.get("artifacts") orelse return) {
         .array => |a| a,
@@ -1931,6 +1966,8 @@ pub const CaskInstaller = struct {
     /// lets `reinstallFromHistory` re-place them offline without the cask
     /// JSON, which the synthetic rollback cask lacks. Format: one
     /// `source\ttarget` line per stanza; a tab-less line has no rename target.
+    /// A binary list with a `command_wrapper` is a `\x00json` line, then the
+    /// entries as JSON, because the line form cannot keep env and args.
     /// Sanitization still runs at placement, so the persisted strings are
     /// re-validated there rather than trusted here.
     pub fn Spec(comptime Entry: type) type {
@@ -1993,7 +2030,8 @@ pub const CaskInstaller = struct {
 
     /// Read the sidecar for `(token, version)`, or null when none was written
     /// (a cask without that stanza kind, or a pre-sidecar install). Entries
-    /// borrow the returned `bytes`; free both via `deinit`.
+    /// borrow the returned `bytes`, or the JSON arena for the JSON form;
+    /// free both via `deinit`.
     pub fn readFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8) !?FontSpec {
         return self.readSpec(cask_font.FontEntry, token, version, ".fonts");
     }
@@ -2257,7 +2295,17 @@ pub const CaskInstaller = struct {
     ) ![]const u8 {
         const candidate = try self.resolveCaskBinaryPath(root, root_kind, src_name);
         defer self.allocator.free(candidate);
+        return self.linkResolvedBinary(cask_token, root, candidate, link_name);
+    }
 
+    /// `linkCaskBinary` for a source already resolved to `candidate`.
+    fn linkResolvedBinary(
+        self: *CaskInstaller,
+        cask_token: []const u8,
+        root: []const u8,
+        candidate: []const u8,
+        link_name: []const u8,
+    ) ![]const u8 {
         var source = confined_source.openFile(
             self.io,
             self.allocator,
@@ -2307,7 +2355,18 @@ pub const CaskInstaller = struct {
         defer self.allocator.free(candidate);
         var source = try confined_source.openFile(self.io, self.allocator, root, candidate, .read_write);
         defer source.deinit(self.io);
-        try source.file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755));
+        // Same as a plain binary: a mount that refuses chmod keeps the bit it has.
+        source.file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+        // The API spells install paths as placeholders in env and args too.
+        // Resolving the app dir creates it, so do that only when a value names it.
+        var app_dir_buf: AppDirBuf = undefined;
+        const app_dir = if (root_kind == .bundle)
+            std.Io.Dir.path.dirname(root) orelse return error.InstallFailed
+        else if (wrapperNamesAppDir(options))
+            applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)
+        else
+            "";
 
         var bytes: std.ArrayList(u8) = .empty;
         defer bytes.deinit(self.allocator);
@@ -2316,10 +2375,12 @@ pub const CaskInstaller = struct {
         if (options.object.get("env")) |env| {
             var it = env.object.iterator();
             while (it.next()) |kv| {
+                const value = try expandCaveats(self.allocator, kv.value_ptr.string, self.prefix, app_dir);
+                defer self.allocator.free(value);
                 try bytes.appendSlice(self.allocator, "export ");
                 try bytes.appendSlice(self.allocator, kv.key_ptr.*);
                 try bytes.append(self.allocator, '=');
-                try appendShellWord(&bytes, self.allocator, kv.value_ptr.string);
+                try appendShellWord(&bytes, self.allocator, value);
                 try bytes.append(self.allocator, '\n');
             }
         }
@@ -2328,8 +2389,10 @@ pub const CaskInstaller = struct {
         if (options.object.get("args")) |args| {
             const values = if (args == .array) args.array.items else &.{args};
             for (values) |arg| {
+                const value = try expandCaveats(self.allocator, arg.string, self.prefix, app_dir);
+                defer self.allocator.free(value);
                 try bytes.append(self.allocator, ' ');
-                try appendShellWord(&bytes, self.allocator, arg.string);
+                try appendShellWord(&bytes, self.allocator, value);
             }
         }
         try bytes.appendSlice(self.allocator, " \"$@\"\n");
@@ -2341,7 +2404,9 @@ pub const CaskInstaller = struct {
         defer self.allocator.free(path);
         if (std.mem.eql(u8, std.Io.Dir.path.basename(source.path), wrapper_name)) return error.InstallFailed;
         try atomic.atomicWriteFileMode(self.io, path, bytes.items, std.Io.File.Permissions.fromMode(0o755));
-        return self.linkCaskBinary(token, caskroom, .caskroom, wrapper_name, name);
+        // By its exact path: a name lookup walks the tree and can meet a
+        // payload file with the same name first.
+        return self.linkResolvedBinary(token, caskroom, path, name);
     }
 
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
