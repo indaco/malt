@@ -801,18 +801,52 @@ fn parseCommandWrapper(art: std.json.ObjectMap) CaskError!?BinaryEntry {
         const link_name = binaryLinkName(target.string) orelse return error.ParseFailed;
         if (!std.mem.eql(u8, link_name, name.string)) return error.ParseFailed;
     }
-    return .{ .source = options.object.get("executable").?.string, .target = name.string, .wrapper = options };
+    const source = if (isContentWrapper(.{ .source = "", .target = null, .wrapper = options })) "" else options.object.get("executable").?.string;
+    return .{ .source = source, .target = name.string, .wrapper = options };
 }
+
+/// Upper bound for an inline wrapper script.
+const wrapper_content_max = 64 * 1024;
 
 const wrapper_option_keys = std.StaticStringMap(void).initComptime(.{ .{"executable"}, .{"env"}, .{"args"} });
 
+/// The script of a `content` wrapper, or null when the options are not
+/// that form. The script stands alone: it takes no other option.
+fn wrapperScript(options: std.json.Value) ?[]const u8 {
+    if (options != .object or options.object.count() != 1) return null;
+    const script = options.object.get("content") orelse return null;
+    if (script != .string or script.string.len > wrapper_content_max) return null;
+    if (std.mem.findScalar(u8, script.string, 0) != null) return null;
+    return script.string;
+}
+
+/// The first path component a content script reads under this cask's
+/// Caskroom directory, or null when it names none.
+fn contentStageEntry(script: []const u8, cask: *const Cask) ?[]const u8 {
+    var needle_buf: [512]u8 = undefined;
+    const needle = std.mem.print(&needle_buf, "Caskroom/{s}/{s}/", .{ cask.token, cask.version }) catch return null;
+    const at = std.mem.find(u8, script, needle) orelse return null;
+    const rest = script[at + needle.len ..];
+    const end = std.mem.findAny(u8, rest, "/'\" \n$\\") orelse rest.len;
+    const name = rest[0..end];
+    // Same name rules as a link target: no `.`, `..` or control bytes.
+    if (!path_component.isPathComponent(name) or path_component.hasControlByte(name)) return null;
+    return name;
+}
+
+fn isContentWrapper(entry: BinaryEntry) bool {
+    const options = entry.wrapper orelse return false;
+    return options == .object and options.object.get("content") != null;
+}
+
 /// The forms malt runs: an `executable` inside the cask, with optional `env`
-/// and `args`. Custom script `content`, a system executable and a prefix path
-/// outside the Caskroom are not.
+/// and `args`, or a stand-alone `content` script. A system executable and a
+/// prefix path outside the Caskroom are not.
 fn isRunnableWrapper(val: std.json.Value) bool {
     if (val != .array or val.array.items.len != 2) return false;
     const options = val.array.items[1];
     if (options != .object) return false;
+    if (options.object.get("content") != null) return wrapperScript(options) != null;
     for (options.object.keys()) |key| if (!wrapper_option_keys.has(key)) return false;
     const exe = options.object.get("executable") orelse return false;
     if (exe != .string or std.mem.startsWith(u8, exe.string, "/")) return false;
@@ -849,6 +883,10 @@ pub fn skippedCommandWrappers(alloc: std.mem.Allocator, obj: std.json.ObjectMap)
 
 fn validateWrapperOptions(options: std.json.Value) CaskError!void {
     if (options != .object) return error.ParseFailed;
+    if (options.object.get("content") != null) {
+        _ = wrapperScript(options) orelse return error.ParseFailed;
+        return;
+    }
     for (options.object.keys()) |key| if (!wrapper_option_keys.has(key)) return error.ParseFailed;
     const exe = options.object.get("executable") orelse return error.ParseFailed;
     if (exe != .string) return error.ParseFailed;
@@ -1912,16 +1950,25 @@ pub const CaskInstaller = struct {
         var copied = false;
         errdefer if (copied) self.wipeCaskroomVersion(cask);
         for (entries) |e| {
-            if (!linksFromCaskroom(e.source)) continue;
             var top_buf: [256]u8 = undefined;
-            const top = try self.stageEntryOf(stage, e.source, &top_buf);
-            if (std.mem.eql(u8, top, bundle_top)) continue;
+            // A script runs its payload by Caskroom path; keep the entry it names.
+            const from_script = isContentWrapper(e);
+            // A damaged side-car entry has no script to read; it keeps nothing.
+            const top = if (from_script)
+                contentStageEntry(wrapperScript(e.wrapper.?) orelse continue, cask) orelse continue
+            else if (linksFromCaskroom(e.source))
+                try self.stageEntryOf(stage, e.source, &top_buf)
+            else
+                continue;
+            if (std.mem.eql(u8, top, bundle_top) or !path_component.isPathComponent(top)) continue;
             var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const dst = std.mem.print(&dst_buf, "{s}/{s}", .{ caskroom_ver, top }) catch return error.InstallFailed;
             if (std.Io.Dir.accessAbsolute(self.io, dst, .{})) |_| continue else |_| {}
             var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const src = std.mem.print(&src_buf, "{s}/{s}", .{ stage, top }) catch return error.InstallFailed;
-            const st = std.Io.Dir.cwd().statFile(self.io, src, .{ .follow_symlinks = false }) catch return error.InstallFailed;
+            // A name read from free-form script text may be no stage entry at all.
+            const st = std.Io.Dir.cwd().statFile(self.io, src, .{ .follow_symlinks = false }) catch
+                if (from_script) continue else return error.InstallFailed;
             if (st.kind == .sym_link) return error.InstallFailed;
             if (!copied) {
                 std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
@@ -2377,6 +2424,7 @@ pub const CaskInstaller = struct {
     ) ![]const u8 {
         try validateWrapperOptions(options);
         if (!path_component.isPathComponent(name) or path_component.hasControlByte(name)) return error.InstallFailed;
+        if (wrapperScript(options)) |script| return self.linkScriptWrapper(token, caskroom, name, script);
         const candidate = try self.resolveCaskBinaryPath(root, root_kind, executable);
         defer self.allocator.free(candidate);
         var source = try confined_source.openFile(self.io, self.allocator, root, candidate, .read_write);
@@ -2422,14 +2470,30 @@ pub const CaskInstaller = struct {
             }
         }
         try bytes.appendSlice(self.allocator, " \"$@\"\n");
+        return self.placeWrapper(token, caskroom, name, bytes.items, source.path);
+    }
 
+    /// A cask-supplied script, with the install paths filled in. Nothing
+    /// runs it here: it is file contents until the user calls the command.
+    fn linkScriptWrapper(self: *CaskInstaller, token: []const u8, caskroom: []const u8, name: []const u8, script: []const u8) ![]const u8 {
+        var app_dir_buf: AppDirBuf = undefined;
+        const app_dir = if (std.mem.find(u8, script, "$APPDIR") != null)
+            applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)
+        else
+            "";
+        const body = try expandCaveats(self.allocator, script, self.prefix, app_dir);
+        defer self.allocator.free(body);
+        return self.placeWrapper(token, caskroom, name, body, null);
+    }
+
+    fn placeWrapper(self: *CaskInstaller, token: []const u8, caskroom: []const u8, name: []const u8, bytes: []const u8, payload: ?[]const u8) ![]const u8 {
         try std.Io.Dir.cwd().createDirPath(self.io, caskroom);
         const wrapper_name = try self.allocator.print(".malt-wrapper-{s}", .{name});
         defer self.allocator.free(wrapper_name);
         const path = try self.allocator.print("{s}/{s}", .{ caskroom, wrapper_name });
         defer self.allocator.free(path);
-        if (std.mem.eql(u8, std.Io.Dir.path.basename(source.path), wrapper_name)) return error.InstallFailed;
-        try atomic.atomicWriteFileMode(self.io, path, bytes.items, std.Io.File.Permissions.fromMode(0o755));
+        if (payload) |p| if (std.mem.eql(u8, std.Io.Dir.path.basename(p), wrapper_name)) return error.InstallFailed;
+        try atomic.atomicWriteFileMode(self.io, path, bytes, std.Io.File.Permissions.fromMode(0o755));
         // By its exact path: a name lookup walks the tree and can meet a
         // payload file with the same name first.
         return self.linkResolvedBinary(token, caskroom, path, name);
@@ -3312,7 +3376,7 @@ test "keepStageCopy copies only the stage entries the caskroom-rooted stanzas ne
 
     const prefix = try a.printSentinel("{s}/prefix", .{base}, 0);
     const stage = try a.print("{s}/stage", .{base});
-    for ([_][]const u8{ "Pad.app/Contents/MacOS/pad", "pad-cli", "Extras/pad.sh", "Extras/Manual.pdf", "Other.app/Contents/Info.plist", ".Trashes/x" }) |rel| {
+    for ([_][]const u8{ "Pad.app/Contents/MacOS/pad", "pad-cli", "Extras/pad.sh", "Extras/Manual.pdf", "Other.app/Contents/Info.plist", ".Trashes/x", "Foo..bar/x" }) |rel| {
         const path = try a.print("{s}/{s}", .{ stage, rel });
         try std.Io.Dir.cwd().createDirPath(io, std.Io.Dir.path.dirname(path).?);
         const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
@@ -3357,6 +3421,50 @@ test "keepStageCopy copies only the stage entries the caskroom-rooted stanzas ne
     std.Io.Dir.cwd().deleteTree(io, copy) catch {};
     try std.testing.expect(!try installer.keepStageCopy(&cask, stage, "Pad.app", stanzas[2..]));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, copy, .{}));
+
+    // A content script names its payload by Caskroom path; that entry is kept
+    // and a script that names none copies nothing.
+    std.Io.Dir.cwd().deleteTree(io, copy) catch {};
+    const named = [_]BinaryEntry{.{ .source = "", .target = null, .wrapper = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        a,
+        "{\"content\":\"cd '$HOMEBREW_PREFIX/Caskroom/pad/1.0/Extras' && ./pad.sh\"}",
+        .{},
+    ) }};
+    try std.testing.expect(try installer.keepStageCopy(&cask, stage, "Pad.app", &named));
+    try std.Io.Dir.accessAbsolute(io, try a.print("{s}/Extras/pad.sh", .{copy}), .{});
+    std.Io.Dir.cwd().deleteTree(io, copy) catch {};
+    const unnamed = [_]BinaryEntry{.{ .source = "", .target = null, .wrapper = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        a,
+        "{\"content\":\"echo hi\\n\"}",
+        .{},
+    ) }};
+    try std.testing.expect(!try installer.keepStageCopy(&cask, stage, "Pad.app", &unnamed));
+
+    // A source that leaves the stage, or starts at its root, names no entry
+    // (`./tool` is older coverage; `../x` is the one the name check adds).
+    for ([_][]const u8{ "./tool", "../x" }) |src| {
+        std.Io.Dir.cwd().deleteTree(io, copy) catch {};
+        const odd = [_]BinaryEntry{.{ .source = src, .target = null }};
+        try std.testing.expect(!try installer.keepStageCopy(&cask, stage, "Pad.app", &odd));
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, copy, .{}));
+    }
+
+    // Free-form script text is not trusted to name a real, plain entry.
+    // `Foo..bar` exists in the stage, so only the name check keeps it out.
+    for ([_][]const u8{
+        "{\"content\":\"cd '$HOMEBREW_PREFIX/Caskroom/pad/1.0/./x'\"}",
+        "{\"content\":\"cd '$HOMEBREW_PREFIX/Caskroom/pad/1.0/Gone/x'\"}",
+        // `isPathComponent` also refuses an embedded `..`: such a name is not kept.
+        "{\"content\":\"cd '$HOMEBREW_PREFIX/Caskroom/pad/1.0/Foo..bar/x'\"}",
+        "{\"content\":1}",
+        "{\"content\":\"a\",\"args\":[]}",
+    }) |json| {
+        std.Io.Dir.cwd().deleteTree(io, copy) catch {};
+        const odd = [_]BinaryEntry{.{ .source = "", .target = null, .wrapper = try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{}) }};
+        try std.testing.expect(!try installer.keepStageCopy(&cask, stage, "Pad.app", &odd));
+    }
 
     // A helper the stage lacks, or one reachable only through a symlink, is
     // refused before the bundle moves, and leaves no Caskroom dir behind.
@@ -4238,7 +4346,7 @@ test "skippedCommandWrappers returns each skipped name in artifact order and not
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
         \\{"artifacts":[{"app":["A.app"]},
         \\ {"command_wrapper":["ok",{"executable":"bin/ok"}]},
-        \\ {"command_wrapper":["gogs",{"content":"script body"}]},
+        \\ {"command_wrapper":["gogs",{"content":"script body","args":["a"]}]},
         \\ {"command_wrapper":["goland",{"executable":"/usr/bin/open","args":["-a","GoLand"]}]},
         \\ {"command_wrapper":["ndk-build",{"executable":"$HOMEBREW_PREFIX/share/ndk/ndk-build"}]},
         \\ {"command_wrapper":["noexe",{"args":["a"]}]},
@@ -4278,8 +4386,8 @@ test "skippedCommandWrappers has nothing to name for a runnable wrapper, a Caskr
 test "skippedCommandWrappers names an absolute executable and keeps duplicate names" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
         \\{"artifacts":[{"command_wrapper":["abs",{"executable":"/opt/x"}]},
-        \\ {"command_wrapper":["dup",{"content":"a"}]},
-        \\ {"command_wrapper":["dup",{"content":"b"}]}]}
+        \\ {"command_wrapper":["dup",{"content":"a","args":["a"]}]},
+        \\ {"command_wrapper":["dup",{"content":"b","args":["a"]}]}]}
     , .{});
     defer parsed.deinit();
     const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
@@ -4292,9 +4400,9 @@ test "skippedCommandWrappers names an absolute executable and keeps duplicate na
 
 test "skippedCommandWrappers gives the link name, and nothing for an unsafe name" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
-        \\{"artifacts":[{"command_wrapper":["$HOMEBREW_PREFIX/bin/x",{"content":"a"}]},
-        \\ {"command_wrapper":["x\n done",{"content":"a"}]},
-        \\ {"command_wrapper":["a/b",{"content":"a"}]}]}
+        \\{"artifacts":[{"command_wrapper":["$HOMEBREW_PREFIX/bin/x",{"content":"a","args":["a"]}]},
+        \\ {"command_wrapper":["x\n done",{"content":"a","args":["a"]}]},
+        \\ {"command_wrapper":["a/b",{"content":"a","args":["a"]}]}]}
     , .{});
     defer parsed.deinit();
     const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
@@ -4303,4 +4411,52 @@ test "skippedCommandWrappers gives the link name, and nothing for an unsafe name
     try std.testing.expectEqualStrings("x", names[0]);
     try std.testing.expectEqualStrings("", names[1]);
     try std.testing.expectEqualStrings("", names[2]);
+}
+
+test "a content wrapper is runnable, keeps no executable and is not reported as skipped" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"artifacts":[{"command_wrapper":["gogs",{"content":"echo hi\n"}],"target":"$HOMEBREW_PREFIX/bin/gogs"}]}
+    , .{});
+    defer parsed.deinit();
+    const entries = (try collectBinaryArtifacts(std.testing.allocator, parsed.value.object)).?;
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("gogs", entries[0].target.?);
+    try std.testing.expectEqualStrings("", entries[0].source);
+    const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 0), names.len);
+}
+
+test "a content wrapper that malt cannot trust is skipped, not parsed" {
+    const big: [wrapper_content_max + 1]u8 = @splat('x');
+    const forms = [_][]const u8{
+        \\{"content":7}
+        ,
+        \\{"content":"a\u0000b"}
+        ,
+        \\{"content":"echo hi\n","executable":"x"}
+        ,
+        \\{"content":"echo hi\n","args":["a"]}
+        ,
+        "{\"content\":\"" ++ &big ++ "\"}",
+    };
+    for (forms) |options| {
+        const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"artifacts\":[{{\"command_wrapper\":[\"t\",{s}]}}]}}", .{options});
+        defer std.testing.allocator.free(json);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+        defer parsed.deinit();
+        try std.testing.expect(try collectBinaryArtifacts(std.testing.allocator, parsed.value.object) == null);
+        const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
+        defer std.testing.allocator.free(names);
+        try std.testing.expectEqual(@as(usize, 1), names.len);
+    }
+}
+
+test "a content wrapper refuses a name that escapes bin" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"artifacts":[{"command_wrapper":["../x",{"content":"echo hi\n"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.ParseFailed, collectBinaryArtifacts(std.testing.allocator, parsed.value.object));
 }

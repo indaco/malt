@@ -1744,9 +1744,9 @@ fn expectSkippedWrapper(json: []const u8) !void {
     try testing.expect((try cask.collectBinaryArtifacts(testing.allocator, c.parsed.value.object)) == null);
 }
 
-test "command_wrapper with custom script content is skipped, not a parse failure" {
+test "command_wrapper with content mixed with other options is skipped, not a parse failure" {
     try expectSkippedWrapper(
-        \\{"token":"tool","version":"1","url":"https://example.invalid/tool.zip","artifacts":[{"command_wrapper":["tool",{"content":"arbitrary script"}]}]}
+        \\{"token":"tool","version":"1","url":"https://example.invalid/tool.zip","artifacts":[{"command_wrapper":["tool",{"content":"arbitrary script","args":["a"]}]}]}
     );
 }
 
@@ -2044,11 +2044,11 @@ test "command_wrapper refuses a symlinked executable outside its cask" {
     try testing.expect(!exists(io, fx.p("bin/tool")));
 }
 
-// The live shape of a cask whose only artifact is a wrapper with inline
-// `content`: malt cannot run it, so the cask has nothing to place.
+// A cask whose only artifact is a wrapper malt cannot run (it points at a
+// system executable), so the cask has nothing to place.
 const content_wrapper_json =
     \\{"token":"gogs","name":["Gogs"],"version":"0.14.4","url":"https://example.invalid/gogs.zip","sha256":"no_check",
-    \\ "artifacts":[{"command_wrapper":["gogs",{"content":"#!/bin/sh\nexec gogs\n"}],"target":"$HOMEBREW_PREFIX/bin/gogs"},{"zap":[]}]}
+    \\ "artifacts":[{"command_wrapper":["gogs",{"executable":"/usr/bin/gogs"}],"target":"$HOMEBREW_PREFIX/bin/gogs"},{"zap":[]}]}
 ;
 
 test "a zip cask with only a skipped wrapper reports nothing to place and links nothing" {
@@ -2114,4 +2114,75 @@ test "a tarball cask with only a skipped wrapper reports nothing to place and ke
     installer.prefetched_artifact = tgz;
     try testing.expectError(error.NothingToPlace, installer.install(&c));
     try testing.expect(!exists(io, fx.p("Caskroom/gogs")));
+}
+
+// The live shape: the API spells the script as inline `content`, with the
+// prefix as a placeholder.
+const gogs_json =
+    \\{"token":"gogs","name":["Gogs"],"version":"0.14.4","url":"https://example.invalid/gogs.zip","sha256":"no_check",
+    \\ "artifacts":[{"command_wrapper":["gogs",{"content":"#!/bin/sh\ncd '$HOMEBREW_PREFIX/Caskroom/gogs/0.14.4/gogs' && ./gogs \"$@\"\n"}],"target":"$HOMEBREW_PREFIX/bin/gogs"},{"zap":[]}]}
+;
+
+test "a content wrapper cask installs from a zip and runs its payload" {
+    try contentWrapperLifecycle(false);
+}
+
+test "a content wrapper cask installs from a tarball and runs its payload" {
+    try contentWrapperLifecycle(true);
+}
+
+fn contentWrapperLifecycle(tarball: bool) !void {
+    var fx = try Fixture.init("content_wrapper");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, gogs_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("stage/gogs/gogs"), "#!/bin/sh\nprintf 'ran:%s' \"$1\"\n");
+    try runTool(&.{ "/bin/chmod", "755", fx.p("stage/gogs/gogs") });
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const archive = fx.p(if (tarball) "cache/Cask/gogs-0.14.4.tar.gz" else "cache/Cask/gogs-0.14.4.zip");
+    if (tarball) {
+        c.url = "https://example.invalid/gogs.tar.gz";
+        try runTool(&.{ "/usr/bin/tar", "-czf", archive, "-C", fx.p("stage"), "gogs" });
+    } else try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), archive });
+    const digest = try cask.hashFileSha256(io, archive);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.retain_history = true;
+    installer.prefetched_artifact = archive;
+    const placed = try installer.install(&c);
+    defer testing.allocator.free(placed);
+    try cask.recordInstall(&db, &c, placed, null);
+    try expectContentWrapperRuns(io, fx.p("bin/gogs"));
+    // The placeholder is gone and the script is not writable by others.
+    const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/gogs/0.14.4/.malt-wrapper-gogs"), 1 << 16);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.find(u8, body, "$HOMEBREW_PREFIX") == null);
+    try testing.expect(std.mem.find(u8, body, fx.base) != null);
+    const st = try std.Io.Dir.cwd().statFile(io, fx.p("Caskroom/gogs/0.14.4/.malt-wrapper-gogs"), .{});
+    try testing.expectEqual(@as(u32, 0o755), @backingInt(st.permissions) & 0o7777);
+
+    try installer.uninstall("gogs");
+    try testing.expect(!exists(io, fx.p("bin/gogs")));
+    installer.prefetched_artifact = null;
+    try installer.reinstallFromHistory("gogs", "0.14.4");
+    try expectContentWrapperRuns(io, fx.p("bin/gogs"));
+    try installer.uninstall("gogs");
+    try testing.expect(!exists(io, fx.p("bin/gogs")));
+}
+
+fn expectContentWrapperRuns(io: std.Io, path: []const u8) !void {
+    const result = try std.process.run(testing.allocator, io, .{ .argv = &.{ path, "hi" } });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try testing.expectEqualStrings("ran:hi", result.stdout);
 }
