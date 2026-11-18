@@ -8,7 +8,7 @@
 # inline tests live only in lib_tests; a per-file binary could never fail.
 #
 # Usage: scripts/regressions/cask-wrapper-skip-warning-skipped-command-wrappers-install-silently.sh
-# Requirements: zig, rg, awk. No network access required. Creates no temp state.
+# Requirements: zig, grep, awk. No network access required. Creates no temp state.
 
 set -euo pipefail
 
@@ -22,15 +22,16 @@ fail() {
 
 for f in src/cli/install.zig src/cli/install/local.zig src/cli/upgrade.zig; do
   # The call must follow the success line, so an early return cannot skip it.
-  rg -Uq 'success\(.*\n\s*(install_mod\.)?warnSkippedWrappers\(allocator, ' "$f" || fail "$f: skipped command wrappers are not reported"
+  awk '/warnSkippedWrappers\(allocator, /&&prev ~ /success\(/{ok=1} {prev=$0} END{exit !ok}' "$f" ||
+    fail "$f: skipped command wrappers are not reported"
 done
 
-rg -q 'pub fn skippedCommandWrappers' src/core/cask.zig || fail "core helper missing"
+grep -q 'pub fn skippedCommandWrappers' src/core/cask.zig || fail "core helper missing"
 # Core must stay silent: only the CLI layer prints.
 body=$(awk '/pub fn skippedCommandWrappers/{p=1} p{print} p&&/^}/{exit}' src/core/cask.zig)
-if rg -q 'print|output\.' <<<"$body"; then fail "core helper prints"; fi
-rg -q 'test "skippedCommandWrappers' src/core/cask.zig || fail "core test missing"
-rg -q 'test "warnSkippedWrappers' src/cli/install.zig || fail "warning text test missing"
+if grep -Eq 'print|output\.' <<<"$body"; then fail "core helper prints"; fi
+grep -q 'test "skippedCommandWrappers' src/core/cask.zig || fail "core test missing"
+grep -q 'test "warnSkippedWrappers' src/cli/install.zig || fail "warning text test missing"
 
 # `just test` runs the inline tests itself; static-only mode keeps this guard cheap.
 if [[ -n "${MALT_STATIC_ONLY:-}" ]]; then
