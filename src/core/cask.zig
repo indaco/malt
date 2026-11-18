@@ -822,6 +822,28 @@ fn isRunnableWrapper(val: std.json.Value) bool {
     return true;
 }
 
+/// Names of the `command_wrapper` stanzas malt skips, so the CLI can say that
+/// no link was made. A value with no string name has nothing to report; an
+/// unsafe name is returned as an empty string.
+/// Slices borrow `obj`'s arena; the caller owns the returned array.
+pub fn skippedCommandWrappers(alloc: std.mem.Allocator, obj: std.json.ObjectMap) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(alloc);
+    const artifacts = switch (obj.get("artifacts") orelse return names.toOwnedSlice(alloc)) {
+        .array => |a| a,
+        else => return names.toOwnedSlice(alloc),
+    };
+    for (artifacts.items) |item| {
+        if (item != .object) continue;
+        const val = item.object.get("command_wrapper") orelse continue;
+        if (isRunnableWrapper(val)) continue;
+        if (val != .array or val.array.items.len == 0 or val.array.items[0] != .string) continue;
+        // An unsafe name is left out, so it cannot forge a line in the warning.
+        try names.append(alloc, binaryLinkName(val.array.items[0].string) orelse "");
+    }
+    return names.toOwnedSlice(alloc);
+}
+
 fn validateWrapperOptions(options: std.json.Value) CaskError!void {
     if (options != .object) return error.ParseFailed;
     for (options.object.keys()) |key| if (!wrapper_option_keys.has(key)) return error.ParseFailed;
@@ -4206,4 +4228,75 @@ test "lookupDetail explains a too-long field instead of SQLite's message" {
     const detail = lookupDetail(error.FieldTooLong, &db);
     try std.testing.expect(std.mem.find(u8, detail, "longer than malt accepts") != null);
     try std.testing.expect(std.mem.find(u8, detail, "not an error") == null);
+}
+
+test "skippedCommandWrappers returns each skipped name in artifact order and not the runnable one" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"artifacts":[{"app":["A.app"]},
+        \\ {"command_wrapper":["ok",{"executable":"bin/ok"}]},
+        \\ {"command_wrapper":["gogs",{"content":"script body"}]},
+        \\ {"command_wrapper":["goland",{"executable":"/usr/bin/open","args":["-a","GoLand"]}]},
+        \\ {"command_wrapper":["ndk-build",{"executable":"$HOMEBREW_PREFIX/share/ndk/ndk-build"}]},
+        \\ {"command_wrapper":["noexe",{"args":["a"]}]},
+        \\ {"command_wrapper":["bad","not-an-object"]},
+        \\ {"command_wrapper":["three",{"executable":"x"},"extra"]}]}
+    , .{});
+    defer parsed.deinit();
+
+    const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(names);
+    const want = [_][]const u8{ "gogs", "goland", "ndk-build", "noexe", "bad", "three" };
+    try std.testing.expectEqual(want.len, names.len);
+    for (want, names) |w, n| try std.testing.expectEqualStrings(w, n);
+}
+
+test "skippedCommandWrappers has nothing to name for a runnable wrapper, a Caskroom path or a nameless value" {
+    for ([_][]const u8{
+        "{}",
+        \\{"artifacts":"nope"}
+        ,
+        \\{"artifacts":["str",{"binary":["b"]}]}
+        ,
+        \\{"artifacts":[{"command_wrapper":["x",{"executable":"$HOMEBREW_PREFIX/Caskroom/x/1/x"}]}]}
+        ,
+        // A link name cannot be given for these, so there is nothing to report.
+        \\{"artifacts":[{"command_wrapper":"x"},{"command_wrapper":[]},{"command_wrapper":[7,{}]}]}
+        ,
+    }) |json| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+        defer parsed.deinit();
+        const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
+        defer std.testing.allocator.free(names);
+        try std.testing.expectEqual(@as(usize, 0), names.len);
+    }
+}
+
+test "skippedCommandWrappers names an absolute executable and keeps duplicate names" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"artifacts":[{"command_wrapper":["abs",{"executable":"/opt/x"}]},
+        \\ {"command_wrapper":["dup",{"content":"a"}]},
+        \\ {"command_wrapper":["dup",{"content":"b"}]}]}
+    , .{});
+    defer parsed.deinit();
+    const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqualStrings("abs", names[0]);
+    try std.testing.expectEqualStrings("dup", names[1]);
+    try std.testing.expectEqualStrings("dup", names[2]);
+}
+
+test "skippedCommandWrappers gives the link name, and nothing for an unsafe name" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"artifacts":[{"command_wrapper":["$HOMEBREW_PREFIX/bin/x",{"content":"a"}]},
+        \\ {"command_wrapper":["x\n done",{"content":"a"}]},
+        \\ {"command_wrapper":["a/b",{"content":"a"}]}]}
+    , .{});
+    defer parsed.deinit();
+    const names = try skippedCommandWrappers(std.testing.allocator, parsed.value.object);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqualStrings("x", names[0]);
+    try std.testing.expectEqualStrings("", names[1]);
+    try std.testing.expectEqualStrings("", names[2]);
 }
