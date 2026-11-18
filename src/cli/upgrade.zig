@@ -1525,8 +1525,9 @@ fn upgradeRoutedTapCask(
     if (stored) |*s| _ = flight.runPhase(&installer, token, installed_version, s.get(.uninstall_postflight), .uninstall_postflight, install_sink_mod.terminal);
 
     // Installs the bytes the prefetch fetched, so this never re-downloads.
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch |in_err| {
-        output.err("Failed to upgrade tap cask {s}: {s}", .{ full_name, @errorName(in_err) });
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch {
+        // The install site already printed the cause; its folded error name would contradict it.
+        output.err("Failed to upgrade tap cask {s}", .{full_name});
         // As on the core-API path: the rows come back with the rollback, the
         // bundle does not. Drop the prefetch first or the reinstall would
         // consume the new artefact instead of the old one.
@@ -1536,7 +1537,7 @@ fn upgradeRoutedTapCask(
             output.warn("{s} {s} is back in place", .{ token, installed_version });
         } else |re_err| switch (re_err) {
             error.LinksIncomplete => output.warn("{s} {s} is back in place, but its command-line links could not be created", .{ token, installed_version }),
-            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, @errorName(re_err), token, installed_version }),
+            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, install_mod.installErrorText(re_err), token, installed_version }),
         }
         return error.Aborted;
     };
@@ -1982,7 +1983,9 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     const placed = installer.install(&parsed_cask);
     if (installer.preflight_ran) _ = flight.route(token, .preflight, install_sink_mod.terminal);
     const app_path = placed catch |in_err| {
-        output.err(
+        if (in_err == error.NothingToPlace) {
+            install_mod.reportCaskInstallFailure(allocator, &parsed_cask, in_err, install_sink_mod.terminal);
+        } else output.err(
             "Failed to install new version of {s}: {s}",
             .{ token, @errorName(in_err) },
         );
@@ -2000,7 +2003,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
             output.warn("{s} {s} is back in place", .{ token, old_version });
         } else |re_err| switch (re_err) {
             error.LinksIncomplete => output.warn("{s} {s} is back in place, but its command-line links could not be created", .{ token, old_version }),
-            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, @errorName(re_err), token, old_version }),
+            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, install_mod.installErrorText(re_err), token, old_version }),
         }
         return error.Aborted;
     };
