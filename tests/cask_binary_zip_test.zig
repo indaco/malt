@@ -1155,7 +1155,7 @@ test "a caller-supplied override stands in when a version predates the sidecar" 
     const entries = (try cask.collectBinaryArtifacts(testing.allocator, c.parsed.value.object)).?;
     defer testing.allocator.free(entries);
     installer.binary_entries_override = &.{};
-    try testing.expectError(error.InstallFailed, installer.reinstallFromHistory("rabbit", "0.7.8"));
+    try testing.expectError(error.NothingToPlace, installer.reinstallFromHistory("rabbit", "0.7.8"));
     installer.binary_entries_override = entries;
     try installer.reinstallFromHistory("rabbit", "0.7.8");
     try expectLinkInto(io, fx.p("bin/rabbit"), fx.p("Caskroom/rabbit/0.7.8/rabbit"));
@@ -2042,4 +2042,76 @@ test "command_wrapper refuses a symlinked executable outside its cask" {
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(error.AccessDenied, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
     try testing.expect(!exists(io, fx.p("bin/tool")));
+}
+
+// The live shape of a cask whose only artifact is a wrapper with inline
+// `content`: malt cannot run it, so the cask has nothing to place.
+const content_wrapper_json =
+    \\{"token":"gogs","name":["Gogs"],"version":"0.14.4","url":"https://example.invalid/gogs.zip","sha256":"no_check",
+    \\ "artifacts":[{"command_wrapper":["gogs",{"content":"#!/bin/sh\nexec gogs\n"}],"target":"$HOMEBREW_PREFIX/bin/gogs"},{"zap":[]}]}
+;
+
+test "a zip cask with only a skipped wrapper reports nothing to place and links nothing" {
+    var fx = try Fixture.init("nothing_zip");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, content_wrapper_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("extract/gogs/gogs"), "bin");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.NothingToPlace, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+    try testing.expect(!exists(io, fx.p("bin/gogs")));
+    try testing.expect(!exists(io, fx.p("Caskroom/gogs")));
+}
+
+test "a zip cask with no artifacts and no bundle reports nothing to place" {
+    var fx = try Fixture.init("nothing_bare");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"bare","version":"1","url":"https://example.invalid/bare.zip","sha256":"no_check","artifacts":[]}
+    );
+    defer c.deinit();
+
+    try putFile(io, fx.p("extract/README"), "x");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.NothingToPlace, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+}
+
+test "a tarball cask with only a skipped wrapper reports nothing to place and keeps no stage" {
+    var fx = try Fixture.init("nothing_tar");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, content_wrapper_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("stage/gogs/gogs"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const tgz = fx.p("cache/Cask/gogs-0.14.4.tar.gz");
+    c.url = "https://example.invalid/gogs.tar.gz";
+    try runTool(&.{ "/usr/bin/tar", "-czf", tgz, "-C", fx.p("stage"), "gogs" });
+    const digest = try cask.hashFileSha256(io, tgz);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = tgz;
+    try testing.expectError(error.NothingToPlace, installer.install(&c));
+    try testing.expect(!exists(io, fx.p("Caskroom/gogs")));
 }

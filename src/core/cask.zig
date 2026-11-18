@@ -32,6 +32,9 @@ pub const CaskError = error{
     // already holds an entry this cask does not own, and taking it over
     // would silently shadow a formula's executable.
     LinkConflict,
+    // Distinct from InstallFailed so callers can say *why*: the archive holds
+    // nothing this cask's stanzas let malt place.
+    NothingToPlace,
     // A restored version is back in place and recorded, but a command-line
     // link it declares could not be created: the caller reports, not undoes.
     LinksIncomplete,
@@ -1270,6 +1273,7 @@ pub const CaskInstaller = struct {
         return switch (e) {
             error.PreflightFailed => CaskError.PreflightFailed,
             error.LinkConflict => CaskError.LinkConflict,
+            error.NothingToPlace => CaskError.NothingToPlace,
             else => CaskError.InstallFailed,
         };
     }
@@ -1841,7 +1845,7 @@ pub const CaskInstaller = struct {
 
         const app_name = bundle_name orelse
             findAppInDir(self.io, extract_dir, &app_name_buf) orelse
-            return error.InstallFailed;
+            return error.NothingToPlace;
         return self.promoteBundle(extract_dir, app_name, app_dir, cask, stanzas);
     }
 
@@ -2171,7 +2175,7 @@ pub const CaskInstaller = struct {
         // without a copy.
         const app_name = bundle_name orelse
             findAppInDir(self.io, caskroom_ver, &app_name_buf) orelse
-            return error.InstallFailed;
+            return error.NothingToPlace;
 
         var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const src_app = std.mem.print(&src_buf, "{s}/{s}", .{ caskroom_ver, app_name }) catch
