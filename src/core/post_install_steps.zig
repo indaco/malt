@@ -1266,7 +1266,8 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
         const spec = resolveSpec(ctx, item.object, "paths") orelse continue;
         // ruby names the tree to retire as `gems/bundler-*`; a literal path
         // matches nothing, so the stale copy would survive every upgrade.
-        const paths = expandGlob(ctx, spec) orelse return false;
+        // A directory wildcard is not offered to a destructive step.
+        const paths = expandGlob(ctx, spec, false) orelse return false;
         for (paths) |path| {
             if (!confined(ctx, path)) return false;
             if (sharedDir(ctx, path)) {
@@ -1712,7 +1713,7 @@ fn stepSetPermissions(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     for (paths_val.array.items) |item| {
         if (item != .object) continue;
         const spec = resolveSpec(ctx, item.object, "paths") orelse return false;
-        const matches = expandGlob(ctx, spec) orelse return false;
+        const matches = expandGlob(ctx, spec, true) orelse return false;
         for (matches) |path| {
             // A path the formula declared but did not ship is a skip upstream
             // too: `existing_step_paths` filters before chmod runs.
@@ -1801,7 +1802,7 @@ fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     for (paths_val.array.items) |item| {
         if (item != .object) continue;
         const spec = resolveSpec(ctx, item.object, "paths") orelse return false;
-        const matches = expandGlob(ctx, spec) orelse return false;
+        const matches = expandGlob(ctx, spec, false) orelse return false;
         for (matches) |path| {
             if (!pathExists(ctx.io, path)) continue;
             if (!confined(ctx, path)) return false;
@@ -1814,9 +1815,11 @@ fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 }
 
 /// Expand the pattern shapes upstream's path specs actually use: a `*` leaf,
-/// optionally behind a `**/` descent. Null for anything else — an approximated
+/// optionally behind a `**/` descent. With `dir_wildcards`, also a `*` inside
+/// directory names (`v*/bin/tool`); only non-destructive steps ask for it.
+/// Null for anything else — an approximated
 /// pattern chmods the wrong files rather than failing.
-fn expandGlob(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
+fn expandGlob(ctx: StepsCtx, spec: []const u8, dir_wildcards: bool) ?[]const []const u8 {
     if (std.mem.findScalar(u8, spec, '*') == null) {
         const one = ctx.allocator.alloc([]const u8, 1) catch return null;
         one[0] = spec;
@@ -1824,14 +1827,16 @@ fn expandGlob(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
     }
     const dir_path = std.Io.Dir.path.dirname(spec) orelse return logUnexpandable(ctx, spec);
     const pattern = std.Io.Dir.path.basename(spec);
-    if (std.mem.findScalar(u8, pattern, '*') == null) return logUnexpandable(ctx, spec);
 
-    const root, const descend = if (std.mem.findScalar(u8, dir_path, '*') == null)
-        .{ dir_path, false }
-    else if (std.mem.endsWith(u8, dir_path, "/**"))
-        .{ dir_path[0 .. dir_path.len - "/**".len], true }
-    else
-        return logUnexpandable(ctx, spec);
+    const tail_descent = std.mem.endsWith(u8, dir_path, "/**");
+    const prefix = if (tail_descent) dir_path[0 .. dir_path.len - "/**".len] else dir_path;
+    // A recursive wildcard anywhere but the tail has no faithful expansion.
+    if (std.mem.find(u8, prefix, "**") != null) return logUnexpandable(ctx, spec);
+    if (std.mem.findScalar(u8, prefix, '*') != null) return if (tail_descent or !dir_wildcards) logUnexpandable(ctx, spec) else expandInnerGlob(ctx, dir_path, pattern);
+    // A literal leaf under a literal directory is not a glob at all.
+    if (std.mem.findScalar(u8, pattern, '*') == null) return logUnexpandable(ctx, spec);
+    const root = prefix;
+    const descend = tail_descent;
 
     // Every other step is confined at the point it mutates, which is enough
     // because it touches exactly the path it was given. Expansion is different:
@@ -1846,6 +1851,45 @@ fn expandGlob(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     collectMatches(ctx, root, pattern, descend, &out);
     return out.toOwnedSlice(ctx.allocator) catch null;
+}
+
+/// Wildcards inside directory names (`Tool v*/bin/tool`). Each `*` component
+/// matches one level; only real directories are entered, so a link cannot
+/// lead the walk out of the prefix.
+fn expandInnerGlob(ctx: StepsCtx, dir_path: []const u8, leaf: []const u8) ?[]const []const u8 {
+    const star = std.mem.findScalar(u8, dir_path, '*').?;
+    const cut = std.mem.lastIndexOfScalar(u8, dir_path[0..star], '/') orelse return logUnexpandable(ctx, dir_path);
+    const root = dir_path[0..cut];
+    // Same reasoning as the tail case: bound the root before the first opendir.
+    if (!withinBounds(ctx, root)) {
+        logViolation(ctx, root);
+        return null;
+    }
+    var out: std.ArrayList([]const u8) = .empty;
+    walkComponents(ctx, root, dir_path[cut + 1 ..], leaf, &out);
+    return out.toOwnedSlice(ctx.allocator) catch null;
+}
+
+fn walkComponents(
+    ctx: StepsCtx,
+    dir_path: []const u8,
+    rest: []const u8,
+    leaf: []const u8,
+    out: *std.ArrayList([]const u8),
+) void {
+    const slash = std.mem.findScalar(u8, rest, '/');
+    const comp = if (slash) |i| rest[0..i] else rest;
+    const tail = if (slash) |i| rest[i + 1 ..] else "";
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(ctx.io);
+    var iter = dir.iterate();
+    while (iter.next(ctx.io) catch null) |entry| {
+        if (entry.kind != .directory or !glob_match.match(comp, entry.name)) continue;
+        const child = std.Io.Dir.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
+        if (slash != null) {
+            walkComponents(ctx, child, tail, leaf, out);
+        } else collectMatches(ctx, child, leaf, false, out);
+    }
 }
 
 /// One entry per refusal: the callers cannot tell the shapes apart, so logging
@@ -5955,10 +5999,98 @@ test "set_permissions refuses a pattern it cannot expand faithfully" {
     var h = try TestHarness.init();
     defer h.deinit();
 
+    // A recursive wildcard anywhere but the tail has no faithful expansion.
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
-        \\[{"type":"set_permissions","paths":[{"base":"var","path":"a*/b/c"}],"permissions":"0755"}]
+        \\[{"type":"set_permissions","paths":[{"base":"var","path":"**/b/c*"}],"permissions":"0755"}]
     )));
     try testing.expect(h.flog.hasErrors());
+}
+
+test "set_permissions refuses a directory wildcard combined with a trailing descent" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"set_permissions","paths":[{"base":"var","path":"a*/**/f"}],"permissions":"0755"}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+}
+
+test "set_ownership refuses a wildcard inside a directory name" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"set_ownership","paths":[{"base":"var","path":"Keep*/data"}],"group":"everyone"}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+}
+
+test "remove refuses a wildcard inside a directory name and deletes nothing" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const victim = try a.print("{s}/var/Keep1/data", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(victim).?);
+    try atomic.atomicWriteFile(h.io, victim, "x\n");
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"remove","recursive":true,"paths":[{"base":"var","path":"Keep*/data"}]}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expect(pathExists(h.io, victim));
+}
+
+test "set_permissions expands a wildcard inside a directory name" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    // starnet++ names `StarNetv*CLI_MacOS/starnet++`: the version is in the directory.
+    const hit = try a.print("{s}/var/StarNetv2CLI_MacOS/tool", .{h.prefix});
+    const other = try a.print("{s}/var/StarNetv3CLI_MacOS/tool", .{h.prefix});
+    const miss = try a.print("{s}/var/Other/tool", .{h.prefix});
+    for ([_][]const u8{ hit, other, miss }) |path| {
+        try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(path).?);
+        try atomic.atomicWriteFile(h.io, path, "x\n");
+        try chmodPath(h.io, path, 0o644);
+    }
+    // A plain file with a matching name is not a directory to descend into.
+    try atomic.atomicWriteFile(h.io, try a.print("{s}/var/StarNetv9CLI_MacOS", .{h.prefix}), "x\n");
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"set_permissions","paths":[{"base":"var","path":"StarNetv*CLI_MacOS/tool"}],"permissions":"0755"}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(std.posix.mode_t, 0o755), try fileMode(h.io, hit));
+    try testing.expectEqual(@as(std.posix.mode_t, 0o755), try fileMode(h.io, other));
+    try testing.expectEqual(@as(std.posix.mode_t, 0o644), try fileMode(h.io, miss));
+}
+
+test "a directory wildcard with no match is a no-op, and a linked directory is not followed" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"set_permissions","paths":[{"base":"var","path":"Ghost*/tool"}],"permissions":"0755"}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+
+    // The link leads to a sibling directory; following it would chmod a file the glob never named.
+    const outside = try a.print("{s}/outside/tool", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.Io.Dir.path.dirname(outside).?);
+    try atomic.atomicWriteFile(h.io, outside, "x\n");
+    try chmodPath(h.io, outside, 0o644);
+    const var_dir = try a.print("{s}/var", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, var_dir);
+    try std.Io.Dir.symLinkAbsolute(h.io, std.Io.Dir.path.dirname(outside).?, try a.print("{s}/Linked1", .{var_dir}), .{});
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"set_permissions","paths":[{"base":"var","path":"Linked*/tool"}],"permissions":"0755"}]
+    )));
+    try testing.expectEqual(@as(std.posix.mode_t, 0o644), try fileMode(h.io, outside));
 }
 
 test "the frameworks base resolves inside the keg, matching upstream's prefix/Frameworks" {
