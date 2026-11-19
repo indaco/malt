@@ -59,7 +59,12 @@ printf '%s' '{"source":{"tap":"homebrew/core","versions":{"stable":"../../../can
   >"$brew_keg/INSTALL_RECEIPT.json"
 touch "$tmp/canary/SENTINEL"
 
-MALT_PREFIX="$prefix" HOMEBREW_PREFIX="$tmp/brew" \
+# A fresh 404 marker makes the API lookup answer NotFound with no dial, so the
+# local-Cellar fallback runs even when the network is down or flaky.
+mkdir -p "$prefix/cache/api"
+touch "$prefix/cache/api/formula_probe.404"
+
+MALT_PREFIX="$prefix" MALT_CACHE="$prefix/cache" HOMEBREW_PREFIX="$tmp/brew" \
   zig-out/bin/malt migrate >"$tmp/out" 2>&1 || true
 
 # `<prefix>/Cellar/probe/../../../canary` resolves to the canary dir: pre-fix
