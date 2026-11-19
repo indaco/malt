@@ -1762,6 +1762,18 @@ pub fn printCaskCaveats(allocator: std.mem.Allocator, prefix: []const u8, c: *co
     printExpandedCaveats(c.token, expanded, sink);
 }
 
+const skipped_unnamed_wrapper_fmt = "skipped a command wrapper for {s} (malt cannot run this form yet)";
+const skipped_wrapper_fmt = "skipped command wrapper {s} for {s} (malt cannot run this form yet)";
+
+/// The cask installs without the command link, so tell the user.
+pub fn warnSkippedWrappers(allocator: std.mem.Allocator, c: *const cask_mod.Cask, sink: OutputSink) void {
+    const names = cask_mod.skippedCommandWrappers(allocator, c.parsed.value.object) catch return;
+    defer allocator.free(names);
+    for (names) |name| {
+        if (name.len == 0) sink.warn(skipped_unnamed_wrapper_fmt, .{c.token}) else sink.warn(skipped_wrapper_fmt, .{ name, c.token });
+    }
+}
+
 pub fn printExpandedCaveats(name: []const u8, expanded: []const u8, sink: OutputSink) void {
     sink.info("Caveats for {s}:", .{name});
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, expanded, "\n"), '\n');
@@ -2065,6 +2077,7 @@ fn installCask(
     }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
+    warnSkippedWrappers(allocator, &cask, sink);
     printCaskCaveats(allocator, prefix, &cask, app_path, sink);
 }
 
@@ -2747,6 +2760,78 @@ const LineCapture = struct {
         self.lines.deinit(std.testing.allocator);
     }
 };
+
+const WarnCapture = struct {
+    lines: std.ArrayList([]u8) = .empty,
+
+    fn onWarn(ctx: ?*anyopaque, msg: []const u8) void {
+        const self: *WarnCapture = @ptrCast(@alignCast(ctx.?));
+        self.lines.append(std.testing.allocator, std.testing.allocator.dupe(u8, msg) catch return) catch {};
+    }
+    fn drop(_: ?*anyopaque, _: []const u8) void {}
+    fn sink(self: *WarnCapture) OutputSink {
+        return .{ .ctx = self, .writeInfo = drop, .writeWarn = onWarn, .writeSuccess = drop, .writeErr = drop };
+    }
+    fn deinit(self: *WarnCapture) void {
+        for (self.lines.items) |l| std.testing.allocator.free(l);
+        self.lines.deinit(std.testing.allocator);
+    }
+};
+
+fn expectSkippedLine(name: []const u8, token: []const u8, got: []const u8) !void {
+    const want = try std.fmt.allocPrint(std.testing.allocator, skipped_wrapper_fmt, .{ name, token });
+    defer std.testing.allocator.free(want);
+    try std.testing.expectEqualStrings(want, got);
+}
+
+test "warnSkippedWrappers names each skipped wrapper and the cask, and ignores a runnable one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"token":"android-ndk","version":"1","url":"https://e.test/x.zip","artifacts":[
+        \\{"command_wrapper":["ok",{"executable":"bin/ok"}]},
+        \\{"command_wrapper":["ndk-build",{"executable":"$HOMEBREW_PREFIX/share/ndk/ndk-build"}]},
+        \\{"command_wrapper":["gogs",{"content":"script body"}]}]}
+    ;
+    var c = try cask_mod.parseCask(arena.allocator(), json);
+    defer c.deinit();
+
+    var cap: WarnCapture = .{};
+    defer cap.deinit();
+    warnSkippedWrappers(std.testing.allocator, &c, cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+    try expectSkippedLine("ndk-build", "android-ndk", cap.lines.items[0]);
+    try expectSkippedLine("gogs", "android-ndk", cap.lines.items[1]);
+}
+
+test "warnSkippedWrappers warns without a name when the name is unsafe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"token":"t","version":"1","url":"https://e.test/x.zip","artifacts":[
+        \\{"command_wrapper":["a/b",{"content":"a"}]}]}
+    ;
+    var c = try cask_mod.parseCask(arena.allocator(), json);
+    defer c.deinit();
+    var cap: WarnCapture = .{};
+    defer cap.deinit();
+    warnSkippedWrappers(std.testing.allocator, &c, cap.sink());
+    try std.testing.expectEqual(@as(usize, 1), cap.lines.items.len);
+    const want = try std.fmt.allocPrint(std.testing.allocator, skipped_unnamed_wrapper_fmt, .{"t"});
+    defer std.testing.allocator.free(want);
+    try std.testing.expectEqualStrings(want, cap.lines.items[0]);
+}
+
+test "warnSkippedWrappers is silent without wrappers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try cask_mod.parseCask(arena.allocator(), "{\"token\":\"x\",\"version\":\"1\",\"url\":\"https://e.test/x.pkg\"}");
+    defer c.deinit();
+    var cap: WarnCapture = .{};
+    defer cap.deinit();
+    warnSkippedWrappers(std.testing.allocator, &c, cap.sink());
+    try std.testing.expectEqual(@as(usize, 0), cap.lines.items.len);
+}
 
 test "printCaveats writes a header then one expanded line per text line" {
     var cap: LineCapture = .{};

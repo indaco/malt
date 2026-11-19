@@ -2036,6 +2036,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     }
 
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });
+    install_mod.warnSkippedWrappers(allocator, &parsed_cask, install_sink_mod.terminal);
     return .upgraded;
 }
 
