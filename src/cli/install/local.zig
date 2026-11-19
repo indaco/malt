@@ -1633,6 +1633,7 @@ fn materializeTapCask(
     }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
+    install_mod.warnSkippedWrappers(allocator, &cask, sink);
     install_mod.printCaskCaveats(allocator, prefix_z, &cask, app_path, sink);
 }
 

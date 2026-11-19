@@ -1,0 +1,13 @@
+[drydock]
+	name = malt
+	docs = docs
+	preset = zig
+	tdd = strict
+	tracker = fizzy
+	cardPrefix = false
+	autoCard = true
+	agent = claude
+	thinkModel = opus
+	thinkEffort = high
+	buildModel = sonnet
+	buildAdvisor = opus
