@@ -2186,3 +2186,100 @@ fn expectContentWrapperRuns(io: std.Io, path: []const u8) !void {
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     try testing.expectEqualStrings("ran:hi", result.stdout);
 }
+
+const pad_content_json =
+    \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"no_check",
+    \\ "artifacts":[{"app":["Pad.app"]},
+    \\  {"command_wrapper":["pad-run",{"content":"#!/bin/sh\n'$HOMEBREW_PREFIX/Caskroom/pad/1.0/Extras/run.sh' \"$@\"\n"}],"target":"$HOMEBREW_PREFIX/bin/pad-run"}]}
+;
+
+test "an app cask keeps the payload its content script runs, through install and uninstall" {
+    var fx = try Fixture.init("app_content_flow");
+    defer fx.deinit();
+    const a = fx.arena.allocator();
+    // The appdir is pinned under the fixture so the bundle never lands in /Applications.
+    const block = try a.allocSentinel(?[*:0]const u8, 1, null);
+    block[0] = (try a.printSentinel("MALT_APPDIR={s}/Applications", .{fx.base}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, pad_content_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("stage/Pad.app/Contents/MacOS/pad"), "bin");
+    try putFile(io, fx.p("stage/Extras/run.sh"), "#!/bin/sh\nprintf 'ran:%s' \"$1\"\n");
+    try runTool(&.{ "/bin/chmod", "755", fx.p("stage/Extras/run.sh") });
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const archive = fx.p("cache/Cask/pad-1.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), archive });
+    const digest = try cask.hashFileSha256(io, archive);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = archive;
+    const placed = try installer.install(&c);
+    defer testing.allocator.free(placed);
+    try cask.recordInstall(&db, &c, placed, null);
+
+    // The bundle moved to the appdir, but the script's payload must stay under the Caskroom.
+    try testing.expect(exists(io, fx.p("Applications/Pad.app/Contents/MacOS/pad")));
+    try testing.expect(exists(io, fx.p("Caskroom/pad/1.0/Extras/run.sh")));
+    try expectContentWrapperRuns(io, fx.p("bin/pad-run"));
+
+    try installer.uninstall("pad");
+    try testing.expect(!exists(io, fx.p("bin/pad-run")));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Extras/run.sh")));
+}
+
+test "a restore with the new version's stanzas links a script that still names the new version" {
+    // Pins a known limit: a version installed before the side-car existed is
+    // restored from the new version's stanzas, so its script keeps their paths.
+    var fx = try Fixture.init("restore_stand_in");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, gogs_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("stage/gogs/gogs"), "#!/bin/sh\nprintf 'ran:%s' \"$1\"\n");
+    try runTool(&.{ "/bin/chmod", "755", fx.p("stage/gogs/gogs") });
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const archive = fx.p("cache/Cask/gogs-0.14.4.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), archive });
+    const digest = try cask.hashFileSha256(io, archive);
+    c.sha256 = &digest;
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.retain_history = true;
+    installer.prefetched_artifact = archive;
+    const placed = try installer.install(&c);
+    defer testing.allocator.free(placed);
+    try cask.recordInstall(&db, &c, placed, null);
+    try installer.uninstall("gogs");
+    installer.prefetched_artifact = null;
+    // An install from before the side-car existed has no record of its own binaries.
+    try std.Io.Dir.cwd().deleteFile(io, fx.p("cache/Cask/gogs-0.14.4.binaries"));
+
+    const newer_json = try std.mem.replaceOwned(u8, testing.allocator, gogs_json, "0.14.4", "0.14.5");
+    defer testing.allocator.free(newer_json);
+    var newer = try cask.parseCask(testing.allocator, newer_json);
+    defer newer.deinit();
+    const stand_in = try cask.collectBinaryArtifacts(testing.allocator, newer.parsed.value.object);
+    defer if (stand_in) |entries| testing.allocator.free(entries);
+    installer.binary_entries_override = stand_in;
+    try installer.reinstallFromHistory("gogs", "0.14.4");
+
+    const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("bin/gogs"), 1 << 16);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.find(u8, body, "Caskroom/gogs/0.14.5") != null);
+}
