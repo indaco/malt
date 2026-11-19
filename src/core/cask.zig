@@ -1751,7 +1751,7 @@ pub const CaskInstaller = struct {
         var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
             findAppInDir(self.io, mount_point, &app_name_buf) orelse
-            return error.InstallFailed;
+            return error.NothingToPlace;
 
         // A helper beside the bundle is unmounted with the volume unless the
         // stage is copied first.
