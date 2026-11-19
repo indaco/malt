@@ -9,6 +9,7 @@ pub const install_name_tool = "/usr/bin/install_name_tool";
 pub const unzip = "/usr/bin/unzip";
 pub const tar = "/usr/bin/tar";
 pub const ditto = "/usr/bin/ditto";
+pub const chmod = "/bin/chmod";
 pub const hdiutil = "/usr/bin/hdiutil";
 pub const sudo = "/usr/bin/sudo";
 pub const installer = "/usr/sbin/installer";
@@ -23,9 +24,9 @@ pub const security = "/usr/bin/security";
 
 test "every trusted system tool uses an absolute path" {
     const paths = [_][]const u8{
-        codesign,  install_name_tool, unzip, tar,       ditto, hdiutil, sudo,
-        installer, install,           ln,    launchctl, pgrep, sw_vers, killall,
-        pkill,     security,
+        codesign,  install_name_tool, unzip, tar,       ditto, chmod,   hdiutil, sudo,
+        installer, install,           ln,    launchctl, pgrep, sw_vers, killall, pkill,
+        security,
     };
     for (paths) |path| {
         try std.testing.expect(std.Io.Dir.path.isAbsolute(path));

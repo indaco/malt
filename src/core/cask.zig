@@ -758,6 +758,19 @@ const appdir_var = "$APPDIR/";
 /// column, so the extra links need their own record for uninstall.
 pub const LINKS_MANIFEST_NAME = ".malt-links";
 
+/// Whether every stanza lives inside a bundle and none names `app_name`:
+/// the volume's bundle is then not the one the cask declares.
+fn appdirStanzasExclude(entries: ?[]const BinaryEntry, app_name: []const u8) bool {
+    const list = entries orelse return false;
+    if (list.len == 0) return false;
+    var names_it = false;
+    for (list) |e| {
+        if (!std.mem.startsWith(u8, e.source, appdir_var)) return false;
+        if (std.mem.eql(u8, firstComponent(e.source[appdir_var.len..]), firstComponent(app_name))) names_it = true;
+    }
+    return !names_it;
+}
+
 /// True when any stanza links from the Caskroom copy rather than from a
 /// placed bundle: a binary-only cask links everything from there, an app
 /// cask keeps a copy of its stage for these.
@@ -771,6 +784,9 @@ fn hasCaskroomBinary(entries: []const BinaryEntry) bool {
 fn linksFromCaskroom(source: []const u8) bool {
     return !std.mem.startsWith(u8, source, appdir_var) and !std.mem.startsWith(u8, source, homebrew_prefix_var);
 }
+
+/// A `<prefix>/bin` symlink a link pass replaced, kept so a failed pass can put it back.
+const ReplacedLink = struct { link: []u8, target: []u8 };
 
 fn firstComponent(path: []const u8) []const u8 {
     return path[0 .. std.mem.findScalar(u8, path, '/') orelse path.len];
@@ -1758,6 +1774,62 @@ pub const CaskInstaller = struct {
         return path;
     }
 
+    /// Whether the regular files under `root` total at most `limit` bytes.
+    /// Symlinks are not followed. A directory that cannot be opened is
+    /// skipped, as `ditto` cannot copy it either; any other failure to read
+    /// the volume counts as over budget.
+    fn volumeWithin(self: *CaskInstaller, root: []const u8, limit: u64) bool {
+        var dir = std.Io.Dir.openDirAbsolute(self.io, root, .{ .iterate = true }) catch return false;
+        defer dir.close(self.io);
+        var walker = dir.walkSelectively(self.allocator) catch return false;
+        defer {
+            // deinit frees memory only; an early return leaves entered dirs open.
+            if (walker.stack.items.len > 1) {
+                for (walker.stack.items[1..]) |item| item.iter.reader.dir.close(self.io);
+            }
+            walker.deinit();
+        }
+        var total: u64 = 0;
+        while (walker.next(self.io) catch return false) |entry| {
+            switch (entry.kind) {
+                .file => {
+                    const st = entry.dir.statFile(self.io, entry.basename, .{ .follow_symlinks = false }) catch return false;
+                    total +|= st.size;
+                    if (total > limit) return false;
+                },
+                .directory => walker.enter(self.io, entry) catch |e| switch (e) {
+                    error.AccessDenied, error.PermissionDenied => {},
+                    else => return false,
+                },
+                else => {},
+            }
+        }
+        return true;
+    }
+
+    /// Copy a tree out of a volume or stage. The source's ACLs and group or
+    /// other write bits must not reach the install.
+    fn copyTree(self: *CaskInstaller, src: []const u8, dst: []const u8) !void {
+        const copy_argv = [_][]const u8{ system_tools.ditto, "--noacl", src, dst };
+        child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
+        const mode_argv = [_][]const u8{ system_tools.chmod, "-R", "go-w", dst };
+        child_mod.runOrFail(self.io, self.allocator, &mode_argv) catch return error.InstallFailed;
+    }
+
+    /// A volume with no bundle: keep the entries the binary stanzas name under
+    /// the Caskroom (the volume is unmounted on return) and link from there.
+    fn placeBinariesOnly(self: *CaskInstaller, stage: []const u8, cask: *const Cask, entries: []const BinaryEntry) ![]const u8 {
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const caskroom_ver = std.mem.print(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
+            return error.InstallFailed;
+        // A leftover copy may be partial or stale (a killed run, a forced
+        // reinstall), so the entries are copied fresh.
+        self.wipeCaskroomVersion(cask);
+        if (!try self.keepStageCopy(cask, stage, "", entries)) return error.NothingToPlace;
+        errdefer self.wipeCaskroomVersion(cask);
+        return (try self.linkStanzas(cask, null, caskroom_ver, entries)) orelse error.InstallFailed;
+    }
+
     fn installDmg(self: *CaskInstaller, dmg_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
         // A token-derived path is guessable, so it can be planted and then
         // adopted - mounted over, and removed on teardown.
@@ -1783,18 +1855,29 @@ pub const CaskInstaller = struct {
         // A read-only mount is the staged tree here; a step that writes into
         // it fails loudly, as it would on any read-only stage.
         try self.preflight(cask, mount_point);
+        // Nothing vouches for unpinned bytes, so bound what the volume holds,
+        // as the zip path does.
+        if (artifactIntegrity(cask.sha256) == .transport_only and !self.volumeWithin(mount_point, self.unverified_zip_budget))
+            return error.InstallFailed;
 
         // Find the .app bundle name (from JSON artifacts or by scanning mount point).
         // app_name_buf owns the fallback name past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
-        const app_name = parseAppName(cask.parsed.value.object) orelse
-            findAppInDir(self.io, mount_point, &app_name_buf) orelse
-            return error.NothingToPlace;
-
         // A helper beside the bundle is unmounted with the volume unless the
         // stage is copied first.
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
+        // A declared or restored bundle wins; a stray .app on a binary-only
+        // volume must not replace an installed one.
+        const bundle_name = try self.placedBundleName(cask, mount_point, &app_name_buf);
+        if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries))
+            return self.placeBinariesOnly(mount_point, cask, entries);
+        const app_name = bundle_name orelse
+            findAppInDir(self.io, mount_point, &app_name_buf) orelse
+            return error.NothingToPlace;
+        // A found bundle is a guess: not on a restore whose row placed none,
+        // and not when the stanzas name another one.
+        if (bundle_name == null and (self.restoring or appdirStanzasExclude(stanzas, app_name))) return error.NothingToPlace;
         return self.promoteBundle(mount_point, app_name, app_dir, cask, stanzas);
     }
 
@@ -1876,8 +1959,7 @@ pub const CaskInstaller = struct {
             std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
             // Nothing else reclaims the copy if a link below fails.
             errdefer self.wipeCaskroomVersion(cask);
-            const copy_argv = [_][]const u8{ system_tools.ditto, extract_dir, caskroom_ver };
-            child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
+            try self.copyTree(extract_dir, caskroom_ver);
             return (try self.linkStanzas(cask, null, caskroom_ver, entries)) orelse error.InstallFailed;
         };
 
@@ -1914,13 +1996,16 @@ pub const CaskInstaller = struct {
         cask: *const Cask,
         stanzas: ?[]const BinaryEntry,
     ) ![]const u8 {
-        // Before the bundle moves, so a failed copy leaves nothing placed.
-        const kept_copy = try self.keepStageCopy(cask, stage, app_name, stanzas orelse &.{});
-        errdefer if (kept_copy) self.wipeCaskroomVersion(cask);
-
         var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const src_app = std.mem.print(&src_buf, "{s}/{s}", .{ stage, app_name }) catch
             return error.InstallFailed;
+        // A bundle that is a link would copy whatever it points at.
+        const top = std.Io.Dir.cwd().statFile(self.io, src_app, .{ .follow_symlinks = false }) catch return error.InstallFailed;
+        if (top.kind == .sym_link) return error.InstallFailed;
+
+        // Before the bundle moves, so a failed copy leaves nothing placed.
+        const kept_copy = try self.keepStageCopy(cask, stage, app_name, stanzas orelse &.{});
+        errdefer if (kept_copy) self.wipeCaskroomVersion(cask);
 
         const dst_app = try self.allocator.print("{s}/{s}", .{ app_dir, app_name });
         errdefer self.allocator.free(dst_app);
@@ -1929,8 +2014,7 @@ pub const CaskInstaller = struct {
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
-        const ditto_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
-        child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
+        try self.copyTree(src_app, dst_app);
         return dst_app;
     }
 
@@ -1974,8 +2058,7 @@ pub const CaskInstaller = struct {
                 std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
                 copied = true;
             }
-            const copy_argv = [_][]const u8{ system_tools.ditto, src, dst };
-            child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
+            try self.copyTree(src, dst);
         }
         return copied;
     }
@@ -2271,9 +2354,25 @@ pub const CaskInstaller = struct {
     fn linkStanzas(self: *CaskInstaller, cask: *const Cask, bundle: ?[]const u8, caskroom_ver: []const u8, entries: []const BinaryEntry) !?[]const u8 {
         var manifest: std.ArrayList(u8) = .empty;
         defer manifest.deinit(self.allocator);
+        // A link this pass replaces is put back when a later stanza fails.
+        var replaced: std.ArrayList(ReplacedLink) = .empty;
+        defer {
+            for (replaced.items) |r| {
+                self.allocator.free(r.link);
+                self.allocator.free(r.target);
+            }
+            replaced.deinit(self.allocator);
+        }
         errdefer {
             var it = std.mem.splitScalar(u8, manifest.items, '\n');
             while (it.next()) |line| if (line.len != 0) std.Io.Dir.deleteFileAbsolute(self.io, line) catch {};
+            var i = replaced.items.len;
+            while (i > 0) {
+                i -= 1;
+                const r = replaced.items[i];
+                std.Io.Dir.deleteFileAbsolute(self.io, r.link) catch {};
+                std.Io.Dir.symLinkAbsolute(self.io, r.target, r.link, .{}) catch {};
+            }
         }
         var first: ?[]const u8 = null;
         errdefer if (first) |f| self.allocator.free(f);
@@ -2288,6 +2387,7 @@ pub const CaskInstaller = struct {
             const root = if (in_bundle) bundle orelse return error.InstallFailed else caskroom_ver;
             const root_kind: BinaryRoot = if (in_bundle) .bundle else .caskroom;
             const name = e.target orelse std.Io.Dir.path.basename(e.source);
+            if (path_component.isPathComponent(name)) self.noteReplacedLink(&replaced, name);
             const link = if (e.wrapper) |options|
                 try self.linkCommandWrapper(cask.token, caskroom_ver, root, root_kind, e.source, name, options)
             else
@@ -2304,6 +2404,25 @@ pub const CaskInstaller = struct {
         }) catch return error.InstallFailed;
         cask_font.writeManifest(self.io, path, manifest.items) catch return error.InstallFailed;
         return first;
+    }
+
+    /// Remember the symlink at `<prefix>/bin/<name>`, if any, before it is replaced.
+    /// Best effort: a failure here only means that link is not restored.
+    fn noteReplacedLink(self: *CaskInstaller, list: *std.ArrayList(ReplacedLink), name: []const u8) void {
+        const link = self.allocator.print("{s}/bin/{s}", .{ self.prefix, name }) catch return;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const n = std.Io.Dir.readLinkAbsolute(self.io, link, &buf) catch {
+            self.allocator.free(link);
+            return;
+        };
+        const target = self.allocator.dupe(u8, buf[0..n]) catch {
+            self.allocator.free(link);
+            return;
+        };
+        list.append(self.allocator, .{ .link = link, .target = target }) catch {
+            self.allocator.free(link);
+            self.allocator.free(target);
+        };
     }
 
     /// What a `binary` source resolves against: the Caskroom copy of the
@@ -3667,6 +3786,292 @@ test "parseCask caps a version at the filename limit it has to fit" {
             try std.testing.expectError(CaskError.ParseFailed, parseCask(a, json));
         }
     }
+}
+
+var dmg_test_seq: std.atomic.Value(u32) = .init(0);
+
+test "installDmg installs a disk image that ships only a binary" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try a.printSentinel("/tmp/malt_cask_dmg_bin_{d}_{d}", .{ std.c.getpid(), dmg_test_seq.fetchAdd(1, .monotonic) }, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try a.printSentinel("{s}/prefix", .{base}, 0);
+    const source_root = try a.print("{s}/source", .{base});
+    const dmg_path = try a.print("{s}/vault.dmg", .{base});
+    const app_dir = try a.print("{s}/Applications", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/tmp", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, source_root);
+    try std.Io.Dir.cwd().createDirPath(io, app_dir);
+    const exe = try a.print("{s}/vault", .{source_root});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = exe, .data = "echo vault\n" });
+    try child_mod.runOrFail(io, a, &.{ "/bin/chmod", "755", exe });
+    try child_mod.runOrFail(io, a, &.{ "/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", source_root, "-volname", "VaultVol", dmg_path });
+
+    var cask = try parseCask(a,
+        \\{"token":"vault","name":["Vault"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"binary":["vault"],"target":"$HOMEBREW_PREFIX/bin/vault"}]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+    };
+    _ = try installer.installDmg(dmg_path, app_dir, &cask);
+
+    // The volume is unmounted on return, so the link must lead into the Caskroom copy.
+    const copy = try a.print("{s}/Caskroom/vault/1.0/vault", .{prefix});
+    try std.Io.Dir.cwd().access(io, copy, .{});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try std.Io.Dir.cwd().readLink(io, try a.print("{s}/bin/vault", .{prefix}), &buf);
+    try std.testing.expect(std.mem.endsWith(u8, buf[0..len], "Caskroom/vault/1.0/vault"));
+
+    // A volume with neither a bundle nor a binary stanza still has nothing to place.
+    var empty = try parseCask(a,
+        \\{"token":"nothing","name":["Nothing"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"zap":[]}]}
+    );
+    defer empty.deinit();
+    try std.testing.expectError(error.NothingToPlace, installer.installDmg(dmg_path, app_dir, &empty));
+
+    // Pin: stanzas that name nothing under the Caskroom leave nothing to place
+    // (this already held before the binary-only path existed).
+    var appdir_only = try parseCask(a,
+        \\{"token":"nope","name":["Nope"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"binary":["$APPDIR/Foo.app/x"],"target":"$HOMEBREW_PREFIX/bin/nope"}]}
+    );
+    defer appdir_only.deinit();
+    try std.testing.expectError(error.NothingToPlace, installer.installDmg(dmg_path, app_dir, &appdir_only));
+
+    // Only the prefix's own files are named: nothing on the volume to keep.
+    var prefix_only = try parseCask(a,
+        \\{"token":"pfx","name":["Pfx"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"binary":["$HOMEBREW_PREFIX/bin/other"]}]}
+    );
+    defer prefix_only.deinit();
+    try std.testing.expectError(error.NothingToPlace, installer.installDmg(dmg_path, app_dir, &prefix_only));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, try a.print("{s}/Caskroom/pfx", .{prefix}), .{}));
+
+    // A link that fails after the copy takes the copy with it.
+    var bad_link = try parseCask(a,
+        \\{"token":"badlink","name":["Bad"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"binary":["vault/nothere"]}]}
+    );
+    defer bad_link.deinit();
+    try std.testing.expectError(error.InstallFailed, installer.installDmg(dmg_path, app_dir, &bad_link));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, try a.print("{s}/Caskroom/badlink", .{prefix}), .{}));
+
+    // An unpinned image larger than the budget is refused before any copy.
+    installer.unverified_zip_budget = 4;
+    try std.testing.expectError(error.InstallFailed, installer.installDmg(dmg_path, app_dir, &cask));
+
+    // A directory the walk cannot open does not end the count before the big file.
+    const walk_root = try a.print("{s}/walk", .{base});
+    const locked = try a.print("{s}/locked", .{walk_root});
+    try std.Io.Dir.cwd().createDirPath(io, locked);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/big", .{walk_root}), .data = "0123456789" });
+    try child_mod.runOrFail(io, a, &.{ system_tools.chmod, "000", locked });
+    defer child_mod.runOrFail(io, a, &.{ system_tools.chmod, "700", locked }) catch {};
+    try std.testing.expect(!installer.volumeWithin(walk_root, 4));
+    try std.testing.expect(installer.volumeWithin(walk_root, 4096));
+}
+
+test "installDmg keeps an installed app when a binary-only volume holds a stray bundle, and retries over a leftover copy" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try a.printSentinel("/tmp/malt_cask_dmg_stray_{d}_{d}", .{ std.c.getpid(), dmg_test_seq.fetchAdd(1, .monotonic) }, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try a.printSentinel("{s}/prefix", .{base}, 0);
+    const source_root = try a.print("{s}/source", .{base});
+    const dmg_path = try a.print("{s}/vault.dmg", .{base});
+    const app_dir = try a.print("{s}/Applications", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/tmp", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/Stray.app", .{source_root}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/Stray.app", .{app_dir}));
+    const exe = try a.print("{s}/vault", .{source_root});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = exe, .data = "echo vault\n" });
+    try child_mod.runOrFail(io, a, &.{ "/bin/chmod", "755", exe });
+    const installed_marker = try a.print("{s}/Stray.app/keep", .{app_dir});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = installed_marker, .data = "x" });
+    try child_mod.runOrFail(io, a, &.{ "/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", source_root, "-volname", "StrayVol", dmg_path });
+
+    var cask = try parseCask(a,
+        \\{"token":"vault","name":["Vault"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"binary":["vault"],"target":"$HOMEBREW_PREFIX/bin/vault"}]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+    };
+    _ = try installer.installDmg(dmg_path, app_dir, &cask);
+    // The stray bundle is not the cask's, so the installed one stays.
+    try std.Io.Dir.cwd().access(io, installed_marker, .{});
+
+    // A leftover Caskroom copy (a crash between copy and link) must not block a retry.
+    try std.Io.Dir.cwd().deleteFile(io, try a.print("{s}/bin/vault", .{prefix}));
+    _ = try installer.installDmg(dmg_path, app_dir, &cask);
+    try std.Io.Dir.cwd().access(io, try a.print("{s}/bin/vault", .{prefix}), .{});
+
+    // A copy a killed run left half-written is replaced, not trusted.
+    const kept = try a.print("{s}/Caskroom/vault/1.0/vault", .{prefix});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = kept, .data = "x" });
+    _ = try installer.installDmg(dmg_path, app_dir, &cask);
+    var content: [64]u8 = undefined;
+    const got = try std.Io.Dir.cwd().readFile(io, kept, &content);
+    try std.testing.expectEqualStrings("echo vault\n", got);
+
+    // Every stanza sits in a bundle the volume lacks: its stray bundle is not adopted.
+    var other_app = try parseCask(a,
+        \\{"token":"other","name":["Other"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[{"binary":["$APPDIR/Other.app/x"],"target":"$HOMEBREW_PREFIX/bin/other"}]}
+    );
+    defer other_app.deinit();
+    try std.testing.expectError(error.NothingToPlace, installer.installDmg(dmg_path, app_dir, &other_app));
+    try std.Io.Dir.cwd().access(io, installed_marker, .{});
+}
+
+test "installDmg on a restore keeps an installed app when the volume holds a stray bundle" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try a.printSentinel("/tmp/malt_cask_dmg_restore_{d}_{d}", .{ std.c.getpid(), dmg_test_seq.fetchAdd(1, .monotonic) }, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try a.printSentinel("{s}/prefix", .{base}, 0);
+    const source_root = try a.print("{s}/source", .{base});
+    const dmg_path = try a.print("{s}/vault.dmg", .{base});
+    const app_dir = try a.print("{s}/Applications", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/tmp", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/Stray.app", .{source_root}));
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/Stray.app", .{app_dir}));
+    const installed_marker = try a.print("{s}/Stray.app/keep", .{app_dir});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = installed_marker, .data = "x" });
+    try child_mod.runOrFail(io, a, &.{ "/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", source_root, "-volname", "RestoreVol", dmg_path });
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    // The binary-only row shape: app_path sits under <prefix>/bin/.
+    const row = try a.printSentinel("INSERT INTO casks(token,version,app_path) VALUES('vault','1.0','{s}/bin/vault');", .{prefix}, 0);
+    try db.exec(row);
+
+    // No bundle and no Caskroom binary: only the restore guard keeps the volume's stray bundle out.
+    var cask = try parseCask(a,
+        \\{"token":"vault","name":["Vault"],"version":"1.0","url":"https://example.invalid/vault.dmg","sha256":"no_check","artifacts":[]}
+    );
+    defer cask.deinit();
+    var installer = CaskInstaller.init(io, .empty, a, &db, prefix, unused_cache_dir);
+    installer.restoring = true;
+    try std.testing.expectError(error.NothingToPlace, installer.installDmg(dmg_path, app_dir, &cask));
+    try std.Io.Dir.cwd().access(io, installed_marker, .{});
+}
+
+test "promoteBundle refuses a bundle that is a symlink, and copies without group or other write" {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try a.printSentinel("/tmp/malt_cask_promote_{d}_{d}", .{ std.c.getpid(), dmg_test_seq.fetchAdd(1, .monotonic) }, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const stage = try a.print("{s}/stage", .{base});
+    const app_dir = try a.print("{s}/apps", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, stage);
+    try std.Io.Dir.cwd().createDirPath(io, app_dir);
+    try std.Io.Dir.symLinkAbsolute(io, "/etc", try a.print("{s}/Evil.app", .{stage}), .{});
+    const real = try a.print("{s}/Real.app/x", .{stage});
+    try std.Io.Dir.cwd().createDirPath(io, std.Io.Dir.path.dirname(real).?);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = real, .data = "x" });
+    try child_mod.runOrFail(io, a, &.{ system_tools.chmod, "666", real });
+
+    var cask = try parseCask(a,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.dmg","sha256":"no_check","artifacts":[]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = try a.printSentinel("{s}/prefix", .{base}, 0),
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+    };
+    try std.testing.expectError(error.InstallFailed, installer.promoteBundle(stage, "Evil.app", app_dir, &cask, null));
+    try std.Io.Dir.cwd().access(io, stage, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, try a.print("{s}/Evil.app", .{app_dir}), .{}));
+
+    _ = try installer.promoteBundle(stage, "Real.app", app_dir, &cask, null);
+    const st = try std.Io.Dir.cwd().statFile(io, try a.print("{s}/Real.app/x", .{app_dir}), .{});
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(st.permissions) & 0o022);
+}
+
+test "linkStanzas puts a replaced link back when a later stanza fails" {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = try a.printSentinel("/tmp/malt_cask_relink_{d}_{d}", .{ std.c.getpid(), dmg_test_seq.fetchAdd(1, .monotonic) }, 0);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    const old = try a.print("{s}/Caskroom/pad/0.9/tool", .{prefix});
+    const new_ver = try a.print("{s}/Caskroom/pad/1.0", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, std.Io.Dir.path.dirname(old).?);
+    try std.Io.Dir.cwd().createDirPath(io, new_ver);
+    try std.Io.Dir.cwd().createDirPath(io, try a.print("{s}/bin", .{prefix}));
+    for ([_][]const u8{ old, try a.print("{s}/tool", .{new_ver}) }) |f| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = f, .data = "echo t\n" });
+    }
+    const link = try a.print("{s}/bin/tool", .{prefix});
+    // Links hold resolved paths, which is how ownership is judged.
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old_real = try a.dupe(u8, real_buf[0..try std.Io.Dir.realPathFileAbsolute(io, old, &real_buf)]);
+    try std.Io.Dir.symLinkAbsolute(io, old_real, link, .{});
+
+    var cask = try parseCask(a,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.dmg","sha256":"no_check","artifacts":[]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+    };
+    const entries = [_]BinaryEntry{ .{ .source = "tool", .target = null }, .{ .source = "gone/x", .target = null } };
+    try std.testing.expectError(error.InstallFailed, installer.linkStanzas(&cask, null, new_ver, &entries));
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(io, link, &buf);
+    try std.testing.expectEqualStrings(old_real, buf[0..n]);
 }
 
 test "installDmg does not adopt a predictable pre-existing mount point" {
