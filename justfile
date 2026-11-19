@@ -43,6 +43,7 @@ regressions-static:
     @./scripts/regressions/clean-misses-tmpdir-test-scratch.sh
     @./scripts/regressions/cask-upgrade-deletes-app-before-download.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/cask-empty-install-reason-on-upgrade-and-rollback.sh
+    @MALT_STATIC_ONLY=1 ./scripts/regressions/cask-binary-only-dmg-installs-binary-only-dmg-cask-has-nothing-to-install.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/cask-wrapper-skip-warning-skipped-command-wrappers-install-silently.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/cask-wrapper-only-fails-with-reason-wrapper-only-cask-install-fails-opaquely.sh
     @./scripts/regressions/tap-cask-upgrade-deletes-app-before-pkg-sudo-confirm.sh
