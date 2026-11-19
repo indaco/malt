@@ -23,3 +23,6 @@ src/core/post_install_steps\.zig:[0-9]+:.*"args", "sudo"
 src/core/post_install_steps\.zig:[0-9]+:.*"sudo":
 # A generated wrapper's literal shebang is file content, never a spawn argv.
 src/core/cask\.zig:[0-9]+: *try bytes\.appendSlice\(self\.allocator, "#!/bin/sh\\n"\);
+# `chmod` is a DSL keyword naming a builtin, never an argv.
+src/core/dsl/parser\.zig:[0-9]+: *\.\{ "chmod", \{\} \},
+src/core/dsl/builtins/root\.zig:[0-9]+: *\.\{ "chmod", fileutils\.chmod \},
