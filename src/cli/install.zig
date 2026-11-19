@@ -1784,6 +1784,11 @@ pub fn reportCaskInstallFailure(allocator: std.mem.Allocator, c: *const cask_mod
     sink.err("Failed to install cask {s}: {s}", .{ c.token, @errorName(e) });
 }
 
+/// The reason an install error shows to the user; upgrade and rollback have no cask to name.
+pub fn installErrorText(e: anyerror) []const u8 {
+    return if (e == error.NothingToPlace) "nothing malt can install" else @errorName(e);
+}
+
 pub fn printExpandedCaveats(name: []const u8, expanded: []const u8, sink: OutputSink) void {
     sink.info("Caveats for {s}:", .{name});
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, expanded, "\n"), '\n');
@@ -2817,6 +2822,11 @@ test "reportCaskInstallFailure gives one line when an empty install has no wrapp
     reportCaskInstallFailure(std.testing.allocator, &c, error.NothingToPlace, cap.sink());
     try std.testing.expectEqual(@as(usize, 1), cap.lines.items.len);
     try std.testing.expectEqualStrings("cask bare has nothing malt can install", cap.lines.items[0]);
+}
+
+test "installErrorText explains an empty install and keeps other names" {
+    try std.testing.expectEqualStrings("nothing malt can install", installErrorText(error.NothingToPlace));
+    try std.testing.expectEqualStrings("InstallFailed", installErrorText(error.InstallFailed));
 }
 
 test "reportCaskInstallFailure keeps the error name for other failures and skips the wrapper warning" {

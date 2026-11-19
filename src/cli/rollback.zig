@@ -496,7 +496,7 @@ fn dispatchCask(
         // The version is back and recorded; only its links are missing.
         error.LinksIncomplete => output.warn("{s} {s} is in place, but its command-line links could not be created", .{ token, target_pkg_version }),
         else => {
-            output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
+            output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, install_mod.installErrorText(e) });
             if (installer.conflictPath()) |p| output.err("{s} is not this cask's link; remove it first", .{p});
             return error.Aborted;
         },
