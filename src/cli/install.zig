@@ -2795,7 +2795,7 @@ const FailureCapture = struct {
 
 const gogs_wrapper_json =
     \\{"token":"gogs","version":"1","url":"https://e.test/x.zip","artifacts":[
-    \\{"command_wrapper":["gogs",{"content":"body"}]}]}
+    \\{"command_wrapper":["gogs",{"content":"body","args":["a"]}]}]}
 ;
 
 test "reportCaskInstallFailure names the cause and the skipped wrapper for an empty install" {
@@ -2872,7 +2872,7 @@ test "warnSkippedWrappers names each skipped wrapper and the cask, and ignores a
         \\{"token":"android-ndk","version":"1","url":"https://e.test/x.zip","artifacts":[
         \\{"command_wrapper":["ok",{"executable":"bin/ok"}]},
         \\{"command_wrapper":["ndk-build",{"executable":"$HOMEBREW_PREFIX/share/ndk/ndk-build"}]},
-        \\{"command_wrapper":["gogs",{"content":"script body"}]}]}
+        \\{"command_wrapper":["gogs",{"content":"script body","args":["a"]}]}]}
     ;
     var c = try cask_mod.parseCask(arena.allocator(), json);
     defer c.deinit();
@@ -2890,7 +2890,7 @@ test "warnSkippedWrappers warns without a name when the name is unsafe" {
     defer arena.deinit();
     const json =
         \\{"token":"t","version":"1","url":"https://e.test/x.zip","artifacts":[
-        \\{"command_wrapper":["a/b",{"content":"a"}]}]}
+        \\{"command_wrapper":["a/b",{"content":"a","args":["a"]}]}]}
     ;
     var c = try cask_mod.parseCask(arena.allocator(), json);
     defer c.deinit();
