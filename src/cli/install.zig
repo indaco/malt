@@ -1774,6 +1774,16 @@ pub fn warnSkippedWrappers(allocator: std.mem.Allocator, c: *const cask_mod.Cask
     }
 }
 
+/// An empty install has a cause the user can read; any other error keeps its name.
+pub fn reportCaskInstallFailure(allocator: std.mem.Allocator, c: *const cask_mod.Cask, e: anyerror, sink: OutputSink) void {
+    if (e == error.NothingToPlace) {
+        sink.err("cask {s} has nothing malt can install", .{c.token});
+        warnSkippedWrappers(allocator, c, sink);
+        return;
+    }
+    sink.err("Failed to install cask {s}: {s}", .{ c.token, @errorName(e) });
+}
+
 pub fn printExpandedCaveats(name: []const u8, expanded: []const u8, sink: OutputSink) void {
     sink.info("Caveats for {s}:", .{name});
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, expanded, "\n"), '\n');
@@ -2057,9 +2067,8 @@ fn installCask(
     if (sp) |*s| s.bar.finish();
     if (installer.preflight_ran) _ = flight.route(cask.token, .preflight, sink);
     const app_path = installed catch |e| {
-        // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
-        // users can't act on a bare "failed to install".
-        sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
+        // A bare "failed to install" gives the user nothing to act on.
+        reportCaskInstallFailure(allocator, &cask, e, sink);
         if (installer.conflictPath()) |p| sink.err("{s} is not this cask's link; remove it first", .{p});
         return InstallError.CaskNotFound;
     };
@@ -2760,6 +2769,68 @@ const LineCapture = struct {
         self.lines.deinit(std.testing.allocator);
     }
 };
+
+// Errors and warnings in arrival order, so a test sees the sequence.
+const FailureCapture = struct {
+    lines: std.ArrayList([]u8) = .empty,
+
+    fn push(ctx: ?*anyopaque, msg: []const u8) void {
+        const self: *FailureCapture = @ptrCast(@alignCast(ctx.?));
+        self.lines.append(std.testing.allocator, std.testing.allocator.dupe(u8, msg) catch return) catch {};
+    }
+    fn drop(_: ?*anyopaque, _: []const u8) void {}
+    fn sink(self: *FailureCapture) OutputSink {
+        return .{ .ctx = self, .writeInfo = drop, .writeWarn = push, .writeSuccess = drop, .writeErr = push };
+    }
+    fn deinit(self: *FailureCapture) void {
+        for (self.lines.items) |l| std.testing.allocator.free(l);
+        self.lines.deinit(std.testing.allocator);
+    }
+};
+
+const gogs_wrapper_json =
+    \\{"token":"gogs","version":"1","url":"https://e.test/x.zip","artifacts":[
+    \\{"command_wrapper":["gogs",{"content":"body"}]}]}
+;
+
+test "reportCaskInstallFailure names the cause and the skipped wrapper for an empty install" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = gogs_wrapper_json;
+    var c = try cask_mod.parseCask(arena.allocator(), json);
+    defer c.deinit();
+    var cap: FailureCapture = .{};
+    defer cap.deinit();
+    reportCaskInstallFailure(std.testing.allocator, &c, error.NothingToPlace, cap.sink());
+    try std.testing.expectEqual(@as(usize, 2), cap.lines.items.len);
+    try std.testing.expectEqualStrings("cask gogs has nothing malt can install", cap.lines.items[0]);
+    try expectSkippedLine("gogs", "gogs", cap.lines.items[1]);
+}
+
+test "reportCaskInstallFailure gives one line when an empty install has no wrapper" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try cask_mod.parseCask(arena.allocator(), "{\"token\":\"bare\",\"version\":\"1\",\"url\":\"https://e.test/x.zip\"}");
+    defer c.deinit();
+    var cap: FailureCapture = .{};
+    defer cap.deinit();
+    reportCaskInstallFailure(std.testing.allocator, &c, error.NothingToPlace, cap.sink());
+    try std.testing.expectEqual(@as(usize, 1), cap.lines.items.len);
+    try std.testing.expectEqualStrings("cask bare has nothing malt can install", cap.lines.items[0]);
+}
+
+test "reportCaskInstallFailure keeps the error name for other failures and skips the wrapper warning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = gogs_wrapper_json;
+    var c = try cask_mod.parseCask(arena.allocator(), json);
+    defer c.deinit();
+    var cap: FailureCapture = .{};
+    defer cap.deinit();
+    reportCaskInstallFailure(std.testing.allocator, &c, error.Sha256Mismatch, cap.sink());
+    try std.testing.expectEqual(@as(usize, 1), cap.lines.items.len);
+    try std.testing.expectEqualStrings("Failed to install cask gogs: Sha256Mismatch", cap.lines.items[0]);
+}
 
 const WarnCapture = struct {
     lines: std.ArrayList([]u8) = .empty,

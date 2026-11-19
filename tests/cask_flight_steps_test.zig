@@ -523,7 +523,7 @@ test "a tarball that yields neither a binary nor an app leaves no Caskroom dir b
     installer.offline = true;
     installer.prefetched_artifact = tgz;
 
-    try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
+    try testing.expectError(cask.CaskError.NothingToPlace, installer.install(&c));
     try testing.expect(!exists(io, fx.p("Caskroom/tarcask")));
 }
 

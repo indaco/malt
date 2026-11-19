@@ -1615,7 +1615,7 @@ fn materializeTapCask(
     if (sp) |*s| s.bar.finish();
     if (installer.preflight_ran) _ = flight.route(cask.token, .preflight, sink);
     const app_path = placed catch |e| {
-        sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
+        install_mod.reportCaskInstallFailure(allocator, &cask, e, sink);
         if (installer.conflictPath()) |p| sink.err("{s} is not this cask's link; remove it first", .{p});
         return switch (e) {
             error.DownloadFailed, error.Sha256Mismatch, error.Sha256Missing => InstallError.DownloadFailed,
