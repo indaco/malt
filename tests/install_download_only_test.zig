@@ -872,6 +872,209 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
 }
 
+/// Install a tarball holding one root executable for a formula named `mddog`,
+/// with `source` as the formula body.
+/// `sha_seed` gives each test its own cache entry. `file` is the executable in
+/// the archive, with `extra_file` beside it when set; `binary_name` stands in
+/// for a cask's `binary` line.
+fn installMddArchive(prefix: []const u8, sha_seed: *const [2]u8, file: []const u8, extra_file: ?[]const u8, source: []const u8, binary_name: ?[]const u8) !void {
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat(sha_seed.*)));
+
+    const work = try testing.allocator.print("{s}/binwork", .{prefix});
+    defer testing.allocator.free(work);
+    const payload = try testing.allocator.print("{s}/payload", .{work});
+    defer testing.allocator.free(payload);
+    try test_io.cwd().createDirPath(std.Options.debug_io, payload);
+    const mdd = try testing.allocator.print("{s}/{s}", .{ payload, file });
+    defer testing.allocator.free(mdd);
+    {
+        const f = try test_io.cwd().createFile(std.Options.debug_io, mdd, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho mdd-ok\n");
+    }
+
+    if (extra_file) |extra| {
+        const extra_path = try testing.allocator.print("{s}/{s}", .{ payload, extra });
+        defer testing.allocator.free(extra_path);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, extra_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho extra\n");
+    }
+
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
+    if (extra_file) |extra| {
+        try runTar(&.{ "tar", "czf", cache_path, "-C", payload, file, extra });
+    } else {
+        try runTar(&.{ "tar", "czf", cache_path, "-C", payload, file });
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "mddog",
+        .full_name = "user/repo/mddog",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-binname-test.invalid/mdd.tar.gz",
+        .sha256 = sha,
+        .source = source,
+        .binary_name = binary_name,
+    };
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        try allocator.print("{s}/cache", .{prefix}),
+        false, // dry_run
+        false, // force
+        false, // download_only
+        null, // prefetch_slot
+        malt.install_sink.silent,
+    );
+}
+
+test "materializeRubyFormula promotes the file bin.install names when it is not the formula name" {
+    const prefix = try setupPrefix("binnamed");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "a1", "mdd", null, "def install\n  bin.install \"mdd\"\nend\n", null);
+
+    const bin = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mdd", .{prefix});
+    defer testing.allocator.free(bin);
+    try test_io.accessAbsolute(std.Options.debug_io, bin, .{ .execute = true });
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(prefix));
+}
+
+test "materializeRubyFormula installs under the bin.install rename" {
+    const prefix = try setupPrefix("binrename");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "b2", "mdd", null, "def install\n  bin.install \"mdd\" => \"mddog\"\nend\n", null);
+
+    const bin = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mddog", .{prefix});
+    defer testing.allocator.free(bin);
+    try test_io.accessAbsolute(std.Options.debug_io, bin, .{ .execute = true });
+}
+
+test "materializeRubyFormula refuses an unsafe bin.install rename and records nothing" {
+    const prefix = try setupPrefix("binbad");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try testing.expectError(
+        install_record.InstallError.FormulaNotFound,
+        installMddArchive(prefix, "c3", "mdd", null, "def install\n  bin.install \"mdd\" => \"../evil\"\nend\n", null),
+    );
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "materializeRubyFormula still refuses when the bin.install file is absent from the archive" {
+    const prefix = try setupPrefix("binmiss");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try testing.expectError(
+        install_record.InstallError.BuildFromSourceUnsupported,
+        installMddArchive(prefix, "d4", "mdd", null, "def install\n  system \"make\"\n  bin.install \"other\"\nend\n", null),
+    );
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "materializeRubyFormula falls back to the formula name when bin.install names another file" {
+    // A formula may list a helper first; the archive file named after the
+    // formula must still install, as it did before bin.install was read.
+    const prefix = try setupPrefix("binfallback");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "e5", "mddog", null, "def install\n  bin.install \"helper\"\n  bin.install \"mddog\"\nend\n", null);
+
+    const bin = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mddog", .{prefix});
+    defer testing.allocator.free(bin);
+    try test_io.accessAbsolute(std.Options.debug_io, bin, .{ .execute = true });
+}
+
+test "materializeRubyFormula keeps the formula-named binary when bin.install names a helper first" {
+    // Both files ship. The helper must not hide the binary the formula is
+    // named after: it installed before bin.install was read.
+    const prefix = try setupPrefix("binboth");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "a7", "helper", "mddog", "def install\n  bin.install \"helper\"\n  bin.install \"mddog\"\nend\n", null);
+
+    for ([_][]const u8{ "helper", "mddog" }) |name| {
+        const bin = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/{s}", .{ prefix, name });
+        defer testing.allocator.free(bin);
+        try test_io.accessAbsolute(std.Options.debug_io, bin, .{ .execute = true });
+    }
+}
+
+test "materializeRubyFormula does not link the formula-named file once bin.install renames it away" {
+    const prefix = try setupPrefix("binaway");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "b8", "mddog", null, "def install\n  bin.install \"mddog\" => \"mdr\"\nend\n", null);
+
+    const renamed = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mdr", .{prefix});
+    defer testing.allocator.free(renamed);
+    try test_io.accessAbsolute(std.Options.debug_io, renamed, .{ .execute = true });
+    const old = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mddog", .{prefix});
+    defer testing.allocator.free(old);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, old, .{}));
+}
+
+test "materializeRubyFormula installs the formula-named file when the renamed source is absent" {
+    // An arm-only source renamed to the formula name, on an archive that
+    // ships the formula-named file only.
+    const prefix = try setupPrefix("binarm");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "b9", "mddog", null, "def install\n  bin.install \"mddog-arm64\" => \"mddog\"\nend\n", null);
+
+    const bin = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mddog", .{prefix});
+    defer testing.allocator.free(bin);
+    try test_io.accessAbsolute(std.Options.debug_io, bin, .{ .execute = true });
+}
+
+test "materializeRubyFormula prefers the cask binary name over bin.install" {
+    const prefix = try setupPrefix("binprefer");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try installMddArchive(prefix, "f6", "mdd", null, "def install\n  bin.install \"other\" => \"renamed\"\nend\n", "mdd");
+
+    const bin = try testing.allocator.print("{s}/Cellar/mddog/1.0/bin/mdd", .{prefix});
+    defer testing.allocator.free(bin);
+    try test_io.accessAbsolute(std.Options.debug_io, bin, .{ .execute = true });
+}
+
 test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     // A prebuilt formula may ship only libs/headers (no bin/). The refusal
     // gate is "no linkable artifact at all", not "no binary" — so a keg
@@ -1048,6 +1251,8 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
         .version = "1.0",
         .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/rawpkg-darwin-arm64",
         .sha256 = sha,
+        // A raw asset keeps the formula name, whatever `bin.install` says.
+        .source = "bin.install \"rawpkg-darwin-arm64\" => \"other\"",
     };
 
     try malt.install_local.materializeRubyFormula(

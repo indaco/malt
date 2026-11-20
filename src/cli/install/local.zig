@@ -177,6 +177,39 @@ fn screenRawBinaryName(sink: OutputSink, resolved: ResolvedRubyFormula) InstallE
     }
 }
 
+/// Refuse an unsafe `bin.install "<f>" => "<n>"` rename. The tap controls the
+/// name and it becomes a path component.
+fn screenBinInstallTarget(sink: OutputSink, resolved: ResolvedRubyFormula) InstallError!void {
+    if (resolved.binary_name != null or TapArchiveKind.fromUrl(resolved.url) == null) return;
+    const target = (rb_parse.parseFormulaBinInstall(resolved.source) orelse return).target orelse return;
+    if (!path_component.isPathComponent(target) or path_component.hasControlByte(target)) {
+        sink.err("Formula declares an unsafe binary name: {s}", .{target});
+        return InstallError.FormulaNotFound;
+    }
+}
+
+/// Copy the first file named `wanted` to `bin/<rename_to or wanted>`.
+/// Returns false when no such file exists.
+fn promoteBinary(io: std.Io, allocator: std.mem.Allocator, cellar_dir: std.Io.Dir, wanted: []const u8, rename_to: ?[]const u8) bool {
+    var walker = cellar_dir.walk(allocator) catch return false;
+    defer walker.deinit();
+
+    var dest_buf: [512]u8 = undefined;
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const basename = std.Io.Dir.path.basename(entry.path);
+        if (!std.mem.eql(u8, basename, wanted)) continue;
+        const dest_name = std.mem.print(&dest_buf, "bin/{s}", .{rename_to orelse basename}) catch continue;
+        // Executable from the first byte: a read-only source (0555) must not
+        // make the copy unopenable, and a source already in bin/ stays intact.
+        std.Io.Dir.copyFile(cellar_dir, entry.path, cellar_dir, dest_name, io, .{
+            .permissions = std.Io.File.Permissions.fromMode(0o755),
+        }) catch continue;
+        return true;
+    }
+    return false;
+}
+
 const TapRegistration = struct {
     url: []const u8,
     commit_sha: []const u8,
@@ -1005,6 +1038,7 @@ pub fn materializeRubyFormula(
 
     // Before deps, download and the --force prune, so a refusal changes nothing.
     try screenRawBinaryName(sink, resolved);
+    try screenBinInstallTarget(sink, resolved);
 
     // Nothing would ever read the warmed entry: an opted-out install never
     // trusts the cache.
@@ -1205,7 +1239,16 @@ pub fn materializeRubyFormula(
     // `<x>` while the keg is named by the cask token; match on the
     // declared binary so a tap cask like `longbridge-terminal` lands its
     // `longbridge` executable.
-    const target_binary = resolved.binary_name orelse resolved.name;
+
+    // A formula names its file in `bin.install`. Archives only: a raw asset
+    // is renamed to the formula's binary, so its asset name must not leak in.
+    const bin_install = if (archive_kind != .raw_binary and resolved.binary_name == null)
+        rb_parse.parseFormulaBinInstall(resolved.source)
+    else
+        null;
+    const target_binary = resolved.binary_name orelse
+        if (bin_install) |b| std.Io.Dir.path.basename(b.source) else resolved.name;
+    const rename_to = if (bin_install) |b| b.target else null;
 
     const archive_mod = @import("../../fs/archive.zig");
     switch (archive_kind) {
@@ -1259,24 +1302,14 @@ pub fn materializeRubyFormula(
         var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close(ctx.io);
 
-        var walker = cellar_dir.walk(allocator) catch return InstallError.CellarFailed;
-        defer walker.deinit();
-
-        // Separate buffer: writing into `tmp_buf` here would corrupt the
-        // `tmp_archive` slice that the deferred cleanup still holds.
-        var dest_buf: [512]u8 = undefined;
-        while (walker.next(ctx.io) catch null) |entry| {
-            if (entry.kind != .file) continue;
-            const basename = std.Io.Dir.path.basename(entry.path);
-            if (std.mem.eql(u8, basename, target_binary)) {
-                const dest_name = std.mem.print(&dest_buf, "bin/{s}", .{basename}) catch continue;
-                std.Io.Dir.copyFile(cellar_dir, entry.path, cellar_dir, dest_name, ctx.io, .{}) catch continue;
-                const bin_file = cellar_dir.openFile(ctx.io, dest_name, .{ .mode = .read_write }) catch continue;
-                defer bin_file.close(ctx.io);
-                // chmod may fail on FUSE/NFS; linker still resolves the path.
-                bin_file.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
-                break;
-            }
+        // The formula-named file installed before bin.install was read, so it
+        // stays linked even when the formula names a helper first.
+        const promoted = promoteBinary(ctx.io, allocator, cellar_dir, target_binary, rename_to);
+        // Skip when the formula renamed its own name away or already landed on it.
+        if (bin_install != null and (!promoted or (!std.mem.eql(u8, target_binary, resolved.name) and
+            !std.mem.eql(u8, rename_to orelse target_binary, resolved.name))))
+        {
+            _ = promoteBinary(ctx.io, allocator, cellar_dir, resolved.name, null);
         }
     }
 
@@ -2172,6 +2205,44 @@ fn hoistScratch(comptime tag: []const u8, allocator: std.mem.Allocator) ![:0]con
     return raw;
 }
 
+test "promoteBinary keeps a read-only executable the archive ships nested" {
+    // zip and system tar keep mode 0555; the copy must still install.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("ro_nested", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/bin", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/sub", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&buf, "{s}/sub/mdd", .{keg}), .{
+        .permissions = std.Io.File.Permissions.fromMode(0o555),
+    })).close(test_io);
+
+    var dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{ .iterate = true });
+    defer dir.close(test_io);
+    try std.testing.expect(promoteBinary(test_io, std.testing.allocator, dir, "mdd", null));
+    try dir.access(test_io, "bin/mdd", .{ .execute = true });
+}
+
+test "promoteBinary does not delete a read-only binary the archive ships in bin" {
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("ro_inbin", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/bin", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&buf, "{s}/bin/mdd", .{keg}), .{
+        .permissions = std.Io.File.Permissions.fromMode(0o555),
+    })).close(test_io);
+
+    var dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{ .iterate = true });
+    defer dir.close(test_io);
+    try std.testing.expect(promoteBinary(test_io, std.testing.allocator, dir, "mdd", null));
+    try dir.access(test_io, "bin/mdd", .{ .execute = true });
+}
+
 test "hoistSingleWrapperDir flattens a prebuilt archive nested under one dir" {
     const allocator = std.testing.allocator;
     const keg = try hoistScratch("flatten", allocator);
@@ -2402,6 +2473,26 @@ test "screenRawBinaryName leaves safe and archive binary names alone" {
     archive.url = "https://example.invalid/foo.tar.gz";
     archive.binary_name = "foo-1.2.3-arm64/foo";
     try screenRawBinaryName(sink_mod.silent, archive);
+}
+
+test "screenBinInstallTarget refuses an unsafe rename on an archive url" {
+    var resolved: ResolvedRubyFormula = .{ .name = "tool", .full_name = "u/t/tool", .tap_label = "u/t", .version = "1.0", .url = "https://example.invalid/tool.tar.gz", .sha256 = "" };
+    for ([_][]const u8{ "bin.install \"a\" => \"../x\"", "bin.install \"a\" => \"d/x\"", "bin.install \"a\" => \"\"", "bin.install \"a\" => \".\"", "bin.install \"a\" => \"..\"", "bin.install \"a\" => \"x\ty\"" }) |src| {
+        resolved.source = src;
+        try std.testing.expectError(InstallError.FormulaNotFound, screenBinInstallTarget(sink_mod.silent, resolved));
+    }
+}
+
+test "screenBinInstallTarget leaves safe, absent and raw-asset names alone" {
+    var resolved: ResolvedRubyFormula = .{ .name = "tool", .full_name = "u/t/tool", .tap_label = "u/t", .version = "1.0", .url = "https://example.invalid/tool.tar.gz", .sha256 = "" };
+    resolved.source = "bin.install \"a\" => \"b\"";
+    try screenBinInstallTarget(sink_mod.silent, resolved);
+    resolved.source = "bin.install \"a\"";
+    try screenBinInstallTarget(sink_mod.silent, resolved);
+    // A raw asset never reads `bin.install`, so its rename is not screened.
+    resolved.url = "https://example.invalid/tool-darwin-arm64";
+    resolved.source = "bin.install \"a\" => \"../x\"";
+    try screenBinInstallTarget(sink_mod.silent, resolved);
 }
 
 test "ParsedService keeps a block malt cannot read apart from no block at all" {
