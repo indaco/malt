@@ -136,7 +136,8 @@ fn tapMatches(want: ?[]const u8, core_label: []const u8, tap: []const u8) bool {
 fn sideOf(subtree: ?[*:0]const u8) Side {
     const s = std.mem.sliceTo(subtree orelse return .any, 0);
     if (std.mem.eql(u8, s, "cask")) return .cask;
-    if (std.mem.eql(u8, s, "formula")) return .formula;
+    // formula_lower is a formula spelling too; left open it would probe Casks/ first.
+    if (std.mem.eql(u8, s, "formula") or std.mem.eql(u8, s, "formula_lower")) return .formula;
     return .any;
 }
 
@@ -360,7 +361,8 @@ fn seedDb() !sqlite.Database {
         \\  ('bar', 'acme/tools/bar', '1.0', 'd', '/c/bar', 'acme/tools', 'cask'),
         \\  ('old', 'acme/tools/old', '1.0', 'e', '/c/old', 'acme/tools', NULL),
         \\  ('lx', '/src/lx.rb', '1.0', 'f', '/c/lx', 'local', NULL),
-        \\  ('dual', 'acme/tools/dual', '1.0', 'g', '/c/dual', 'acme/tools', 'formula');
+        \\  ('dual', 'acme/tools/dual', '1.0', 'g', '/c/dual', 'acme/tools', 'formula'),
+        \\  ('low', 'acme/tools/low', '1.0', 'h', '/c/low', 'acme/tools', 'formula_lower');
         \\INSERT INTO casks (token, name, version, url, tap) VALUES
         \\  ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg', NULL),
         \\  ('iterm2', 'iTerm2', '3.5', 'https://x.invalid/i.zip', NULL),
@@ -422,6 +424,13 @@ test "classify pins a Casks/-sourced tap keg to the cask side" {
     var db = try seedDb();
     defer db.close();
     try expectTarget(&db, "bar", .any, .keg, "acme/tools/bar", .cask);
+}
+
+test "classify pins a formula/-sourced tap keg to the formula side" {
+    // Left open, reinstall would probe Casks/ first and swap in a same-named cask.
+    var db = try seedDb();
+    defer db.close();
+    try expectTarget(&db, "low", .any, .keg, "acme/tools/low", .formula);
 }
 
 test "classify leaves a legacy tap keg's side open so install probes both" {
