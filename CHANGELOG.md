@@ -4,6 +4,172 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.25.7 - 2026-11-11
+
+### Highlights
+
+v0.25.7 is a fix release: `mt purge --cache` now removes old keg copies that no bottle uses and frees their disk space.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **purge:** reclaim relocated kegs that outlive their bottle or predate cache versioning ([0020197bc](https://github.com/indaco/malt/commit/0020197bc)) ([#1267](https://github.com/indaco/malt/pull/1267))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-11-09 ([a7ed8afb7](https://github.com/indaco/malt/commit/a7ed8afb7)) ([#1266](https://github.com/indaco/malt/pull/1266))
+
+### 🤖 CI
+
+- let the brew benchmark install again after its cold prep ([10a9994e1](https://github.com/indaco/malt/commit/10a9994e1)) ([#1265](https://github.com/indaco/malt/pull/1265))
+- show why a brew install failed in the benchmark log ([0a8f2b32e](https://github.com/indaco/malt/commit/0a8f2b32e)) ([#1264](https://github.com/indaco/malt/pull/1264))
+- keep the weekly benchmark able to publish its results ([d6d834009](https://github.com/indaco/malt/commit/d6d834009)) ([#1263](https://github.com/indaco/malt/pull/1263))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
+## v0.25.6 - 2026-11-06
+
+### Highlights
+
+v0.25.6 is a fix release: a first install of malt completes on more Macs and gives correct instructions.
+
+- **Install on more Macs.** The installer works on a Mac with no `/usr/local/bin`, and uses sudo only when you cannot create the bin directory yourself.
+- **A clear next step.** If the malt `bin` directory is not on your PATH, the installer and `mt doctor` show the `shellenv` line for your shell profile.
+- **Correct bypass hints.** The installer's hint to skip verification now gives a command that works.
+- **Stricter install paths.** `INSTALL_DIR` and `PREFIX` now accept only letters, digits and `._+-/`, so the installer refuses a path with a space or a `~`.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **install:** accept only plain INSTALL_DIR paths so the printed setup lines are safe to paste ([9bb084d77](https://github.com/indaco/malt/commit/9bb084d77)) ([#1260](https://github.com/indaco/malt/pull/1260))
+- **install:** tell new users the shellenv step instead of claiming malt is ready ([0c881a7f6](https://github.com/indaco/malt/commit/0c881a7f6)) ([#1259](https://github.com/indaco/malt/pull/1259))
+- **install:** create the prefix first so a new bin dir under it is always yours ([e5c1a164f](https://github.com/indaco/malt/commit/e5c1a164f)) ([#1256](https://github.com/indaco/malt/pull/1256))
+- **install:** create the bin directory when it does not exist yet ([cb5a078f8](https://github.com/indaco/malt/commit/cb5a078f8)) ([#1254](https://github.com/indaco/malt/pull/1254))
+- **install:** make the verification bypass hint actually reach the installer ([42bddaeff](https://github.com/indaco/malt/commit/42bddaeff)) ([#1253](https://github.com/indaco/malt/pull/1253))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-11-02 ([f35ce1782](https://github.com/indaco/malt/commit/f35ce1782)) ([#1255](https://github.com/indaco/malt/pull/1255))
+
+### ✅ Tests
+
+- keep deliberate failures from printing errors on a passing run ([4da082091](https://github.com/indaco/malt/commit/4da082091)) ([#1261](https://github.com/indaco/malt/pull/1261))
+
+### 🤖 CI
+
+- build and release malt with Zig 0.17.1 ([ec749c447](https://github.com/indaco/malt/commit/ec749c447)) ([#1262](https://github.com/indaco/malt/pull/1262))
+- bump taiki-e/install-action from 2.87.21 to 2.88.0 ([ba7262d9c](https://github.com/indaco/malt/commit/ba7262d9c)) ([#1250](https://github.com/indaco/malt/pull/1250))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+
+## v0.25.5 - 2026-10-30
+
+### Highlights
+
+v0.25.5 is a fix release: malt shows the setup steps that packages ask for, more casks install and upgrade, and the prefix stays clean.
+
+- **Setup steps you can see.** `mt install`, `mt upgrade` and `mt info` show formula caveats, also for tap and local formulae. `mt install` shows cask caveats too.
+- **More casks install and upgrade.** You can upgrade a cask while its app runs. Casks with a nested container, such as Steam, install, upgrade and roll back. Installers with longer redirect chains, such as Battle.net, download.
+- **A cleaner prefix.** `mt purge --unused-deps` removes the `opt/` link of each dependency it removes, and `mt doctor` reports dangling `opt/` links.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **net:** allow longer installer redirect chains ([28f0f3871](https://github.com/indaco/malt/commit/28f0f3871)) ([#1249](https://github.com/indaco/malt/pull/1249))
+- **json:** keep --json output parseable when a field carries ill-formed UTF-8 ([5afe4b2d3](https://github.com/indaco/malt/commit/5afe4b2d3)) ([#1247](https://github.com/indaco/malt/pull/1247))
+- **dsl:** keep post_install --json output valid when a formula reports quotes or control bytes ([0dc94a93c](https://github.com/indaco/malt/commit/0dc94a93c)) ([#1246](https://github.com/indaco/malt/pull/1246))
+- **doctor:** stop reporting an install that starts mid-check as a broken prefix ([f645c5124](https://github.com/indaco/malt/commit/f645c5124)) ([#1245](https://github.com/indaco/malt/pull/1245))
+- **install:** show caveats from tap and local formulae so their setup steps are not lost ([880faedab](https://github.com/indaco/malt/commit/880faedab)) ([#1243](https://github.com/indaco/malt/pull/1243))
+- **install:** show cask caveats after install so required first-run steps are not lost ([97ad400b0](https://github.com/indaco/malt/commit/97ad400b0)) ([#1242](https://github.com/indaco/malt/pull/1242))
+- **upgrade:** show formula caveats after an upgrade so new setup steps are not lost ([96f3ecd2d](https://github.com/indaco/malt/commit/96f3ecd2d)) ([#1241](https://github.com/indaco/malt/pull/1241))
+- **info:** show formula caveats for installed packages so setup steps stay reachable ([96a1686f6](https://github.com/indaco/malt/commit/96a1686f6)) ([#1239](https://github.com/indaco/malt/pull/1239))
+- **install:** show formula caveats after install and in info so manual setup steps are not lost ([694f15853](https://github.com/indaco/malt/commit/694f15853)) ([#1238](https://github.com/indaco/malt/pull/1238))
+- **cask:** restore nested-container casks and keep other nested casks working ([2698e2ef6](https://github.com/indaco/malt/commit/2698e2ef6)) ([#1244](https://github.com/indaco/malt/pull/1244))
+- **cask:** install nested ZIPs and clean failed extraction ([587190efc](https://github.com/indaco/malt/commit/587190efc)) ([#1236](https://github.com/indaco/malt/pull/1236))
+- **purge:** stop removed dependencies from leaving dangling opt links behind ([b64f945cd](https://github.com/indaco/malt/commit/b64f945cd)) ([#1234](https://github.com/indaco/malt/pull/1234))
+- **regressions:** run the single-interpolator guard on runners without ripgrep ([854b772a2](https://github.com/indaco/malt/commit/854b772a2)) ([#1233](https://github.com/indaco/malt/pull/1233))
+- **install:** keep one URL interpolator so tap and local recipes expand #{version} the same way ([25f3ff794](https://github.com/indaco/malt/commit/25f3ff794)) ([#1232](https://github.com/indaco/malt/pull/1232))
+- **dsl:** run post_install bodies that use arithmetic or negative numbers natively ([9457a913d](https://github.com/indaco/malt/commit/9457a913d)) ([#1231](https://github.com/indaco/malt/pull/1231))
+- **cask:** make the running-app upgrade guards catch real regressions ([cf9ab876d](https://github.com/indaco/malt/commit/cf9ab876d)) ([#1230](https://github.com/indaco/malt/pull/1230))
+- **cask:** allow upgrades while apps are running ([a9dd6e2ca](https://github.com/indaco/malt/commit/a9dd6e2ca)) ([#1228](https://github.com/indaco/malt/pull/1228))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-10-26 ([f5b65de2b](https://github.com/indaco/malt/commit/f5b65de2b)) ([#1229](https://github.com/indaco/malt/pull/1229))
+- **release:** v0.25.4 release notes on main ([685f2ea48](https://github.com/indaco/malt/commit/685f2ea48)) ([#1225](https://github.com/indaco/malt/pull/1225))
+
+### 🤖 CI
+
+- **release:** render the cask quarantine step through GoReleaser's native install_steps ([d3ddcb923](https://github.com/indaco/malt/commit/d3ddcb923)) ([#1226](https://github.com/indaco/malt/pull/1226))
+
+### 🎉 New Contributors
+
+- [@zinantang](https://github.com/zinantang) made their first contribution in [#1249](https://github.com/indaco/malt/pull/1249)
+
+### ❤️ Contributors
+
+- [@zinantang](https://github.com/zinantang)
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.25.4 - 2026-10-23
 
 ### Highlights
