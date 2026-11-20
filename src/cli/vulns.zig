@@ -328,8 +328,8 @@ const TapKeg = struct {
     sha: ?[]const u8,
     /// Null when the tap's repository cannot be derived from its row or slug.
     urls: ?tap_mod.TapBaseUrls,
-    /// Installed from the tap's `Casks/`; its recipe is read from there.
-    rb_from_casks: bool = false,
+    /// Tap side the keg was installed from; its recipe is read from there.
+    rb_side: tap_mod.KegRbSide = .unknown,
 };
 
 /// What one tap keg resolved to; filled by a worker, read on the main thread.
@@ -379,7 +379,7 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
             return f.fail(tap_mod.describeResolveError(&f.buf, e, urls.forge, urls.host));
         break :blk head.?.sha orelse return f.fail("could not resolve the tap HEAD");
     };
-    var fetch = tap_mod.fetchRawFile(http, x.ctx.environ, urls.forge, x.forge_base orelse urls.raw_base, sha, f.keg.name, tap_mod.kegRbSubtrees(f.keg.rb_from_casks), x.tripped) catch
+    var fetch = tap_mod.fetchRawFile(http, x.ctx.environ, urls.forge, x.forge_base orelse urls.raw_base, sha, f.keg.name, tap_mod.kegRbSubtrees(f.keg.rb_side), x.tripped) catch
         return f.fail("could not fetch the recipe");
     switch (fetch) {
         .not_found => return f.fail("recipe not found in the tap"),
@@ -520,7 +520,7 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
-    var stmt = try db.prepare("SELECT name, version, revision, tap, tap_commit_sha, tap_rb_subtree = 'cask' FROM kegs ORDER BY name;");
+    var stmt = try db.prepare("SELECT name, version, revision, tap, tap_commit_sha, tap_rb_subtree FROM kegs ORDER BY name;");
     defer stmt.finalize();
     while (try stmt.step()) {
         const name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
@@ -544,7 +544,7 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
             .pkg_version = pkg,
             .sha = if (sha_col) |c| (if (c.len > 0) try arena.dupe(u8, c) else null) else null,
             .urls = if (slug_ok) tap_mod.resolveTapBaseUrls(arena, &db, tap) catch null else null,
-            .rb_from_casks = stmt.columnInt(5) != 0,
+            .rb_side = tap_mod.KegRbSide.fromSubtree(if (stmt.columnText(5)) |t| std.mem.sliceTo(t, 0) else null),
         });
     }
     return out;

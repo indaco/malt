@@ -134,11 +134,13 @@ fn tapMatches(want: ?[]const u8, core_label: []const u8, tap: []const u8) bool {
 }
 
 fn sideOf(subtree: ?[*:0]const u8) Side {
-    const s = std.mem.sliceTo(subtree orelse return .any, 0);
-    if (std.mem.eql(u8, s, "cask")) return .cask;
-    // formula_lower is a formula spelling too; left open it would probe Casks/ first.
-    if (std.mem.eql(u8, s, "formula") or std.mem.eql(u8, s, "formula_lower")) return .formula;
-    return .any;
+    const text: ?[]const u8 = if (subtree) |t| std.mem.sliceTo(t, 0) else null;
+    return switch (tap_mod.KegRbSide.fromSubtree(text)) {
+        .cask => .cask,
+        // Left open, the default install probes Casks/ before the formula layouts.
+        .formula => .formula,
+        .unknown => .any,
+    };
 }
 
 fn columnSlice(stmt: *sqlite.Statement, col: u32) []const u8 {
@@ -362,7 +364,8 @@ fn seedDb() !sqlite.Database {
         \\  ('old', 'acme/tools/old', '1.0', 'e', '/c/old', 'acme/tools', NULL),
         \\  ('lx', '/src/lx.rb', '1.0', 'f', '/c/lx', 'local', NULL),
         \\  ('dual', 'acme/tools/dual', '1.0', 'g', '/c/dual', 'acme/tools', 'formula'),
-        \\  ('low', 'acme/tools/low', '1.0', 'h', '/c/low', 'acme/tools', 'formula_lower');
+        \\  ('low', 'acme/tools/low', '1.0', 'h', '/c/low', 'acme/tools', 'formula_lower'),
+        \\  ('rooty', 'acme/tools/rooty', '1.0', 'i', '/c/rooty', 'acme/tools', 'formula_root');
         \\INSERT INTO casks (token, name, version, url, tap) VALUES
         \\  ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg', NULL),
         \\  ('iterm2', 'iTerm2', '3.5', 'https://x.invalid/i.zip', NULL),
@@ -431,6 +434,12 @@ test "classify pins a formula/-sourced tap keg to the formula side" {
     var db = try seedDb();
     defer db.close();
     try expectTarget(&db, "low", .any, .keg, "acme/tools/low", .formula);
+}
+
+test "classify pins a root-layout tap keg to the formula side" {
+    var db = try seedDb();
+    defer db.close();
+    try expectTarget(&db, "rooty", .any, .keg, "acme/tools/rooty", .formula);
 }
 
 test "classify leaves a legacy tap keg's side open so install probes both" {

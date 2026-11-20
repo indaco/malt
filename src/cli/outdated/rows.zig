@@ -10,6 +10,7 @@
 const std = @import("std");
 
 const sqlite = @import("../../db/sqlite.zig");
+const tap_mod = @import("../../core/tap.zig");
 
 /// One row of the installed-package list fed to the worker pool.
 /// `tap` is the third-party tap label for tap-installed casks (drives
@@ -28,8 +29,8 @@ pub const KegRow = struct {
     /// True for `mt pin`-held rows. Surfaced so `mt outdated --json` can
     /// keep a pinned-but-outdated package visible with `pinned:true`.
     pinned: bool = false,
-    /// Tap keg installed from `Casks/`; its `.rb` is re-read from there.
-    rb_from_casks: bool = false,
+    /// Tap side the keg was installed from; its `.rb` is re-read from there.
+    rb_side: tap_mod.KegRbSide = .unknown,
 };
 
 /// Scope filter for `loadFormulaRows` / `loadCaskRows`. Variants:
@@ -53,11 +54,11 @@ pub fn loadFormulaRows(
     filter: KegFilter,
 ) ![]KegRow {
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT name, version, revision, tap, pinned, tap_rb_subtree = 'cask' FROM kegs ORDER BY name;",
-        .pinned_only => "SELECT name, version, revision, tap, pinned, tap_rb_subtree = 'cask' FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .all => "SELECT name, version, revision, tap, pinned, tap_rb_subtree FROM kegs ORDER BY name;",
+        .pinned_only => "SELECT name, version, revision, tap, pinned, tap_rb_subtree FROM kegs WHERE pinned = 1 ORDER BY name;",
         // NOCASE: redundant now both sides are canonical, kept for
         // hand-edited or un-migrated DBs. See `tapExists`.
-        .by_tap => "SELECT name, version, revision, tap, pinned, tap_rb_subtree = 'cask' FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
+        .by_tap => "SELECT name, version, revision, tap, pinned, tap_rb_subtree FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -78,11 +79,11 @@ pub fn loadCaskRows(
     // Casks have no revision; `0 AS revision` keeps the column layout
     // uniform with the formula query so `loadKegRows` reads one shape.
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT token, version, 0 AS revision, tap, pinned, 0 FROM casks ORDER BY token;",
-        .pinned_only => "SELECT token, version, 0 AS revision, tap, pinned, 0 FROM casks WHERE pinned = 1 ORDER BY token;",
+        .all => "SELECT token, version, 0 AS revision, tap, pinned, NULL FROM casks ORDER BY token;",
+        .pinned_only => "SELECT token, version, 0 AS revision, tap, pinned, NULL FROM casks WHERE pinned = 1 ORDER BY token;",
         // NOCASE: redundant now both sides are canonical, kept for
         // hand-edited or un-migrated DBs. See `tapExists`.
-        .by_tap => "SELECT token, version, 0 AS revision, tap, pinned, 0 FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
+        .by_tap => "SELECT token, version, 0 AS revision, tap, pinned, NULL FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -163,7 +164,7 @@ fn loadKegRows(
         errdefer allocator.free(ver_dup);
         // Column layout (uniform across formula/cask): 0 name, 1 version,
         // 2 revision, 3 tap (null for core-API rows / v5-era casks),
-        // 4 pinned, 5 installed from a tap's Casks/ (always 0 for casks).
+        // 4 pinned, 5 raw `tap_rb_subtree` (NULL for casks and untracked kegs).
         var tap_dup: ?[]u8 = null;
         if (stmt.columnText(3)) |tap_ptr| {
             const tap_slice = std.mem.sliceTo(tap_ptr, 0);
@@ -176,7 +177,7 @@ fn loadKegRows(
             .revision = stmt.columnInt(2),
             .tap = tap_dup,
             .pinned = stmt.columnBool(4),
-            .rb_from_casks = stmt.columnBool(5),
+            .rb_side = tap_mod.KegRbSide.fromSubtree(if (stmt.columnText(5)) |t| std.mem.sliceTo(t, 0) else null),
         });
     }
     return rows.toOwnedSlice(allocator);
@@ -222,14 +223,19 @@ test "loadFormulaRows flags a keg installed from its tap's Casks/" {
         \\INSERT INTO kegs (name, version, revision, tap, pinned, tap_rb_subtree) VALUES
         \\  ('fromcask', '1.0', 0, 'a/b', 0, 'cask'),
         \\  ('fromformula', '1.0', 0, 'a/b', 0, 'formula'),
-        \\  ('legacy', '1.0', 0, 'a/b', 0, NULL);
+        \\  ('legacy', '1.0', 0, 'a/b', 0, NULL),
+        \\  ('lowerdir', '1.0', 0, 'a/b', 0, 'formula_lower'),
+        \\  ('rootdir', '1.0', 0, 'a/b', 0, 'formula_root');
     );
     const rows = try loadFormulaRows(std.testing.allocator, &db, .all);
     defer freeKegRows(std.testing.allocator, rows);
-    try std.testing.expectEqual(@as(usize, 3), rows.len);
-    try std.testing.expect(rows[0].rb_from_casks);
-    try std.testing.expect(!rows[1].rb_from_casks);
-    try std.testing.expect(!rows[2].rb_from_casks);
+    try std.testing.expectEqual(@as(usize, 5), rows.len);
+    // Ordered by name: fromcask, fromformula, legacy, lowerdir, rootdir.
+    try std.testing.expectEqual(tap_mod.KegRbSide.cask, rows[0].rb_side);
+    try std.testing.expectEqual(tap_mod.KegRbSide.formula, rows[1].rb_side);
+    try std.testing.expectEqual(tap_mod.KegRbSide.unknown, rows[2].rb_side);
+    try std.testing.expectEqual(tap_mod.KegRbSide.formula, rows[3].rb_side);
+    try std.testing.expectEqual(tap_mod.KegRbSide.formula, rows[4].rb_side);
 }
 
 test "loadFormulaRows refuses to read a drifted kegs table as zero rows" {
