@@ -821,7 +821,7 @@ fn migrateV16toV17(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
-/// v18 - which tap subtree (`formula`, `cask`, `formula_root`) served a tap
+/// v18 - which tap subtree (`formula`, `cask`, `formula_lower`, `formula_root`) served a tap
 /// keg's `.rb`. Upgrade, outdated and vulns re-read the same one, so a keg
 /// installed with `--cask` never flips to a same-named formula. Existing
 /// rows stay NULL: unknown keeps the formula-first lookup they had.

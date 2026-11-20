@@ -1637,7 +1637,7 @@ pub const RawFetch = union(enum) {
 /// probes them. `Casks/` is a keg layout too: a tarball cask with no `app`
 /// stanza (goreleaser's `homebrew_casks` output) is installed as a keg, and
 /// the audit must read the same file install did.
-pub const keg_rb_subtrees: []const forge.RawKind = &.{ .formula, .cask, .formula_root };
+pub const keg_rb_subtrees: []const forge.RawKind = &.{ .formula, .cask, .formula_lower, .formula_root };
 
 /// A keg installed from `Casks/` (`mt install --cask`) is re-read only from
 /// there: the formula-first order would switch it to a same-named formula.
@@ -1820,6 +1820,17 @@ test "fetchRawFile returns the first 200 across layouts" {
     }
 }
 
+test "keg_rb_subtrees reads a lowercase formula dir before the root layout" {
+    const idx = struct {
+        fn of(k: forge.RawKind) ?usize {
+            for (keg_rb_subtrees, 0..) |s, i| if (s == k) return i;
+            return null;
+        }
+    };
+    try std.testing.expect(idx.of(.formula_lower).? > idx.of(.formula).?);
+    try std.testing.expect(idx.of(.formula_lower).? < idx.of(.formula_root).?);
+}
+
 test "fetchRawFile reports not_found when no layout hits" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1953,7 +1964,7 @@ test "fetchRawFile trips a raw host after an exhausted transient status" {
         const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
         var tripped = TrippedHosts{};
 
-        // Three layouts: the first keg walks every one (a budget each), the
+        // Four layouts: the first keg walks every one (a budget each), the
         // second keg pays none.
         const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", keg_rb_subtrees, &tripped);
         const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", keg_rb_subtrees, &tripped);
