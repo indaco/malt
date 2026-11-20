@@ -1027,7 +1027,8 @@ fn tapCaskLatestVersion(
 }
 
 /// Tap formula: `Formula/<name>.rb`, then `Casks/<name>.rb` (a tarball cask
-/// installed as a keg), then a root-layout `<name>.rb` — the install order.
+/// installed as a keg), then a lowercase `formula/<name>.rb`, then a
+/// root-layout `<name>.rb` — the install order.
 /// A keg installed from `Casks/` reads only that.
 fn tapFormulaLatestVersion(
     alloc: std.mem.Allocator,

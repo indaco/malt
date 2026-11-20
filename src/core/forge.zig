@@ -63,6 +63,9 @@ pub const RawKind = enum {
     /// Older Homebrew layout: `<name>.rb` kept at the repo root, no
     /// subtree. `rawFileUrl` branches on this before the subdir lookup.
     formula_root,
+    /// `formula/` in lowercase: raw hosts are case-sensitive, and a tap
+    /// authored on a case-insensitive disk may only have this spelling.
+    formula_lower,
 
     fn subdir(self: RawKind) []const u8 {
         return switch (self) {
@@ -72,6 +75,7 @@ pub const RawKind = enum {
             // this variant before reaching subdir(). An empty infix here
             // would collapse to `//` in the tail.
             .formula_root => "",
+            .formula_lower => "formula",
         };
     }
 };
@@ -788,6 +792,16 @@ test "rawFileUrl github: overflowing buffer surfaces NoSpaceLeft" {
     try std.testing.expectError(
         error.NoSpaceLeft,
         rawFileUrl(&buf, .github, github_raw_base, raw_sha_fixture, .formula, "glow"),
+    );
+}
+
+test "rawFileUrl github: formula_lower kind builds the lowercase formula subdir tail" {
+    // Raw hosts are case-sensitive, so `Formula/` never reaches a `formula/` tree.
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .github, github_raw_base, raw_sha_fixture, .formula_lower, "obsidian-vault");
+    try std.testing.expectEqualStrings(
+        github_raw_base ++ "/" ++ raw_sha_fixture ++ "/formula/obsidian-vault.rb",
+        url,
     );
 }
 

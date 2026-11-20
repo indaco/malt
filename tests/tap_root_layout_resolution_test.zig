@@ -7,12 +7,13 @@
 //! `buildBaseUrls`), so the full `installTapRb` wiring is proven by the
 //! `scripts/regressions/tap-root-layout-resolve-*.sh` field test; here we
 //! drive the same forge seam (`rawFileUrl` + `getRawFile`) the probe loop
-//! uses, against a server that models a root-layout tap: `Formula/` and
-//! `Casks/` 404, the bare root `<name>.rb` 200s.
+//! uses, against a server that models a root-layout tap: `Formula/`,
+//! `Casks/` and the lowercase `formula/` 404, the bare root `<name>.rb` 200s.
 //!
 //! It proves the fix's contract: a Formula/ + Casks/ double-404 falls
 //! back to the no-subdir root `.rb` and resolves — the URL the old probe
-//! chain never built.
+//! chain never built. A tap that only has `formula/` resolves one probe
+//! earlier and never reaches the root.
 
 const std = @import("std");
 const testing = std.testing;
@@ -32,6 +33,8 @@ const Fixture = struct {
     root_body: []const u8,
     // Number of probe requests to serve before the thread returns.
     expected: usize,
+    // Whether the lowercase `/formula/` dir holds the file.
+    has_lower: bool = false,
 };
 
 // Serves `fx.expected` requests, routing by target: any `/Formula/` or
@@ -52,8 +55,10 @@ fn serveProbes(fx: *Fixture) void {
         var srv = std.http.Server.init(&reader.interface, &writer.interface);
         var req = srv.receiveHead() catch return;
         const target = req.head.target;
+        const is_lower = std.mem.find(u8, target, "/formula/") != null;
         const is_subdir = std.mem.find(u8, target, "/Formula/") != null or
-            std.mem.find(u8, target, "/Casks/") != null;
+            std.mem.find(u8, target, "/Casks/") != null or
+            (is_lower and !fx.has_lower);
         if (is_subdir) {
             req.respond("not found\n", .{ .status = .not_found, .keep_alive = false }) catch return;
         } else {
@@ -76,7 +81,7 @@ test "tap probe selection: Formula/ + Casks/ double-404 falls back to the root-l
     defer listener.deinit(io);
     const port = listener.socket.address.getPort();
 
-    var fx = Fixture{ .io = io, .listener = &listener, .root_body = root_body, .expected = 3 };
+    var fx = Fixture{ .io = io, .listener = &listener, .root_body = root_body, .expected = 4 };
     const server_thread = try std.Thread.spawn(.{}, serveProbes, .{&fx});
     defer server_thread.join();
 
@@ -101,7 +106,13 @@ test "tap probe selection: Formula/ + Casks/ double-404 falls back to the root-l
     defer cask_resp.deinit();
     try testing.expectEqual(@as(u16, 404), cask_resp.status);
 
-    // Probe 3 — root `<name>.rb` : the added fallback resolves the formula.
+    // Probe 3 — formula/ : a lowercase dir, absent here → 404.
+    const lower_url = try forge.rawFileUrl(&url_buf, .github, raw_base, fixture_sha, .formula_lower, "yabai");
+    var lower_resp = try tap.getRawFile(&http, .empty, .github, lower_url);
+    defer lower_resp.deinit();
+    try testing.expectEqual(@as(u16, 404), lower_resp.status);
+
+    // Probe 4 — root `<name>.rb` : the added fallback resolves the formula.
     const root_url = try forge.rawFileUrl(&url_buf, .github, raw_base, fixture_sha, .formula_root, "yabai");
     var root_resp = try tap.getRawFile(&http, .empty, .github, root_url);
     defer root_resp.deinit();
@@ -113,4 +124,38 @@ test "tap probe selection: Formula/ + Casks/ double-404 falls back to the root-l
     var exp_buf: [256]u8 = undefined;
     const expected = try std.mem.print(&exp_buf, "http://127.0.0.1:{d}/{s}/yabai.rb", .{ port, fixture_sha });
     try testing.expectEqualStrings(expected, root_url);
+}
+
+test "tap probe selection: a lowercase formula/ dir resolves before the root layout" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try listenLocal(io);
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    // Formula/, Casks/, then formula/ answers: the chain stops at three.
+    var fx = Fixture{ .io = io, .listener = &listener, .root_body = root_body, .expected = 3, .has_lower = true };
+    const server_thread = try std.Thread.spawn(.{}, serveProbes, .{&fx});
+    defer server_thread.join();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, .empty, testing.allocator);
+    defer http.deinit();
+
+    var url_buf: [256]u8 = undefined;
+    for ([_]forge.RawKind{ .formula, .cask }) |kind| {
+        const url = try forge.rawFileUrl(&url_buf, .github, raw_base, fixture_sha, kind, "yabai");
+        var resp = try tap.getRawFile(&http, .empty, .github, url);
+        defer resp.deinit();
+        try testing.expectEqual(@as(u16, 404), resp.status);
+    }
+    const lower_url = try forge.rawFileUrl(&url_buf, .github, raw_base, fixture_sha, .formula_lower, "yabai");
+    var lower_resp = try tap.getRawFile(&http, .empty, .github, lower_url);
+    defer lower_resp.deinit();
+    try testing.expectEqual(@as(u16, 200), lower_resp.status);
 }

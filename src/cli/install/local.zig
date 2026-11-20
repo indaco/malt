@@ -476,12 +476,14 @@ fn installTapRb(
     };
     defer rb_resp.deinit();
 
-    // Distinct handles for the Casks/ and root-layout retries: each
+    // Distinct handles for the Casks/, formula/ and root-layout retries: each
     // fetch pairs with its own defer, so a future reorder cannot turn
     // the previous single-`resp` reuse into a double-free or
     // use-after-free.
     var cask_resp: ?client_mod.Response = null;
     defer if (cask_resp) |*c| c.deinit();
+    var lower_resp: ?client_mod.Response = null;
+    defer if (lower_resp) |*l| l.deinit();
     var root_resp: ?client_mod.Response = null;
     defer if (root_resp) |*r| r.deinit();
 
@@ -513,9 +515,28 @@ fn installTapRb(
             }
         }
 
+        // A tap authored on a case-insensitive disk may spell the dir `formula/`.
+        const lower_url = forge.rawFileUrl(
+            &url_buf,
+            urls.forge,
+            urls.raw_base,
+            commit_sha,
+            .formula_lower,
+            parts.formula,
+        ) catch return InstallError.FormulaNotFound;
+
+        lower_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, lower_url) catch {
+            sink.err("Cannot fetch tap from GitHub", .{});
+            return InstallError.FormulaNotFound;
+        };
+        if (lower_resp.?.status == 200) {
+            served = .formula_lower;
+            break :blk &lower_resp.?;
+        }
+
         // Last resort: the older Homebrew layout keeps `<name>.rb` at the
         // repo root (koekeishiya/felixkratz taps). Only reached on the
-        // double-miss path, so the common Formula/ install pays no extra GET.
+        // miss path, so the common Formula/ install pays no extra GET.
         // `--formula` still lands here: that layout holds formulas in practice.
         const root_url = forge.rawFileUrl(
             &url_buf,
