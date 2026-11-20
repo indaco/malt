@@ -567,6 +567,42 @@ fn caskBinaryLine(rb_content: []const u8) ?[]const u8 {
     return null;
 }
 
+pub const BinInstall = struct {
+    /// The file inside the archive.
+    source: []const u8,
+    /// The optional name to install it under.
+    target: ?[]const u8 = null,
+};
+
+/// The formula's first `bin.install "<file>"`, with an optional `=> "<name>"`
+/// rename. The archive file need not have the formula name.
+/// Return null for an interpolated name. malt cannot resolve it.
+pub fn parseFormulaBinInstall(rb_content: []const u8) ?BinInstall {
+    // shortcut: first line and first file only, extend when a formula needs several.
+    const head = "bin.install \"";
+    var it = std.mem.splitScalar(u8, rb_content, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (!std.mem.startsWith(u8, line, head)) continue;
+        const source, const rest = std.mem.cut(u8, line[head.len..], "\"") orelse return null;
+        // Only a `=>` right after the file is a rename, not one in a comment.
+        const after = std.mem.trimStart(u8, rest, " \t");
+        const target = rename: {
+            if (!std.mem.startsWith(u8, after, "=>")) break :rename null;
+            const arg = std.mem.trimStart(u8, after[2..], " \t");
+            if (!std.mem.startsWith(u8, arg, "\"")) break :rename null;
+            break :rename extractQuoted(arg, "\"");
+        };
+        if (hasInterpolation(source) or (target != null and hasInterpolation(target.?))) return null;
+        return .{ .source = source, .target = target };
+    }
+    return null;
+}
+
+fn hasInterpolation(s: []const u8) bool {
+    return std.mem.find(u8, s, "#{") != null;
+}
+
 /// Pull the first argument of a cask `app "<X>.app"` directive. The
 /// cask installer promotes that bundle into the chosen Applications
 /// directory; absence flips a `.zip` URL away from the cask path so a
@@ -1054,6 +1090,75 @@ test "parseCaskBinaryTarget: null when the directive names no target" {
         \\end
     ;
     try std.testing.expect(parseCaskBinaryTarget(rb) == null);
+}
+
+test "parseFormulaBinInstall: plain file has no rename" {
+    const rb =
+        \\  def install
+        \\    bin.install "mdd"
+        \\  end
+    ;
+    const got = parseFormulaBinInstall(rb).?;
+    try std.testing.expectEqualStrings("mdd", got.source);
+    try std.testing.expect(got.target == null);
+}
+
+test "parseFormulaBinInstall: reads the rename after =>" {
+    const got = parseFormulaBinInstall("    bin.install \"mdd\" => \"mddog\"\n").?;
+    try std.testing.expectEqualStrings("mdd", got.source);
+    try std.testing.expectEqualStrings("mddog", got.target.?);
+}
+
+test "parseFormulaBinInstall: keeps a pathed source and ignores a second argument" {
+    const got = parseFormulaBinInstall("bin.install \"out/mdd\", \"extra\"\r\n").?;
+    try std.testing.expectEqualStrings("out/mdd", got.source);
+    try std.testing.expect(got.target == null);
+}
+
+test "parseFormulaBinInstall: non-literal argument gives null" {
+    try std.testing.expect(parseFormulaBinInstall("bin.install Dir[\"*\"]\n") == null);
+}
+
+test "parseFormulaBinInstall: first directive wins" {
+    const got = parseFormulaBinInstall("bin.install \"a\"\nbin.install \"b\"\n").?;
+    try std.testing.expectEqualStrings("a", got.source);
+}
+
+test "parseFormulaBinInstall: only a line that starts with the directive counts" {
+    try std.testing.expect(parseFormulaBinInstall("# bin.install \"mdd\"\n") == null);
+    try std.testing.expect(parseFormulaBinInstall("desc \"runs bin.install \\\"x\\\"\"\n") == null);
+    try std.testing.expect(parseFormulaBinInstall("system \"make\"\n") == null);
+    try std.testing.expect(parseFormulaBinInstall("") == null);
+}
+
+test "parseFormulaBinInstall: interpolated source gives null" {
+    try std.testing.expect(parseFormulaBinInstall("bin.install \"mdd-#{version}\"\n") == null);
+}
+
+test "parseFormulaBinInstall: unterminated quote gives null" {
+    try std.testing.expect(parseFormulaBinInstall("bin.install \"mdd\n") == null);
+}
+
+test "parseFormulaBinInstall: a rename inside a trailing comment is not a rename" {
+    const got = parseFormulaBinInstall("bin.install \"mdd\" # => \"other\"\n").?;
+    try std.testing.expectEqualStrings("mdd", got.source);
+    try std.testing.expect(got.target == null);
+}
+
+test "parseFormulaBinInstall: a quoted word after a non-literal rename is not the rename" {
+    const got = parseFormulaBinInstall("bin.install \"mdd\" => name # see \"docs\"\n").?;
+    try std.testing.expectEqualStrings("mdd", got.source);
+    try std.testing.expect(got.target == null);
+}
+
+test "parseFormulaBinInstall: trailing condition keeps the file" {
+    const got = parseFormulaBinInstall("bin.install \"mdd\" if OS.mac?\n").?;
+    try std.testing.expectEqualStrings("mdd", got.source);
+    try std.testing.expect(got.target == null);
+}
+
+test "parseFormulaBinInstall: interpolated rename gives null" {
+    try std.testing.expect(parseFormulaBinInstall("bin.install \"mdd\" => \"x-#{version}\"\n") == null);
 }
 
 test "parseCaskApp: extracts the .app bundle name" {
