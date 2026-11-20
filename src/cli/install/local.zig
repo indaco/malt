@@ -278,6 +278,9 @@ const tap_archive_suffixes = [_]struct {
 /// `Formula/` first and falls back to `Casks/`; `.cask_only` skips the
 /// Formula/ probe entirely and `.formula_only` never reaches `Casks/`, so
 /// `--cask`/`--formula` pick one side of a tap that ships both.
+/// `.formula_then_cask` is the upgrade of a formula keg: the formula layouts
+/// first and `Casks/` last, so a same-named cask never shadows the formula
+/// but a tap that moved the recipe to `Casks/` still resolves.
 ///
 /// `.cask_only` exists because the formula branch of
 /// `materializeRubyFormula` opens its own DB transaction. Callers
@@ -290,6 +293,7 @@ const tap_archive_suffixes = [_]struct {
 const TapResolveKind = enum {
     formula_or_cask,
     formula_only,
+    formula_then_cask,
     cask_only,
 };
 
@@ -309,6 +313,23 @@ pub fn installTapFormula(
     sink: OutputSink,
 ) !void {
     return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask, null, sink);
+}
+
+/// Reinstall a formula keg from its own side: `Formula/`, `formula/`, root,
+/// then `Casks/` last.
+pub fn installTapFormulaCaskLast(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    pkg_name: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+    download_only: bool,
+    sink: OutputSink,
+) !void {
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_then_cask, null, sink);
 }
 
 /// `mt install --formula` on a tap name: `Formula/` then the root layout,
@@ -457,7 +478,7 @@ fn installTapRb(
     // First probe: Formula/ for the default mode, Casks/ when the
     // caller has pinned the resolve to cask-only.
     const initial_kind: forge.RawKind = switch (kind) {
-        .formula_or_cask, .formula_only => .formula,
+        .formula_or_cask, .formula_only, .formula_then_cask => .formula,
         .cask_only => .cask,
     };
     var url_buf: [512]u8 = undefined;
@@ -534,10 +555,11 @@ fn installTapRb(
             break :blk &lower_resp.?;
         }
 
-        // Last resort: the older Homebrew layout keeps `<name>.rb` at the
-        // repo root (koekeishiya/felixkratz taps). Only reached on the
-        // miss path, so the common Formula/ install pays no extra GET.
-        // `--formula` still lands here: that layout holds formulas in practice.
+        // The older Homebrew layout keeps `<name>.rb` at the repo root
+        // (koekeishiya/felixkratz taps). Only reached on the miss path, so the
+        // common Formula/ install pays no extra GET. `--formula` still lands
+        // here: that layout holds formulas in practice. Last, except for
+        // `.formula_then_cask`, which tries Casks/ after it.
         const root_url = forge.rawFileUrl(
             &url_buf,
             urls.forge,
@@ -552,7 +574,26 @@ fn installTapRb(
             return InstallError.FormulaNotFound;
         };
         served = .formula_root;
-        break :blk &root_resp.?;
+        if (root_resp.?.status == 200 or kind != .formula_then_cask) break :blk &root_resp.?;
+
+        // Casks/ last: a formula keg follows a tap that moved the recipe there,
+        // but a same-named cask never shadows a formula layout above.
+        const cask_url = forge.rawFileUrl(
+            &url_buf,
+            urls.forge,
+            urls.raw_base,
+            commit_sha,
+            .cask,
+            parts.formula,
+        ) catch return InstallError.FormulaNotFound;
+
+        cask_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, cask_url) catch {
+            sink.err("Cannot fetch tap from GitHub", .{});
+            return InstallError.FormulaNotFound;
+        };
+        if (cask_resp.?.status != 200) break :blk &root_resp.?;
+        served = .cask;
+        break :blk &cask_resp.?;
     };
 
     if (resp.status != 200) {

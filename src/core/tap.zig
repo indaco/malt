@@ -1641,9 +1641,34 @@ pub const keg_rb_subtrees: []const forge.RawKind = &.{ .formula, .cask, .formula
 
 /// A keg installed from `Casks/` (`mt install --cask`) is re-read only from
 /// there: the formula-first order would switch it to a same-named formula.
-pub fn kegRbSubtrees(from_casks: bool) []const forge.RawKind {
-    return if (from_casks) &.{.cask} else keg_rb_subtrees;
+/// A formula-side keg is re-read from the formula layouts only, for the same
+/// reason in the other direction.
+pub fn kegRbSubtrees(side: KegRbSide) []const forge.RawKind {
+    return switch (side) {
+        .cask => &.{.cask},
+        // Casks/ last: a same-named cask never shadows the formula, yet a tap
+        // that moved the recipe to Casks/ still resolves.
+        .formula => &.{ .formula, .formula_lower, .formula_root, .cask },
+        .unknown => keg_rb_subtrees,
+    };
 }
+
+/// Which side of a tap a keg was installed from, read from `kegs.tap_rb_subtree`.
+/// `unknown` is a row from before the column existed (or a value this build
+/// does not know): it keeps the formula-first lookup it always had.
+pub const KegRbSide = enum {
+    unknown,
+    formula,
+    cask,
+
+    pub fn fromSubtree(text: ?[]const u8) KegRbSide {
+        const kind = std.meta.stringToEnum(forge.RawKind, text orelse return .unknown) orelse return .unknown;
+        return switch (kind) {
+            .cask => .cask,
+            .formula, .formula_lower, .formula_root => .formula,
+        };
+    }
+};
 
 /// Per-run memory of raw hosts whose first keg already exhausted the retry
 /// budget, so every later keg behind the same host fails at once. Keyed on
@@ -2150,9 +2175,21 @@ test "TrippedHosts skips a host longer than its buffer rather than truncating it
     try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, long));
 }
 
-test "kegRbSubtrees keeps a Casks/ keg on Casks/ and everything else formula-first" {
-    try std.testing.expectEqualSlices(forge.RawKind, &.{.cask}, kegRbSubtrees(true));
-    try std.testing.expectEqualSlices(forge.RawKind, keg_rb_subtrees, kegRbSubtrees(false));
+test "kegRbSubtrees keeps a Casks/ keg on Casks/ and reads Casks/ last for a formula keg" {
+    try std.testing.expectEqualSlices(forge.RawKind, &.{.cask}, kegRbSubtrees(.cask));
+    try std.testing.expectEqualSlices(forge.RawKind, &.{ .formula, .formula_lower, .formula_root, .cask }, kegRbSubtrees(.formula));
+    // A row from before the column existed keeps the formula-first order.
+    try std.testing.expectEqualSlices(forge.RawKind, keg_rb_subtrees, kegRbSubtrees(.unknown));
+}
+
+test "KegRbSide.fromSubtree folds every recorded subtree to its side" {
+    try std.testing.expectEqual(KegRbSide.unknown, KegRbSide.fromSubtree(null));
+    try std.testing.expectEqual(KegRbSide.unknown, KegRbSide.fromSubtree(""));
+    try std.testing.expectEqual(KegRbSide.unknown, KegRbSide.fromSubtree("from-a-newer-malt"));
+    try std.testing.expectEqual(KegRbSide.cask, KegRbSide.fromSubtree("cask"));
+    for ([_][]const u8{ "formula", "formula_lower", "formula_root" }) |s| {
+        try std.testing.expectEqual(KegRbSide.formula, KegRbSide.fromSubtree(s));
+    }
 }
 
 test "resolveHeadCommit refuses in offline mode before dialling the forge" {

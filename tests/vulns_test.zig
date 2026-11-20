@@ -177,6 +177,11 @@ const FixtureServer = struct {
             try req.respond(dual_formula_rb, .{});
         } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Casks/dual.rb")) {
             try req.respond(dual_cask_rb, .{});
+        } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/formula/lowdual.rb")) {
+            // A lowercase `formula/` dir, no `Formula/`, plus a same-named cask.
+            try req.respond(dual_formula_rb, .{});
+        } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Casks/lowdual.rb")) {
+            try req.respond(dual_cask_rb, .{});
         } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/nocheck.rb")) {
             try req.respond(nocheck_rb, .{});
         } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/nolatest.rb")) {
@@ -647,6 +652,24 @@ test "a tap keg installed from Casks/ is scanned from the cask, not a same-named
     defer testing.allocator.free(r.stdout);
     try testing.expect(std.mem.find(u8, h.postBody(), "cask-side/dual") != null);
     try testing.expect(std.mem.find(u8, h.postBody(), "formula-side") == null);
+}
+
+test "a tap keg served from formula/ is scanned from the formula, not a same-named cask" {
+    const h = try Harness.init(testing.allocator, "tap_lower");
+    defer h.deinit();
+    try h.seedTap("someone/tap", &.{"lowdual@1.0.0"});
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{h.prefix}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("UPDATE kegs SET tap_rb_subtree = 'formula_lower' WHERE name = 'lowdual';");
+    }
+
+    const r = try h.run(&.{}, true);
+    defer testing.allocator.free(r.stdout);
+    try testing.expect(std.mem.find(u8, h.postBody(), "formula-side/dual") != null);
+    try testing.expect(std.mem.find(u8, h.postBody(), "cask-side") == null);
 }
 
 test "a tap keg is scanned against OSV from its recipe url" {

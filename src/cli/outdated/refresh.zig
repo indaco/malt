@@ -590,7 +590,7 @@ fn upstreamLatest(
             // drop the row from the audit.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.http, row.rb_from_casks);
+                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.http, row.rb_side);
                 }
             }
             const json = api.fetchFormula(row.name) catch break :blk null;
@@ -1026,10 +1026,10 @@ fn tapCaskLatestVersion(
     return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, token, http, &.{.cask}, "cask");
 }
 
-/// Tap formula: `Formula/<name>.rb`, then `Casks/<name>.rb` (a tarball cask
-/// installed as a keg), then a lowercase `formula/<name>.rb`, then a
-/// root-layout `<name>.rb` — the install order.
-/// A keg installed from `Casks/` reads only that.
+/// Tap formula, by the keg's side. `.unknown`: `Formula/`, `Casks/` (a tarball
+/// cask installed as a keg), lowercase `formula/`, root - the install order.
+/// `.formula`: `Formula/`, `formula/`, root, then `Casks/` last, so a same-named
+/// cask never shadows it. `.cask`: `Casks/` only.
 fn tapFormulaLatestVersion(
     alloc: std.mem.Allocator,
     head_cache: *TapHeadResolve,
@@ -1039,9 +1039,9 @@ fn tapFormulaLatestVersion(
     tap_label: []const u8,
     name: []const u8,
     http: *client_mod.HttpClient,
-    from_casks: bool,
+    side: tap_mod.KegRbSide,
 ) ?[]u8 {
-    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, tap_mod.kegRbSubtrees(from_casks), "formula");
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, tap_mod.kegRbSubtrees(side), "formula");
 }
 
 /// Serial-path single-row check. `latest` is caller-owned.
@@ -1594,7 +1594,7 @@ test "isLocalRow: only a --local keg is out of the audit's scope" {
     try std.testing.expect(!isLocalRow(.{ .name = "x", .version = "1", .tap = "user/repo" }));
 }
 
-// Answers by request path — `/Formula/`, `/Casks/`, or the root `<name>.rb` —
+// Answers by request path — `/Formula/`, `/Casks/`, `/formula/`, or the root `<name>.rb` —
 // with that layout's body, 404 when it is null; so a test can pin which layout
 // a subtree list reaches and in what order.
 const RbLayoutServer = struct {
@@ -1602,6 +1602,7 @@ const RbLayoutServer = struct {
     listener: *std.Io.net.Server,
     formula_rb: ?[]const u8 = null,
     cask_rb: ?[]const u8 = null,
+    lower_rb: ?[]const u8 = null,
     root_rb: ?[]const u8 = null,
     requests: std.atomic.Value(usize) = .init(0),
 
@@ -1621,6 +1622,8 @@ const RbLayoutServer = struct {
                 self.formula_rb
             else if (std.mem.find(u8, target, "/Casks/") != null)
                 self.cask_rb
+            else if (std.mem.find(u8, target, "/formula/") != null)
+                self.lower_rb
             else
                 self.root_rb;
             if (body) |b| {
@@ -1898,13 +1901,77 @@ test "tapVersionFromSubtrees keeps a keg installed from Casks/ on Casks/ when a 
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.kegRbSubtrees(true), "formula", "user/repo", null);
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.kegRbSubtrees(.cask), "formula", "user/repo", null);
     listener.deinit(io);
     thread.join();
 
     defer if (v) |vv| std.testing.allocator.free(vv);
     try std.testing.expect(v != null);
     try std.testing.expectEqualStrings("1.13.1", v.?);
+}
+
+test "tapVersionFromSubtrees follows a formula keg to Casks/ when the tap moved the recipe there" {
+    // A tap that moves `Formula/x.rb` to `Casks/x.rb` must not strand its formula kegs.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .cask_rb = tarball_cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.kegRbSubtrees(.formula), "formula", "user/repo", null);
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("1.13.1", v.?);
+}
+
+test "tapVersionFromSubtrees keeps a formula keg on formula/ when a same-named cask exists" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    const lower_rb =
+        \\class Pkg < Formula
+        \\  url "https://x/pkg-3.0.0.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  version "3.0.0"
+        \\end
+    ;
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .lower_rb = lower_rb, .cask_rb = tarball_cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.kegRbSubtrees(.formula), "formula", "user/repo", null);
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("3.0.0", v.?);
 }
 
 test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both" {
@@ -2008,7 +2075,7 @@ test "tap rows reuse the caller-supplied client (the tap path constructs no Http
     defer http.deinit();
     http.offline = true;
 
-    const f = tapFormulaLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "pkg", &http, false);
+    const f = tapFormulaLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "pkg", &http, .unknown);
     const c = tapCaskLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "tok", &http);
     if (f) |v| std.testing.allocator.free(v);
     if (c) |v| std.testing.allocator.free(v);
