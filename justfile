@@ -38,6 +38,7 @@ regressions-static:
     @./scripts/regressions/install-bypass-hint-env-reaches-bash-gh1251.sh
     @./scripts/regressions/install-bypass-hint-guard-never-runs-extra-commands.sh
     @./scripts/regressions/tap-resolution-contract.sh
+    @./scripts/regressions/tap-formula-keg-keeps-formula-side-tap-formula-keg-outside-formula-dir-upgrades-to-same-named-cask.sh
     @./scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
     @./scripts/regressions/relocated-store-logic-version-pin.sh
     @./scripts/regressions/clean-misses-tmpdir-test-scratch.sh
