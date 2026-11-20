@@ -80,7 +80,7 @@ The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/insta
 To verify `install.sh` separately, download it from a release tag. The example uses the latest tag, but you can use any release that you trust. Then compare its SHA256 with the value in the release notes:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.25.7/scripts/install.sh" -o install.sh
+curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.25.8/scripts/install.sh" -o install.sh
 shasum -a 256 install.sh
 bash install.sh
 ```
@@ -706,43 +706,49 @@ malt verifies the SHA256 of each download before extraction. It installs atomica
 ## Benchmarks
 
 <!-- BENCH:META:START -->
+
 - Install times on macOS 26 (Apple Silicon).
 - Benchmarked releases:
   - malt `0.25.7`
   - nanobrew `v0.1.216`
   - zerobrew `v0.4.2`
+
 <!-- BENCH:META:END -->
 
 > [!NOTE]
 > malt verifies the SHA256 of a bottle before it reads the archive. Thus, extraction starts only after the download is complete. A client that extracts during the download can be faster on large packages, but its parser reads data that is not verified yet. → [Verify before parse](ARCHITECTURE.md#safety-and-security)
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.522±0.023s | 0.615±0.063s | 1.051±0.174s | 3.265±0.435s |
-| **wget** (7 deps) | 3.384±0.610s | 12.623±0.873s | 4.784±0.848s | 39.312±3.940s |
-| **ffmpeg** (14 deps) | 4.454±2.427s | 12.027±15.935s | 4.237±0.835s | 46.204±2.369s |
-| **openjdk** (29 deps) | 15.928±1.905s | 36.037±0.497s | 10.317±1.219s | ⚠️ n/a (>50s) |
-| **tesseract** (37 deps) | 9.078±0.699s | 29.753±2.169s | 7.182±0.783s | ⚠️ n/a (>50s) |
+| Package                 | malt          | nanobrew       | zerobrew      | Homebrew      |
+| ----------------------- | ------------- | -------------- | ------------- | ------------- |
+| **tree** (0 deps)       | 0.522±0.023s  | 0.615±0.063s   | 1.051±0.174s  | 3.265±0.435s  |
+| **wget** (7 deps)       | 3.384±0.610s  | 12.623±0.873s  | 4.784±0.848s  | 39.312±3.940s |
+| **ffmpeg** (14 deps)    | 4.454±2.427s  | 12.027±15.935s | 4.237±0.835s  | 46.204±2.369s |
+| **openjdk** (29 deps)   | 15.928±1.905s | 36.037±0.497s  | 10.317±1.219s | ⚠️ n/a (>50s) |
+| **tesseract** (37 deps) | 9.078±0.699s  | 29.753±2.169s  | 7.182±0.783s  | ⚠️ n/a (>50s) |
 
 > ⚠️ = cell omitted. That tool's cold install failed, or exceeded the
 > sanity ceiling (50 s), which reflects a regression in that tool rather
 > than a comparable install time, so the number is withheld instead of
 > published. malt is never omitted - a real malt slowdown stays visible.
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.011s | 0.089s | 0.211s |
-| **wget** (7 deps) | 0.029s | 0.138s | 0.258s |
-| **ffmpeg** (14 deps) | 0.029s | 4.300s | 0.235s |
-| **openjdk** (29 deps) | 0.019s | 7.009s | 0.229s |
-| **tesseract** (37 deps) | 0.014s | 1.347s | 0.188s |
+| Package                 | malt   | nanobrew | zerobrew |
+| ----------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)       | 0.011s | 0.089s   | 0.211s   |
+| **wget** (7 deps)       | 0.029s | 0.138s   | 0.258s   |
+| **ffmpeg** (14 deps)    | 0.029s | 4.300s   | 0.235s   |
+| **openjdk** (29 deps)   | 0.019s | 7.009s   | 0.229s   |
+| **tesseract** (37 deps) | 0.014s | 1.347s   | 0.188s   |
+
 <!-- BENCH:WARM:END -->
 
 > Apple Silicon (GitHub Actions macos-26), 2026-11-16. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
