@@ -839,6 +839,10 @@ fn runInstall(
         // `user/repo/foo.rb` hits local-file error, not a GitHub 404.
         if (flags.local_only or isLocalFormulaPath(pkg_name)) {
             installLocalFormula(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, sink) catch |e| {
+                if (e == InstallError.UserInterrupted) {
+                    if (failed_count > 0) return InstallError.PartialFailure;
+                    return;
+                }
                 // Skip the generic summary when the inner error line already
                 // told the user what went wrong.
                 if (!localErrorIsAnnounced(e)) {
@@ -859,6 +863,13 @@ fn runInstall(
                 installTapFormulaOnly(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink)
             else
                 installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink)) catch |e| {
+                // The user stopped the install, and it said so. Return as the
+                // loop-top check does: the --force prune after the loop
+                // would delete the keg of a queued formula.
+                if (e == InstallError.UserInterrupted) {
+                    if (failed_count > 0) return InstallError.PartialFailure;
+                    return;
+                }
                 // A source-build refusal already printed an actionable line
                 // plus the `brew install` hint, so don't bury it under a
                 // generic summary that just repeats the error enum name.
@@ -907,6 +918,10 @@ fn runInstall(
                 }
                 // Try cask
                 installCask(ctx, allocator, pkg_name, &db, &api, flags, sink) catch |e| {
+                    if (e == InstallError.UserInterrupted) {
+                        if (failed_count > 0) return InstallError.PartialFailure;
+                        return;
+                    }
                     // Last resort: a tap formula's sibling dep, which is
                     // unqualified in the `.rb` and lives in neither core nor
                     // the cask index.
@@ -915,6 +930,10 @@ fn runInstall(
                         const slug = args_mod.tapSiblingSlug(&slug_buf, exec_opts.dep_tap orelse "", pkg_name) orelse
                             break :sibling;
                         installTapFormula(ctx, allocator, slug, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink) catch |tap_err| {
+                            if (tap_err == InstallError.UserInterrupted) {
+                                if (failed_count > 0) return InstallError.PartialFailure;
+                                return;
+                            }
                             if (skippableRecommended(exec_opts.recommended, pkg_name, tap_err)) {
                                 sink.warn("{s} is recommended, not required — continuing without it.", .{pkg_name});
                                 continue;
@@ -972,6 +991,10 @@ fn runInstall(
             output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
             installCask(ctx, allocator, pkg_name, &db, &api, flags, sink) catch |e| {
+                if (e == InstallError.UserInterrupted) {
+                    if (failed_count > 0) return InstallError.PartialFailure;
+                    return;
+                }
                 sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;
             };
@@ -1776,12 +1799,14 @@ pub fn warnSkippedWrappers(allocator: std.mem.Allocator, c: *const cask_mod.Cask
 
 /// An empty install has a cause the user can read; any other error keeps its name.
 pub fn reportCaskInstallFailure(allocator: std.mem.Allocator, c: *const cask_mod.Cask, e: anyerror, sink: OutputSink) void {
-    if (e == error.NothingToPlace) {
-        sink.err("cask {s} has nothing malt can install", .{c.token});
-        warnSkippedWrappers(allocator, c, sink);
-        return;
+    switch (e) {
+        error.NothingToPlace => {
+            sink.err("cask {s} has nothing malt can install", .{c.token});
+            warnSkippedWrappers(allocator, c, sink);
+        },
+        error.UserInterrupted => sink.warn("Interrupted.", .{}),
+        else => sink.err("Failed to install cask {s}: {s}", .{ c.token, @errorName(e) }),
     }
-    sink.err("Failed to install cask {s}: {s}", .{ c.token, @errorName(e) });
 }
 
 /// The reason an install error shows to the user; upgrade and rollback have no cask to name.
@@ -2075,7 +2100,7 @@ fn installCask(
         // A bare "failed to install" gives the user nothing to act on.
         reportCaskInstallFailure(allocator, &cask, e, sink);
         if (installer.conflictPath()) |p| sink.err("{s} is not this cask's link; remove it first", .{p});
-        return InstallError.CaskNotFound;
+        return if (e == error.UserInterrupted) InstallError.UserInterrupted else InstallError.CaskNotFound;
     };
 
     // Core API casks have no third-party tap origin to record.
@@ -2840,6 +2865,19 @@ test "reportCaskInstallFailure keeps the error name for other failures and skips
     reportCaskInstallFailure(std.testing.allocator, &c, error.Sha256Mismatch, cap.sink());
     try std.testing.expectEqual(@as(usize, 1), cap.lines.items.len);
     try std.testing.expectEqualStrings("Failed to install cask gogs: Sha256Mismatch", cap.lines.items[0]);
+}
+
+test "reportCaskInstallFailure says a Ctrl-C stopped the install, not that it failed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try cask_mod.parseCask(arena.allocator(), gogs_wrapper_json);
+    defer c.deinit();
+    var cap: FailureCapture = .{};
+    defer cap.deinit();
+    reportCaskInstallFailure(std.testing.allocator, &c, error.UserInterrupted, cap.sink());
+    // Same words as a Ctrl-C during the download URL walk.
+    try std.testing.expectEqual(@as(usize, 1), cap.lines.items.len);
+    try std.testing.expectEqualStrings("Interrupted.", cap.lines.items[0]);
 }
 
 const WarnCapture = struct {

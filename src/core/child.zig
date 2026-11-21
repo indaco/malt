@@ -162,10 +162,15 @@ pub fn runOrFail(
     defer report.deinit(allocator);
     if (report.code == 0) return;
 
+    replay(io, report);
+    return error.NonZeroExit;
+}
+
+/// Copy a failed child's output to stderr, its reason first.
+pub fn replay(io: std.Io, report: RunReport) void {
     const stderr_file = std.Io.File.stderr();
     if (report.stderr.len > 0) stderr_file.writeStreamingAll(io, report.stderr) catch {};
     if (report.stdout.len > 0) stderr_file.writeStreamingAll(io, report.stdout) catch {};
-    return error.NonZeroExit;
 }
 
 /// Run a command with its working directory anchored to an already-open
@@ -181,9 +186,7 @@ pub fn runOrFailInDir(
     defer report.deinit(allocator);
     if (report.code == 0) return;
 
-    const stderr_file = std.Io.File.stderr();
-    if (report.stderr.len > 0) stderr_file.writeStreamingAll(io, report.stderr) catch {};
-    if (report.stdout.len > 0) stderr_file.writeStreamingAll(io, report.stdout) catch {};
+    replay(io, report);
     return error.NonZeroExit;
 }
 

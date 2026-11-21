@@ -26,6 +26,9 @@ pub const InstallError = error{
     /// or was skipped because an ancestor dep failed. Returned from `execute`
     /// so `main` exits non-zero.
     PartialFailure,
+    /// The user pressed Ctrl-C during a cask install. The install site
+    /// printed "Interrupted.", so no failure line follows it.
+    UserInterrupted,
     /// This machine ran out of threads or file descriptors, not the network.
     /// Separate from `NetworkError` so the user is pointed at their own box
     /// instead of at their connection.
@@ -114,6 +117,8 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.DependencyFailed,
         // Every raise site prints the conflict or link failure itself.
         InstallError.LinkFailed,
+        // The install site printed "Interrupted.".
+        InstallError.UserInterrupted,
         => true,
 
         InstallError.NoPackages,

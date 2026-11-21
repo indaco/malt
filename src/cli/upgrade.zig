@@ -558,7 +558,7 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // Best-effort warm of the shared outdated snapshot from the dry-run's
         // own audit — a cache-write failure never changes exit code or output.
         // Reuses the cache dir already resolved above.
-        if (warmsSnapshot(.{ .dry_run = dry_run, .full_keg = full_keg, .walk_failed = any_failed, .tainted = sink.tainted })) {
+        if (warmsSnapshot(.{ .dry_run = dry_run, .full_keg = full_keg, .walk_failed = any_failed or signals.isInterrupted(), .tainted = sink.tainted })) {
             outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, sink.formulas.items, sink.casks.items) catch {};
         }
     } else {
@@ -568,6 +568,8 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // bulk run, so each named package keeps its per-package line and
         // there is no footer; the outcome itself is nothing to fold here.
         for (names.items) |name| {
+            // A Ctrl-C whose put-back failed returns Aborted, not UserInterrupted.
+            if (signals.isInterrupted()) break;
             const is_formula = !cask_only and (isFormulaInstalled(&db, name) catch {
                 // Under --formula the user already ruled the cask out.
                 if (formula_only)
@@ -580,7 +582,9 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
             // `--formula` takes this arm even on a miss, which refuses the name.
             if (is_formula or formula_only) {
                 if (shadowsCask(&db, name, formula_only)) help.warnTreatedAsFormula(name);
-                const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
+                const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch |e| {
+                    // The user stopped the upgrade; the package did not fail.
+                    if (e == error.UserInterrupted) break;
                     any_failed = true;
                     continue;
                 };
@@ -588,7 +592,8 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
                 continue;
             }
             // Not a formula (or --cask): try cask
-            const outcome = upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, false, null) catch {
+            const outcome = upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, false, null) catch |e| {
+                if (e == error.UserInterrupted) break;
                 any_failed = true;
                 continue;
             };
@@ -1317,7 +1322,7 @@ fn upgradeTapFormula(
         .cask => install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, null, install_sink_mod.terminal),
         .formula => install_local_mod.installTapFormulaCaskLast(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal),
         .unknown => install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal),
-    }) catch {
+    }) catch |in_err| {
         // The pin above now names a commit whose formula never landed; left
         // in place, the sha-truth gate would call the next retry "already at
         // latest" forever. Rewind both columns: a restored sha with the fresh
@@ -1328,6 +1333,8 @@ fn upgradeTapFormula(
             tap_mod.clearHead(db, tap_label);
         // A silent restore failure would bring the "already at latest" lie back.
         restored catch |e| output.warn("Could not restore tap pin for {s}: {s} - retry with --force", .{ tap_label, @errorName(e) });
+        // The install site printed "Interrupted."; nothing broke.
+        if (in_err == error.UserInterrupted) return error.UserInterrupted;
         output.err("Failed to upgrade tap formula {s}", .{full_name});
         return error.Aborted;
     };
@@ -1338,7 +1345,7 @@ fn upgradeTapFormula(
 /// attempt failed". The probe loop in `upgradeTapCaskFallback` continues
 /// on either — the pre-routed call from `upgradeCask` continues only on
 /// the latter (a 404 against a recorded `casks.tap` is user-facing).
-const TapRouteError = error{ NotInTap, Aborted };
+const TapRouteError = error{ NotInTap, Aborted, UserInterrupted };
 
 /// A `:no_check` recipe is named here: as `NotInTap` the caller would call
 /// the cask gone from a tap that still ships it. An unpinned digest is
@@ -1526,21 +1533,27 @@ fn upgradeRoutedTapCask(
     if (stored) |*s| _ = flight.runPhase(&installer, token, installed_version, s.get(.uninstall_postflight), .uninstall_postflight, install_sink_mod.terminal);
 
     // Installs the bytes the prefetch fetched, so this never re-downloads.
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch {
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch |in_err| {
         // The install site already printed the cause; its folded error name would contradict it.
-        output.err("Failed to upgrade tap cask {s}", .{full_name});
+        // After "Interrupted." a failure line would say something broke.
+        if (in_err != error.UserInterrupted) output.err("Failed to upgrade tap cask {s}", .{full_name});
         // As on the core-API path: the rows come back with the rollback, the
         // bundle does not. Drop the prefetch first or the reinstall would
         // consume the new artefact instead of the old one.
         db.rollback();
         installer.prefetched_artifact = null;
+        installer.put_back = true;
         if (installer.reinstallFromHistory(token, installed_version)) |_| {
             output.warn("{s} {s} is back in place", .{ token, installed_version });
         } else |re_err| switch (re_err) {
             error.LinksIncomplete => output.warn("{s} {s} is back in place, but its command-line links could not be created", .{ token, installed_version }),
-            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, install_mod.installErrorText(re_err), token, installed_version }),
+            else => {
+                output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, install_mod.installErrorText(re_err), token, installed_version });
+                return error.Aborted;
+            },
         }
-        return error.Aborted;
+        // Back in place: a Ctrl-C is not a failed upgrade.
+        return if (in_err == error.UserInterrupted) error.UserInterrupted else error.Aborted;
     };
 
     db.commit() catch |commit_err| {
@@ -1582,7 +1595,7 @@ fn upgradeTapCaskFallback(
     force: bool,
     bulk: bool,
     sink: ?*EntrySink,
-) ?Outcome {
+) error{UserInterrupted}!?Outcome {
     const taps = tap_mod.list(allocator, db) catch return null;
     defer {
         for (taps) |t| {
@@ -1599,7 +1612,11 @@ fn upgradeTapCaskFallback(
 
         // Either "tap doesn't own this token" or "something went
         // wrong with this tap" — neither is fatal to the probe.
-        const outcome = upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, bulk, sink) catch continue;
+        // A Ctrl-C ends the probe: the next tap would start another install.
+        const outcome = upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, bulk, sink) catch |e| {
+            if (e == error.UserInterrupted) return error.UserInterrupted;
+            continue;
+        };
 
         // The owning tap is now known. recordInstall sets `casks.tap`
         // automatically for the install branch; backfillCaskTap covers
@@ -1772,7 +1789,9 @@ fn upgradeAllFormulas(
         // caches skewed inside their shared TTL.
         if (upgradeFormula(ctx, allocator, row.name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, true, sink)) |o| {
             tally.fold(o);
-        } else |_| {
+        } else |e| {
+            // The user stopped the upgrade; the package did not fail.
+            if (e == error.UserInterrupted) break;
             failed_count += 1;
             tally.failed += 1;
             // failed_count is the authoritative counter; list is for UX only.
@@ -1796,14 +1815,14 @@ fn upgradeAllFormulas(
 /// line, the sudo gate and the download: a suffix-less URL is walked here as
 /// on install, so none of them reads it as an unsupported format. `unknown`
 /// is a verdict, reported by the caller; only a failed walk aborts here.
-fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, cask: *const cask_mod.Cask) error{Aborted}!cask_mod.ArtifactType {
+fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, cask: *const cask_mod.Cask) error{ Aborted, UserInterrupted }!cask_mod.ArtifactType {
     const declared_or_url = cask.artifactType();
     if (declared_or_url != .unknown) return declared_or_url;
 
     return install_mod.resolveCaskArtifactViaWalk(ctx, allocator, cask.url) catch |e| {
         if (e == error.Canceled) {
             output.warn("Interrupted.", .{});
-            return error.Aborted;
+            return error.UserInterrupted;
         }
         output.err("Could not resolve the download URL for {s}: {s} (installed version left in place)", .{ cask.token, @errorName(e) });
         return error.Aborted;
@@ -1838,6 +1857,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
                     return error.Aborted;
                 },
                 error.Aborted => return error.Aborted,
+                error.UserInterrupted => return error.UserInterrupted,
             };
         }
     }
@@ -1847,7 +1867,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // third-party tap if the core API 404s — the probe also backfills
     // `casks.tap` for the next invocation.
     const cask_json = api.fetchCask(token) catch {
-        if (upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, bulk, sink)) |o| return o;
+        if (try upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, bulk, sink)) |o| return o;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -1984,7 +2004,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     const placed = installer.install(&parsed_cask);
     if (installer.preflight_ran) _ = flight.route(token, .preflight, install_sink_mod.terminal);
     const app_path = placed catch |in_err| {
-        if (in_err == error.NothingToPlace) {
+        if (in_err == error.NothingToPlace or in_err == error.UserInterrupted) {
             install_mod.reportCaskInstallFailure(allocator, &parsed_cask, in_err, install_sink_mod.terminal);
         } else output.err(
             "Failed to install new version of {s}: {s}",
@@ -2000,13 +2020,18 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         const stand_in = cask_mod.collectBinaryArtifacts(allocator, parsed_cask.parsed.value.object) catch null;
         defer if (stand_in) |entries| allocator.free(entries);
         installer.binary_entries_override = stand_in;
+        installer.put_back = true;
         if (installer.reinstallFromHistory(token, old_version)) |_| {
             output.warn("{s} {s} is back in place", .{ token, old_version });
         } else |re_err| switch (re_err) {
             error.LinksIncomplete => output.warn("{s} {s} is back in place, but its command-line links could not be created", .{ token, old_version }),
-            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, install_mod.installErrorText(re_err), token, old_version }),
+            else => {
+                output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, install_mod.installErrorText(re_err), token, old_version });
+                return error.Aborted;
+            },
         }
-        return error.Aborted;
+        // Back in place: a Ctrl-C is not a failed upgrade.
+        return if (in_err == error.UserInterrupted) error.UserInterrupted else error.Aborted;
     };
 
     // Reaching this point implies the core Homebrew API served the
@@ -2068,7 +2093,9 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
         // to skew.
         if (upgradeCask(ctx, allocator, row.name, db, api, prefix, dry_run, force, pinned_only, true, sink)) |o| {
             tally.fold(o);
-        } else |_| {
+        } else |e| {
+            // The user stopped the upgrade; the cask did not fail.
+            if (e == error.UserInterrupted) break;
             failed_count += 1;
             tally.failed += 1;
             // failed_count is authoritative; list is for UX only.

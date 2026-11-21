@@ -378,6 +378,159 @@ test "Ctrl-C mid-resolution after a counted miss exits PartialFailure" {
     );
 }
 
+/// Polls of the interrupt flag before the attach of the cask in the test
+/// below: before resolution, one loop-top check per package, then the
+/// check after the failed attach.
+const polls_to_cask_attach = 4;
+
+test "Ctrl-C during a cask attach stops the install before --force deletes a queued keg" {
+    // The --force prune runs after the package loop and deletes the live
+    // keg dir. A Ctrl-C that left the loop and reached it would leave the
+    // formula with no keg, dangling links and a row that says installed.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const prefix_z = try setupPrefix("dmgirq");
+    defer testing.allocator.free(prefix_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.Options.debug_io;
+
+    try seedFormulaCache(prefix_z, "alpha", alpha_no_deps_json);
+    const keg_file = try a.print("{s}/Cellar/alpha/1.0/bin/alpha", .{prefix_z});
+    try test_io.cwd().createDirPath(io, test_io.path.dirname(keg_file).?);
+    try test_io.cwd().writeFile(io, .{ .sub_path = keg_file, .data = "live keg" });
+
+    // A cached artefact with a pinned digest installs offline; it is not a
+    // disk image, so the attach fails at once.
+    const dmg_bytes = "not a disk image";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(dmg_bytes, &digest, .{});
+    try test_io.cwd().createDirPath(io, try a.print("{s}/cache/Cask", .{prefix_z}));
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/Cask/zzdmgirq-1.0.dmg", .{prefix_z}), .data = dmg_bytes });
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/api/formula_zzdmgirq.404", .{prefix_z}), .data = "" });
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/api/cask_zzdmgirq.json", .{prefix_z}), .data = try a.print(
+        \\{{"token":"zzdmgirq","name":["Zz"],"version":"1.0","url":"https://example.invalid/zzdmgirq.dmg","sha256":"{s}","artifacts":[{{"app":["Zz.app"]}}]}}
+    , .{std.fmt.bytesToHex(digest, .lower)}) });
+    // The installer stages under `<prefix>/tmp`, which `mt` creates at init.
+    try test_io.cwd().createDirPath(io, try a.print("{s}/tmp", .{prefix_z}));
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    malt.signals.armInterruptAfterForTest(polls_to_cask_attach);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    // Nothing failed, the user stopped it: exit 0, as a Ctrl-C between packages.
+    install.execute(&ctx, a, &.{ "--force", "alpha", "zzdmgirq" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    // The cask's own Ctrl-C line, not the loop-top one: the flag fired at the attach.
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted during resolution") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to install") == null);
+    const kept = try test_io.readFileAbsoluteAlloc(io, testing.allocator, keg_file, 64);
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("live keg", kept);
+}
+
+test "Ctrl-C during the dependency of a local formula stops the formula too" {
+    // installAll returns success after a Ctrl-C. Without a check the
+    // formula would install with its dependency missing.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const prefix_z = try setupPrefix("depirq");
+    defer testing.allocator.free(prefix_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.Options.debug_io;
+
+    // The dependency is a cask whose cached artefact is not a disk image,
+    // so its attach fails at once.
+    const dmg_bytes = "not a disk image";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(dmg_bytes, &digest, .{});
+    try test_io.cwd().createDirPath(io, try a.print("{s}/cache/Cask", .{prefix_z}));
+    try test_io.cwd().createDirPath(io, try a.print("{s}/cache/api", .{prefix_z}));
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/Cask/zzdepirq-1.0.dmg", .{prefix_z}), .data = dmg_bytes });
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/api/formula_zzdepirq.404", .{prefix_z}), .data = "" });
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/api/cask_zzdepirq.json", .{prefix_z}), .data = try a.print(
+        \\{{"token":"zzdepirq","name":["Zz"],"version":"1.0","url":"https://example.invalid/zzdepirq.dmg","sha256":"{s}","artifacts":[{{"app":["Zz.app"]}}]}}
+    , .{std.fmt.bytesToHex(digest, .lower)}) });
+    try test_io.cwd().createDirPath(io, try a.print("{s}/tmp", .{prefix_z}));
+
+    // The formula's own artefact is cached, so nothing but the check stops it.
+    const tool = try test_io.readFileAbsoluteAlloc(io, a, "/usr/bin/true", 1 << 20);
+    var tool_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(tool, &tool_digest, .{});
+    const tool_hex = std.fmt.bytesToHex(tool_digest, .lower);
+    try test_io.cwd().createDirPath(io, try a.print("{s}/cache/Tap", .{prefix_z}));
+    try test_io.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/cache/Tap/{s}.bin", .{ prefix_z, tool_hex }), .data = tool });
+    const rb_path = try a.print("{s}/zzparent.rb", .{prefix_z});
+    try test_io.cwd().writeFile(io, .{ .sub_path = rb_path, .data = try a.print(
+        \\class Zzparent < Formula
+        \\  url "https://example.invalid/zzparent"
+        \\  version "1.0"
+        \\  sha256 "{s}"
+        \\  depends_on "zzdepirq"
+        \\end
+        \\
+    , .{tool_hex}) });
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    malt.signals.armInterruptAfterForTest(polls_to_dep_attach);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    install.execute(&ctx, a, &.{rb_path}) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted during resolution") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to install") == null);
+    var db = try malt.sqlite.Database.open(try a.printSentinel("{s}/db/malt.db", .{prefix_z}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT 1 FROM kegs WHERE name='zzparent';");
+    defer stmt.finalize();
+    try testing.expect(!(try stmt.step()));
+}
+
+/// The outer loop's two polls, then the dependency run's two, then the
+/// check after the failed attach.
+const polls_to_dep_attach = 5;
+
 test "execute --dry-run with an already-installed package short-circuits" {
     const prefix_z = try setupPrefix("mi");
     defer testing.allocator.free(prefix_z);
