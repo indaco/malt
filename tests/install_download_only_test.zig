@@ -397,8 +397,8 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
     // caches can be refreshed ahead of an upgrade. We assert the bypass
     // by capturing that no "already installed" line is printed even
     // though the row exists — and the run still terminates with a
-    // cask-fetch error (because there's no network in this test, the
-    // cache lookup for the cask JSON misses).
+    // cask-fetch error: a cached 404 marker answers the lookup, so the
+    // test sends no request and a network fault cannot change the message.
     const base = try test_io.uniqueTempPath(testing.allocator, "install_dlonly", "cask_bypass");
     defer testing.allocator.free(base);
     const prefix_z = try testing.allocator.dupeSentinel(u8, base, 0);
@@ -432,6 +432,15 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
         try stmt.bindText(5, &@as([64]u8, @splat('0')));
         try stmt.bindText(6, "/Applications/Ghost.app");
         _ = try stmt.step();
+    }
+    {
+        const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix_z});
+        defer testing.allocator.free(cache_api);
+        try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+        const marker = try testing.allocator.print("{s}/cask_ghost-cask.404", .{cache_api});
+        defer testing.allocator.free(marker);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{ .truncate = true });
+        f.close(std.Options.debug_io);
     }
 
     const prior_quiet = malt.output.isQuiet();
