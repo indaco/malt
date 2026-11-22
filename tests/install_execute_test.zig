@@ -177,6 +177,16 @@ test "execute with --formula forces formula-only and errors on an unresolvable n
     defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+    // A cached 404 marker answers the lookup, so the test sends no request.
+    {
+        const cache_api = try testing.allocator.print("{s}/cache/api", .{prefix_z});
+        defer testing.allocator.free(cache_api);
+        try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+        const p = try testing.allocator.print("{s}/formula_zz_nonexistent_formula_xyz.404", .{cache_api});
+        defer testing.allocator.free(p);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
 
     // `--formula` + an unknown name → fetchFormula fails → formula-only
     // dispatch path emits its error line and counts the failure. The
@@ -199,18 +209,27 @@ test "execute with a tap-formula-shaped name routes through the tap path in dry-
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    // user/repo/formula triggers installTapFormula, which fails when the
-    // tap isn't cloned locally. The dispatch loop counts the failure so
+    // user/repo/formula triggers installTapFormula. Offline, the tap's HEAD
+    // lookup fails with no request. The dispatch loop counts the failure so
     // a single-package run exits with PartialFailure.
+    const prior_quiet = malt.output.isQuiet();
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     try testing.expectError(
         install_record.InstallError.PartialFailure,
         install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" }),
     );
+    // Any failure gives PartialFailure; only the tap route asks for the HEAD.
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve zzuser/zzrepo's HEAD commit") != null);
 }
 
 test "execute with neither --formula nor --cask: 404 cache markers route through the cask fall-through and exit PartialFailure" {
