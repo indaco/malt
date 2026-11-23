@@ -5,7 +5,7 @@ This file gives the install times of malt, nanobrew, zerobrew, and Homebrew. The
 <!-- BENCH:META:START -->
 - Install times on macOS 26 (Apple Silicon).
 - Benchmarked releases:
-  - malt `0.25.7`
+  - malt `0.25.8`
   - nanobrew `v0.1.216`
   - zerobrew `v0.4.2`
 <!-- BENCH:META:END -->
@@ -18,11 +18,11 @@ This file gives the install times of malt, nanobrew, zerobrew, and Homebrew. The
 
 | Package | malt | nanobrew | zerobrew | Homebrew |
 | ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.522±0.023s | 0.615±0.063s | 1.051±0.174s | 3.265±0.435s |
-| **wget** (7 deps) | 3.384±0.610s | 12.623±0.873s | 4.784±0.848s | 39.312±3.940s |
-| **ffmpeg** (14 deps) | 4.454±2.427s | 12.027±15.935s | 4.237±0.835s | 46.204±2.369s |
-| **openjdk** (29 deps) | 15.928±1.905s | 36.037±0.497s | 10.317±1.219s | ⚠️ n/a (>50s) |
-| **tesseract** (37 deps) | 9.078±0.699s | 29.753±2.169s | 7.182±0.783s | ⚠️ n/a (>50s) |
+| **tree** (0 deps) | 0.539±0.079s | 0.714±0.026s | 1.297±0.288s | 4.580±0.450s |
+| **wget** (7 deps) | 4.754±0.762s | 12.965±1.122s | 5.396±0.426s | 40.717±4.665s |
+| **ffmpeg** (14 deps) | 4.422±1.118s | 11.958±1.790s | 4.616±0.551s | 45.684±5.548s |
+| **openjdk** (29 deps) | 18.930±1.716s | 39.169±1.656s | 11.596±1.252s | ⚠️ n/a (>50s) |
+| **tesseract** (37 deps) | 12.287±1.452s | 34.774±2.325s | 8.759±0.601s | ⚠️ n/a (>50s) |
 
 > ⚠️ = cell omitted. That tool's cold install failed, or exceeded the
 > sanity ceiling (50 s), which reflects a regression in that tool rather
@@ -35,11 +35,11 @@ This file gives the install times of malt, nanobrew, zerobrew, and Homebrew. The
 
 | Package | malt | nanobrew | zerobrew |
 | ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.011s | 0.089s | 0.211s |
-| **wget** (7 deps) | 0.029s | 0.138s | 0.258s |
-| **ffmpeg** (14 deps) | 0.029s | 4.300s | 0.235s |
-| **openjdk** (29 deps) | 0.019s | 7.009s | 0.229s |
-| **tesseract** (37 deps) | 0.014s | 1.347s | 0.188s |
+| **tree** (0 deps) | 0.019s | 0.167s | 0.305s |
+| **wget** (7 deps) | 0.030s | 0.197s | 0.372s |
+| **ffmpeg** (14 deps) | 0.031s | 4.003s | 0.270s |
+| **openjdk** (29 deps) | 0.024s | 7.663s | 0.270s |
+| **tesseract** (37 deps) | 0.021s | 1.271s | 0.213s |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
@@ -52,7 +52,7 @@ This file gives the install times of malt, nanobrew, zerobrew, and Homebrew. The
 | zerobrew | 9.3 MB |
 <!-- BENCH:SIZE:END -->
 
-> Apple Silicon (GitHub Actions macos-26), 2026-11-16. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+> Apple Silicon (GitHub Actions macos-26), 2026-11-23. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ## Methodology
 
