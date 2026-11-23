@@ -43,10 +43,10 @@ python3 - "$TARGET" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-needle = '            system_tools.hdiutil, "attach",'
+needle = '        system_tools.hdiutil, "attach",'
 if needle not in s:
     sys.exit("FAIL: fixture anchor missing from " + p)
-open(p, "w", encoding="utf-8").write(s.replace(needle, '            "hdiutil", "attach",', 1))
+open(p, "w", encoding="utf-8").write(s.replace(needle, '        "hdiutil", "attach",', 1))
 PY
 
 if bash "$LINT" >/dev/null 2>&1; then

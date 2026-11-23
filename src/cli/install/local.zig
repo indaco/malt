@@ -25,6 +25,7 @@ const store_path = @import("../../fs/store_path.zig");
 const macho_parser = @import("../../macho/parser.zig");
 const client_mod = @import("../../net/client.zig");
 const output = @import("../../ui/output.zig");
+const signals = @import("../../core/signals.zig");
 const progress_mod = @import("../../ui/progress.zig");
 const install_mod = @import("../install.zig");
 const args = @import("args.zig");
@@ -1012,6 +1013,8 @@ fn installDeclaredDeps(
         sink.err("Failed to install dependencies for {s}", .{resolved.name});
         return InstallError.DependencyFailed;
     };
+    // A Ctrl-C stops installAll with success; the formula must not go on without its deps.
+    if (signals.isInterrupted()) return InstallError.UserInterrupted;
 }
 
 /// Does the staged file open with Mach-O magic? The only signal available
@@ -1716,6 +1719,7 @@ fn materializeTapCask(
             error.DownloadFailed, error.Sha256Mismatch, error.Sha256Missing => InstallError.DownloadFailed,
             error.DownloadLocalResourceExhausted => InstallError.LocalResourceExhausted,
             error.OutOfMemory => InstallError.RecordFailed,
+            error.UserInterrupted => InstallError.UserInterrupted,
             else => InstallError.CaskNotFound,
         };
     };

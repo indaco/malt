@@ -15,6 +15,7 @@ const confined_source = @import("../fs/confined_source.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
+const signals = @import("signals.zig");
 const cask_font = @import("cask_font.zig");
 const caveats_mod = @import("caveats.zig");
 const cask_variation = @import("../net/cask_variation.zig");
@@ -53,6 +54,9 @@ pub const CaskError = error{
     // reached, so reporting it as a download failure sends the user to the
     // wrong place.
     DownloadLocalResourceExhausted,
+    // Distinct from InstallFailed: the user pressed Ctrl-C, nothing broke.
+    // Not `Interrupted`: std uses that name for EINTR.
+    UserInterrupted,
     OutOfMemory,
 };
 
@@ -1049,6 +1053,187 @@ fn firstArtifactArray(obj: std.json.ObjectMap, key: []const u8) ?std.json.Array 
     return null;
 }
 
+/// hdiutil prints this when the disk image service is busy with another
+/// attach. A later attempt can succeed; any other failure repeats.
+const busy_attach_marker = "Resource temporarily unavailable";
+/// Under parallel attaches the service refuses some at once. The waits give
+/// the other attaches time to finish before the next attempt.
+const attach_backoff_ms = [_]u32{ 1000, 2000, 4000, 8000 };
+
+/// Attach `dmg_path` at `mount_point`, and retry while the service is busy.
+/// A refused attach can keep the image attached with nothing mounted. That
+/// device blocks the next attach of the same file and stays until reboot,
+/// so each failure detaches it first.
+/// With `stop_on_interrupt` false a Ctrl-C does not stop the attach. An
+/// upgrade put-back uses this: it repairs a failed upgrade, and a second
+/// Ctrl-C still kills.
+/// `Runner` is `child_mod`; tests pass a fake that scripts the outcomes.
+fn attachDmg(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dmg_path: []const u8,
+    mount_point: []const u8,
+    backoff_ms: []const u32,
+    stop_on_interrupt: bool,
+    comptime Runner: type,
+) (child_mod.ChildError || error{UserInterrupted})!void {
+    const argv = [_][]const u8{
+        system_tools.hdiutil, "attach",
+        "-nobrowse",          "-readonly",
+        "-mountpoint",        mount_point,
+        dmg_path,
+    };
+    var retry: usize = 0;
+    while (true) : (retry += 1) {
+        const report = try Runner.run(io, allocator, &argv);
+        defer report.deinit(allocator);
+        if (report.code == 0) return;
+
+        detachStale(io, allocator, dmg_path, Runner);
+        // A Ctrl-C during the attach can be why it failed; hdiutil's text
+        // would then name a cause that is not the real one.
+        if (stop_on_interrupt and signals.isInterrupted()) return error.UserInterrupted;
+        const busy = std.mem.indexOf(u8, report.stderr, busy_attach_marker) != null;
+        if (busy and retry < backoff_ms.len) {
+            if (backoffWait(io, backoff_ms[retry], stop_on_interrupt)) continue;
+            // The user stopped the install; the busy text is not the reason.
+            return error.UserInterrupted;
+        }
+        // The user sees hdiutil's reason, as runOrFail shows it.
+        Runner.replay(io, report);
+        return error.NonZeroExit;
+    }
+}
+
+/// Wait `ms`, and stop at Ctrl-C when `stop_on_interrupt` is set. std.Io
+/// cancellation is not armed in this process, so a plain sleep waits out the
+/// interrupt and the install goes on. Returns false when the user interrupted.
+fn backoffWait(io: std.Io, ms: u32, stop_on_interrupt: bool) bool {
+    const slice_ms: u32 = 50;
+    var waited: u32 = 0;
+    while (!(stop_on_interrupt and signals.isInterrupted())) {
+        if (waited >= ms) return true;
+        const step = @min(slice_ms, ms - waited);
+        std.Io.sleep(io, .fromMilliseconds(step), .awake) catch {};
+        waited += step;
+    }
+    return false;
+}
+
+/// Detach each device that a failed attach left for `dmg_path`. This is
+/// cleanup on a path that already failed, so its own errors are dropped.
+fn detachStale(io: std.Io, allocator: std.mem.Allocator, dmg_path: []const u8, comptime Runner: type) void {
+    const info_argv = [_][]const u8{ system_tools.hdiutil, "info", "-plist" };
+    const info = Runner.run(io, allocator, &info_argv) catch return;
+    defer info.deinit(allocator);
+    // A cut listing can end a device name early and name another disk.
+    if (info.code != 0 or info.truncated) return;
+
+    var buf: [8][]const u8 = undefined;
+    for (staleDisks(info.stdout, dmg_path, &buf)) |disk| {
+        const detach_argv = [_][]const u8{ system_tools.hdiutil, "detach", disk, "-quiet" };
+        const report = Runner.run(io, allocator, &detach_argv) catch continue;
+        report.deinit(allocator);
+    }
+}
+
+/// Read `hdiutil info -plist` and return the whole disk of each attach of
+/// `dmg_path` that has nothing mounted. Detaching the whole disk also
+/// detaches its slices and any APFS container on it. An attach with a
+/// mounted volume is skipped, because it can be the user's own mount.
+/// An attach of the same file that is still in progress in another process
+/// also has nothing mounted yet, so it can be detached too. hdiutil gives no
+/// way to tell the two apart, and only malt attaches files in its cache.
+/// The plist and not the text form: a name can hold any text form line,
+/// but the plist escapes `<`, so a name cannot add a tag.
+fn staleDisks(info: []const u8, dmg_path: []const u8, out: [][]const u8) [][]const u8 {
+    // The root dict holds the images array; each image dict holds the
+    // system-entities array of device dicts.
+    const image_depth = 2;
+    const device_depth = 3;
+    var n: usize = 0;
+    var depth: usize = 0;
+    var key: []const u8 = "";
+    var target = false;
+    var mounted = false;
+    var whole: ?[]const u8 = null;
+    var pos: usize = 0;
+    while (std.mem.findScalarPos(u8, info, pos, '<')) |open| {
+        const close = std.mem.findScalarPos(u8, info, open, '>') orelse break;
+        const tag = info[open + 1 .. close];
+        pos = close + 1;
+        // Element text runs to the next tag; a cut listing has none.
+        const text_end = std.mem.findScalarPos(u8, info, pos, '<') orelse break;
+        const text = info[pos..text_end];
+        switch (plist_tags.get(tag) orelse continue) {
+            .dict_open => {
+                depth += 1;
+                if (depth == image_depth) {
+                    target = false;
+                    mounted = false;
+                    whole = null;
+                }
+            },
+            .dict_close => {
+                if (depth == image_depth and target and !mounted and n < out.len) {
+                    if (whole) |dev| {
+                        out[n] = dev;
+                        n += 1;
+                    }
+                }
+                depth -|= 1;
+            },
+            .key => key = text,
+            .string => {
+                if (depth == image_depth and std.mem.eql(u8, key, "image-path")) {
+                    target = plistTextEql(text, dmg_path);
+                } else if (depth == device_depth and std.mem.eql(u8, key, "dev-entry")) {
+                    if (whole == null) whole = text;
+                } else if (depth == device_depth and std.mem.eql(u8, key, "mount-point")) {
+                    if (text.len > 0) mounted = true;
+                }
+            },
+        }
+    }
+    return out[0..n];
+}
+
+/// Compare plist element text with a plain string. The plist escapes `&`,
+/// `<` and `>` in a path. An entity that is not known is no match, so
+/// nothing is detached, which is the safe side.
+fn plistTextEql(text: []const u8, plain: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < text.len) : (j += 1) {
+        if (j == plain.len) return false;
+        var c = text[i];
+        i += 1;
+        if (c == '&') {
+            const semi = std.mem.findScalarPos(u8, text, i, ';') orelse return false;
+            c = xml_entities.get(text[i..semi]) orelse return false;
+            i = semi + 1;
+        }
+        if (c != plain[j]) return false;
+    }
+    return j == plain.len;
+}
+
+const xml_entities = std.StaticStringMap(u8).initComptime(.{
+    .{ "amp", '&' },
+    .{ "lt", '<' },
+    .{ "gt", '>' },
+    .{ "quot", '"' },
+    .{ "apos", '\'' },
+});
+
+const PlistTag = enum { dict_open, dict_close, key, string };
+const plist_tags = std.StaticStringMap(PlistTag).initComptime(.{
+    .{ "dict", .dict_open },
+    .{ "/dict", .dict_close },
+    .{ "key", .key },
+    .{ "string", .string },
+});
+
 /// CaskInstaller — handles DMG, ZIP, and PKG cask installations.
 pub const CaskInstaller = struct {
     allocator: std.mem.Allocator,
@@ -1081,6 +1266,10 @@ pub const CaskInstaller = struct {
     /// user already had, so a link that cannot be created is reported
     /// rather than paid for with the bundle.
     restoring: bool = false,
+    /// Set by an upgrade before it puts the old version back. The old
+    /// version is already gone, so a Ctrl-C does not stop the attach. A
+    /// rollback keeps its current version, so it stops at a Ctrl-C.
+    put_back: bool = false,
     links_incomplete: bool = false,
     /// Mirrors `ctx.offline` from the cli/ caller. Threaded onto the
     /// internal HttpClient so a download miss surfaces `OfflineRequired`
@@ -1094,6 +1283,9 @@ pub const CaskInstaller = struct {
     /// What an unpinned zip may inflate to; injectable so a test need not
     /// build a 16 GiB archive.
     unverified_zip_budget: u64 = archive_mod.max_decompressed_bytes,
+    /// The waits between busy DMG attaches; injectable so a test that
+    /// expects the attach to fail need not wait them out.
+    attach_waits_ms: []const u32 = &attach_backoff_ms,
     /// An upgrade's uninstall is not the end of the cask: its history rows
     /// and cached artefacts stay, so a failed install can put the old
     /// version back and `mt rollback` can still reach it afterwards.
@@ -1328,6 +1520,7 @@ pub const CaskInstaller = struct {
             error.PreflightFailed => CaskError.PreflightFailed,
             error.LinkConflict => CaskError.LinkConflict,
             error.NothingToPlace => CaskError.NothingToPlace,
+            error.UserInterrupted => CaskError.UserInterrupted,
             else => CaskError.InstallFailed,
         };
     }
@@ -1836,21 +2029,16 @@ pub const CaskInstaller = struct {
         var mount_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const mount_point = try self.freshTempDir(&mount_buf, "mount", cask.token);
 
-        // Mount DMG (hdiutil attach -nobrowse -readonly -mountpoint {path} {dmg})
-        const mount_argv = [_][]const u8{
-            system_tools.hdiutil, "attach",
-            "-nobrowse",          "-readonly",
-            "-mountpoint",        mount_point,
-            dmg_path,
-        };
-        child_mod.runOrFail(self.io, self.allocator, &mount_argv) catch return error.InstallFailed;
-
-        // Unmount on any exit; kernel reaps stuck mounts on reboot if both fail.
+        // Unmount on any exit, also after a failed attach: hdiutil can exit
+        // non-zero with the volume mounted, and the empty directory must go.
+        // The kernel reaps stuck mounts on reboot if both fail.
         defer {
             const detach_argv = [_][]const u8{ system_tools.hdiutil, "detach", mount_point, "-quiet" };
             child_mod.runOrFail(self.io, self.allocator, &detach_argv) catch {};
             std.Io.Dir.deleteDirAbsolute(self.io, mount_point) catch {};
         }
+        attachDmg(self.io, self.allocator, dmg_path, mount_point, self.attach_waits_ms, !self.put_back, child_mod) catch |e|
+            return if (e == error.UserInterrupted) error.UserInterrupted else error.InstallFailed;
 
         // A read-only mount is the staged tree here; a step that writes into
         // it fails loudly, as it would on any read-only stage.
@@ -3786,6 +3974,310 @@ test "parseCask caps a version at the filename limit it has to fit" {
             try std.testing.expectError(CaskError.ParseFailed, parseCask(a, json));
         }
     }
+}
+
+/// Answers `hdiutil attach`, `info` and `detach` the way the real tool does.
+/// Attach outcomes play back in order; `info` always lists `info_text`.
+/// `replay` keeps what production would print, so tests can read it.
+const FakeHdiutil = struct {
+    const Outcome = struct { code: u8, stderr: []const u8 };
+    var attach_outcomes: []const Outcome = &.{};
+    var info_text: []const u8 = "";
+    var info_truncated = false;
+    var attaches: usize = 0;
+    var infos: usize = 0;
+    var detaches: usize = 0;
+    var last_detach_buf: [64]u8 = undefined;
+    var last_detach: []const u8 = "";
+    var replayed_buf: [256]u8 = undefined;
+    var replayed: []const u8 = "";
+
+    fn script(outcomes: []const Outcome, info: []const u8) void {
+        attach_outcomes = outcomes;
+        info_text = info;
+        info_truncated = false;
+        attaches = 0;
+        infos = 0;
+        detaches = 0;
+        last_detach = "";
+        replayed = "";
+    }
+
+    pub fn run(_: std.Io, allocator: std.mem.Allocator, argv: []const []const u8) child_mod.ChildError!child_mod.RunReport {
+        const verb = argv[1];
+        if (std.mem.eql(u8, verb, "info")) {
+            infos += 1;
+            const stdout = try allocator.dupe(u8, info_text);
+            errdefer allocator.free(stdout);
+            return .{ .code = 0, .stdout = stdout, .stderr = try allocator.alloc(u8, 0), .truncated = info_truncated };
+        }
+        const empty = try allocator.alloc(u8, 0);
+        errdefer allocator.free(empty);
+        if (std.mem.eql(u8, verb, "attach")) {
+            const o = attach_outcomes[attaches];
+            attaches += 1;
+            return .{ .code = o.code, .stdout = empty, .stderr = try allocator.dupe(u8, o.stderr) };
+        }
+        std.debug.assert(std.mem.eql(u8, verb, "detach"));
+        detaches += 1;
+        @memcpy(last_detach_buf[0..argv[2].len], argv[2]);
+        last_detach = last_detach_buf[0..argv[2].len];
+        return .{ .code = 0, .stdout = empty, .stderr = try allocator.alloc(u8, 0) };
+    }
+
+    pub fn replay(_: std.Io, report: child_mod.RunReport) void {
+        const out = std.mem.print(&replayed_buf, "{s}{s}", .{ report.stderr, report.stdout }) catch unreachable;
+        replayed = out;
+    }
+};
+
+const busy_attach_stderr = "hdiutil: attach failed - Resource temporarily unavailable\n";
+/// Same number of retries as production, without the waits.
+const no_wait: [attach_backoff_ms.len]u32 = @splat(0);
+const fake_dmg = "/cache/sp ace/a b.dmg";
+const fake_mount = "/prefix/tmp/mount_x";
+
+/// `hdiutil info -plist` as macOS prints it, with `images` the image dicts.
+fn infoPlist(comptime images: []const u8) []const u8 {
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" ++
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" ++
+        "<plist version=\"1.0\">\n<dict>\n" ++
+        "\t<key>framework</key>\n\t<string>683.160.3.702.1</string>\n" ++
+        "\t<key>images</key>\n\t<array>\n" ++ images ++ "\t</array>\n" ++
+        "\t<key>vendor</key>\n\t<string>Apple</string>\n</dict>\n</plist>\n";
+}
+
+/// One image dict; `devices` are its system-entities dicts.
+fn imageDict(comptime path: []const u8, comptime devices: []const u8) []const u8 {
+    return "\t\t<dict>\n" ++
+        "\t\t\t<key>autodiskmount</key>\n\t\t\t<true/>\n" ++
+        "\t\t\t<key>hdid-pid</key>\n\t\t\t<integer>15603</integer>\n" ++
+        "\t\t\t<key>image-path</key>\n\t\t\t<string>" ++ path ++ "</string>\n" ++
+        "\t\t\t<key>system-entities</key>\n\t\t\t<array>\n" ++ devices ++ "\t\t\t</array>\n" ++
+        "\t\t\t<key>writeable</key>\n\t\t\t<false/>\n" ++
+        "\t\t</dict>\n";
+}
+
+/// One system-entities dict; a null `mount` prints no mount-point key.
+fn deviceDict(comptime dev: []const u8, comptime hint: []const u8, comptime mount: ?[]const u8) []const u8 {
+    return "\t\t\t\t<dict>\n" ++
+        "\t\t\t\t\t<key>content-hint</key>\n\t\t\t\t\t<string>" ++ hint ++ "</string>\n" ++
+        "\t\t\t\t\t<key>dev-entry</key>\n\t\t\t\t\t<string>" ++ dev ++ "</string>\n" ++
+        (if (mount) |m| "\t\t\t\t\t<key>mount-point</key>\n\t\t\t\t\t<string>" ++ m ++ "</string>\n" else "") ++
+        "\t\t\t\t</dict>\n";
+}
+
+/// The target image attached with nothing mounted, then another image with
+/// nothing mounted. Only the path tells the two apart.
+const leaked_info = infoPlist(
+    imageDict(fake_dmg, deviceDict("/dev/disk4", "GUID_partition_scheme", null) ++
+        deviceDict("/dev/disk4s1", "7C3457EF-0000-11AA-AA11-00306543ECAC", null) ++
+        deviceDict("/dev/disk5", "EF57347C-0000-11AA-AA11-00306543ECAC", null) ++
+        deviceDict("/dev/disk5s1", "41504653-0000-11AA-AA11-00306543ECAC", null)) ++
+        imageDict("/tmp/other.dmg", deviceDict("/dev/disk8", "GUID_partition_scheme", null) ++
+            deviceDict("/dev/disk9s1", "41504653-0000-11AA-AA11-00306543ECAC", null)),
+);
+
+test "staleDisks names the whole disk of the target image only" {
+    var buf: [8][]const u8 = undefined;
+    const disks = staleDisks(leaked_info, fake_dmg, &buf);
+    // The first device is the whole disk; detaching it takes the
+    // synthesized APFS container and every slice with it.
+    try std.testing.expectEqual(@as(usize, 1), disks.len);
+    try std.testing.expectEqualStrings("/dev/disk4", disks[0]);
+}
+
+test "staleDisks leaves a mounted copy of the target image alone" {
+    // A user may mount the cached image by hand; that mount is not ours.
+    const mounted = infoPlist(imageDict(fake_dmg, deviceDict("/dev/disk4", "GUID_partition_scheme", null) ++
+        deviceDict("/dev/disk5s1", "41504653-0000-11AA-AA11-00306543ECAC", "/Volumes/A B")));
+    var buf: [8][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), staleDisks(mounted, fake_dmg, &buf).len);
+}
+
+test "staleDisks does not let a crafted image name add an attach of the target" {
+    // In the text form this name starts a new block that names the cached
+    // image and a disk that is not its own. The plist escapes the name, so
+    // it stays one string of another image.
+    const forged_name = "/tmp/x.dmg\n================================================\n" ++
+        "image-path      : " ++ fake_dmg ++ "\n/dev/disk2\tGUID_partition_scheme\t\n" ++
+        "&lt;/string&gt;&lt;key&gt;image-path&lt;/key&gt;&lt;string&gt;" ++ fake_dmg;
+    const crafted = infoPlist(imageDict(forged_name, deviceDict("/dev/disk2", "GUID_partition_scheme", null)));
+    var buf: [8][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), staleDisks(crafted, fake_dmg, &buf).len);
+}
+
+test "staleDisks finds the target when its path holds characters the plist escapes" {
+    // A cache path can hold `&`, `<` or `>`; the plist writes them as entities.
+    const escaped = infoPlist(imageDict("/cache/a&amp;b &lt;c&gt;.dmg", deviceDict("/dev/disk4", "GUID_partition_scheme", null)));
+    var buf: [8][]const u8 = undefined;
+    const disks = staleDisks(escaped, "/cache/a&b <c>.dmg", &buf);
+    try std.testing.expectEqual(@as(usize, 1), disks.len);
+    try std.testing.expectEqualStrings("/dev/disk4", disks[0]);
+}
+
+test "staleDisks detaches nothing when the image path holds an entity it does not know" {
+    // Guessing what an entity means could name the wrong image.
+    const unknown = infoPlist(imageDict("/cache/a&#38;b.dmg", deviceDict("/dev/disk4", "GUID_partition_scheme", null)));
+    var buf: [8][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), staleDisks(unknown, "/cache/a&b.dmg", &buf).len);
+}
+
+test "attachDmg reports a Ctrl-C during the attach, not hdiutil's text" {
+    // An interrupted attach fails with a text that names another cause.
+    defer signals.setInterruptedForTest(false);
+    FakeHdiutil.script(&.{.{ .code = 1, .stderr = "hdiutil: attach failed - no such file or directory\n" }}, leaked_info);
+    signals.setInterruptedForTest(true);
+    try std.testing.expectError(error.UserInterrupted, attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, true, FakeHdiutil));
+    try std.testing.expectEqualStrings("", FakeHdiutil.replayed);
+    // The device the failed attach left still goes.
+    try std.testing.expectEqual(@as(usize, 1), FakeHdiutil.detaches);
+}
+
+test "attachDmg detaches nothing when the hdiutil info listing was cut short" {
+    // A cut can end a device name early (/dev/disk12 reads as /dev/disk1),
+    // which would detach a disk that is not ours.
+    FakeHdiutil.script(&.{.{ .code = 1, .stderr = "hdiutil: attach failed - image not recognized\n" }}, leaked_info);
+    FakeHdiutil.info_truncated = true;
+    try std.testing.expectError(error.NonZeroExit, attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, true, FakeHdiutil));
+    try std.testing.expectEqual(@as(usize, 1), FakeHdiutil.infos);
+    try std.testing.expectEqual(@as(usize, 0), FakeHdiutil.detaches);
+}
+
+test "attachDmg stops waiting and does not attach again after Ctrl-C" {
+    // The user asked to stop; a later attach that works would install anyway.
+    defer signals.armInterruptAfterForTest(0);
+    defer signals.setInterruptedForTest(false);
+    FakeHdiutil.script(&.{
+        .{ .code = 1, .stderr = busy_attach_stderr },
+        .{ .code = 0, .stderr = "" },
+    }, leaked_info);
+    // The second poll is inside the wait, so a wait that sleeps the whole
+    // 2 s without a poll attaches again and passes.
+    signals.armInterruptAfterForTest(2);
+    try std.testing.expectError(error.UserInterrupted, attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &.{2000}, true, FakeHdiutil));
+    try std.testing.expectEqual(@as(usize, 1), FakeHdiutil.attaches);
+    // The user stopped the install, so the busy text is not shown as a cause.
+    try std.testing.expectEqualStrings("", FakeHdiutil.replayed);
+}
+
+test "attachDmg keeps retrying after Ctrl-C when it puts a version back" {
+    // A put-back repairs a failed upgrade; stopping it leaves no version.
+    defer signals.setInterruptedForTest(false);
+    FakeHdiutil.script(&.{
+        .{ .code = 1, .stderr = busy_attach_stderr },
+        .{ .code = 0, .stderr = "" },
+    }, leaked_info);
+    signals.setInterruptedForTest(true);
+    try attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, false, FakeHdiutil);
+    try std.testing.expectEqual(@as(usize, 2), FakeHdiutil.attaches);
+}
+
+test "attachDmg does not query hdiutil after a clean attach" {
+    FakeHdiutil.script(&.{.{ .code = 0, .stderr = "" }}, leaked_info);
+    try attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, true, FakeHdiutil);
+    try std.testing.expectEqual(@as(usize, 1), FakeHdiutil.attaches);
+    try std.testing.expectEqual(@as(usize, 0), FakeHdiutil.infos);
+    try std.testing.expectEqual(@as(usize, 0), FakeHdiutil.detaches);
+}
+
+test "attachDmg detaches what a busy refusal left attached, then retries" {
+    // The refused attach keeps the image attached, and that device blocks
+    // the next attach of the same file, so it goes before each retry.
+    FakeHdiutil.script(&.{
+        .{ .code = 1, .stderr = busy_attach_stderr },
+        .{ .code = 1, .stderr = busy_attach_stderr },
+        .{ .code = 0, .stderr = "" },
+    }, leaked_info);
+    try attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, true, FakeHdiutil);
+    try std.testing.expectEqual(@as(usize, 3), FakeHdiutil.attaches);
+    try std.testing.expectEqual(@as(usize, 2), FakeHdiutil.detaches);
+    try std.testing.expectEqualStrings("/dev/disk4", FakeHdiutil.last_detach);
+}
+
+test "attachDmg gives up on a service that stays busy, and leaks no device" {
+    // A bound keeps a stuck service from hanging the install.
+    const busy: [no_wait.len + 1]FakeHdiutil.Outcome = @splat(.{ .code = 1, .stderr = busy_attach_stderr });
+    FakeHdiutil.script(&busy, leaked_info);
+    try std.testing.expectError(error.NonZeroExit, attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, true, FakeHdiutil));
+    try std.testing.expectEqual(@as(usize, no_wait.len + 1), FakeHdiutil.attaches);
+    try std.testing.expectEqual(@as(usize, no_wait.len + 1), FakeHdiutil.detaches);
+}
+
+test "attachDmg does not retry an image the service rejects, and leaks no device" {
+    // A corrupt or unsupported image fails the same way on every attempt.
+    FakeHdiutil.script(&.{
+        .{ .code = 1, .stderr = "hdiutil: attach failed - image not recognized\n" },
+        .{ .code = 0, .stderr = "" },
+    }, leaked_info);
+    try std.testing.expectError(error.NonZeroExit, attachDmg(std.testing.io, std.testing.allocator, fake_dmg, fake_mount, &no_wait, true, FakeHdiutil));
+    try std.testing.expectEqual(@as(usize, 1), FakeHdiutil.attaches);
+    try std.testing.expectEqual(@as(usize, 1), FakeHdiutil.detaches);
+    // The user sees why hdiutil refused the image.
+    try std.testing.expectEqualStrings("hdiutil: attach failed - image not recognized\n", FakeHdiutil.replayed);
+}
+
+/// Install a file that is not a disk image, so each attach fails at once.
+/// Expect `want`, and expect no mount directory left under tmp.
+fn expectBrokenDmgInstall(want: anyerror, put_back: bool) !void {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try a.printSentinel("/tmp/malt_cask_dmg_bad_{d}_{d}", .{ std.c.getpid(), dmg_test_seq.fetchAdd(1, .monotonic) }, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try a.printSentinel("{s}/prefix", .{base}, 0);
+    const tmp = try a.print("{s}/tmp", .{prefix});
+    const dmg_path = try a.print("{s}/broken.dmg", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, tmp);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dmg_path, .data = "not a disk image" });
+
+    var cask = try parseCask(a,
+        \\{"token":"broken","name":["Broken"],"version":"1.0","url":"https://example.invalid/broken.dmg","sha256":"no_check","artifacts":[{"binary":["broken"]}]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+        // Any failed attach proves the cleanup; a busy service under parallel
+        // runs must not add the production waits to this test.
+        .attach_waits_ms = &.{},
+        .put_back = put_back,
+    };
+    try std.testing.expectError(want, installer.installDmg(dmg_path, try a.print("{s}/Applications", .{base}), &cask));
+
+    // Every failed install would add one more empty directory under tmp.
+    var dir = try std.Io.Dir.openDirAbsolute(io, tmp, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    try std.testing.expect((try it.next(io)) == null);
+}
+
+test "installDmg leaves no mount directory behind when the attach fails" {
+    try expectBrokenDmgInstall(error.InstallFailed, false);
+}
+
+test "installDmg stops at a Ctrl-C, but not when it puts a version back" {
+    defer signals.setInterruptedForTest(false);
+    signals.setInterruptedForTest(true);
+    // A "failed" line would send the user to look for a fault.
+    try expectBrokenDmgInstall(error.UserInterrupted, false);
+    // The old version is already gone; a stopped put-back leaves none.
+    try expectBrokenDmgInstall(error.InstallFailed, true);
+}
+
+test "installError keeps a Ctrl-C apart from an install failure" {
+    try std.testing.expectEqual(CaskError.UserInterrupted, CaskInstaller.installError(error.UserInterrupted));
 }
 
 var dmg_test_seq: std.atomic.Value(u32) = .init(0);

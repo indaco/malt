@@ -28,7 +28,8 @@ const install_sink_mod = @import("install/sink.zig");
 
 /// `error.Aborted` is returned on every user-facing failure. The caller has
 /// already emitted a message via `output.err`; main.zig catches it and exits
-/// non-zero without printing a stack trace.
+/// non-zero without printing a stack trace. A Ctrl-C returns
+/// `error.UserInterrupted` instead (exit 130).
 const ParsedArgs = struct {
     name: ?[]const u8 = null,
     dry_run: bool = false,
@@ -495,6 +496,12 @@ fn dispatchCask(
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| switch (e) {
         // The version is back and recorded; only its links are missing.
         error.LinksIncomplete => output.warn("{s} {s} is in place, but its command-line links could not be created", .{ token, target_pkg_version }),
+        // The current version stays; only the rollback stopped. Exit 130,
+        // the same as uninstall, restore, purge and bundle.
+        error.UserInterrupted => {
+            output.warn("Interrupted.", .{});
+            return error.UserInterrupted;
+        },
         else => {
             output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, install_mod.installErrorText(e) });
             if (installer.conflictPath()) |p| output.err("{s} is not this cask's link; remove it first", .{p});

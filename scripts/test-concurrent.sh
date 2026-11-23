@@ -21,7 +21,9 @@ copies=${1:-6}
 rounds=${2:-2}
 
 log_dir=$(mktemp -d "/tmp/malt_concurrent.XXXXXX")
-trap 'rm -rf "$log_dir"' EXIT
+# The logs are the only record of a failing run, so only a clean run removes them.
+trap '[ "$failed" -eq 0 ] && rm -rf "$log_dir"' EXIT
+failed=0
 
 echo "▸ Building test binaries"
 zig build test-bin
@@ -42,7 +44,6 @@ count_scratch() {
 }
 scratch_before=$(count_scratch)
 
-failed=0
 for round in $(seq 1 "$rounds"); do
   echo "▸ Round $round/$rounds — $copies concurrent copies"
   pids=""
@@ -62,7 +63,11 @@ done
 if [ "$failed" -gt 0 ]; then
   echo "error: $failed of $((copies * rounds)) concurrent runs failed" >&2
   echo "  Two processes almost certainly shared a fixture path. Failing tests:" >&2
-  grep -h 'FAIL' "$log_dir"/*.log 2>/dev/null | sort -u | sed 's/^/    /' >&2
+  # Test output can push FAIL onto a line of its own, so name the test
+  # from the last "N/M name..." line seen before it.
+  awk '/^[0-9]+\/[0-9]+ /{name=$0} /FAIL/{print ($0 == name ? $0 : name " " $0)}' \
+    "$log_dir"/*.log 2>/dev/null | sort -u | sed 's/^/    /' >&2
+  echo "  Logs kept in $log_dir" >&2
   exit 1
 fi
 

@@ -1,7 +1,8 @@
 //! malt — rollback command tests
 //! Integration tests for rollback require a full install cycle.
 //! Unit tests here cover the DB query logic and the error-exit-code contract
-//! (every user-facing failure must return `error.Aborted`, not a silent `void`).
+//! (every user-facing failure must return `error.Aborted`, not a silent `void`;
+//! a Ctrl-C returns `error.UserInterrupted`).
 
 const std = @import("std");
 const malt = @import("malt");

@@ -1441,3 +1441,531 @@ test "rollback runs the outgoing version's uninstall steps and drops its declare
     defer db.close();
     try testing.expectEqualStrings("1.0", (try cask.lookupInstalledChecked(&db, "plain")).?.version());
 }
+
+/// Seeds box 1.0 (a zip in history) as installed and serves 2.0 as a
+/// cached file that is not a disk image, so the 2.0 attach fails at once.
+fn seedBoxToBrokenDmg(io: std.Io, fx: *Fixture) !void {
+    const a = fx.arena.allocator();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const sha1 = try seedBoxZip(io, fx, "1.0");
+    const app_path = fx.p("Applications/Box.app");
+    try putFile(io, fx.p("Applications/Box.app/Contents/MacOS/box"), "1.0");
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c1 = try cask.parseCaskWithMajor(testing.allocator, try a.print(
+            \\{{"token":"box","name":["Box"],"version":"1.0","url":"https://example.invalid/box-1.0.zip","sha256":"{s}","artifacts":[{{"app":["Box.app"]}}]}}
+        , .{sha1}), null);
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, app_path, null);
+        try cask.recordCaskVersion(&db, "box", "1.0", c1.url, c1.sha256, "zip", fx.p("cache/Cask/box-1.0.zip"));
+    }
+    const dmg_bytes = "not a disk image";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(dmg_bytes, &digest, .{});
+    try putFile(io, fx.p("cache/Cask/box-2.0.dmg"), dmg_bytes);
+    try putFile(io, fx.p("cache/api/cask_box.json"), try a.print(
+        \\{{"token":"box","name":["Box"],"version":"2.0","url":"https://example.invalid/box-2.0.dmg","sha256":"{s}","artifacts":[{{"app":["Box.app"]}}]}}
+    , .{std.fmt.bytesToHex(digest, .lower)}));
+}
+
+/// Makes `version` in history a file that is not a disk image, so a
+/// put-back of it runs a real attach and hdiutil refuses the image.
+fn seedBrokenDmgHistory(io: std.Io, fx: *Fixture, token: []const u8, version: []const u8) !void {
+    const a = fx.arena.allocator();
+    const bytes = "not a disk image";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const sha = std.fmt.bytesToHex(digest, .lower);
+    const cache_path = try a.print("{s}/cache/Cask/{s}-{s}.dmg", .{ fx.base, token, version });
+    try putFile(io, cache_path, bytes);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    // The insert keeps an existing row, so the old artefact must go first.
+    try db.exec(try a.printSentinel("DELETE FROM cask_versions WHERE token='{s}' AND version='{s}';", .{ token, version }, 0));
+    try cask.recordCaskVersion(&db, token, version, try a.print("https://example.invalid/{s}-{s}.dmg", .{ token, version }), &sha, "dmg", cache_path);
+}
+
+/// Runs `mt upgrade <args>` with a Ctrl-C at the 2.0 attach, which is
+/// poll `polls` of the interrupt flag. Output goes to `captured`.
+fn runCtrlCUpgrade(fx: *Fixture, io: std.Io, args: []const []const u8, polls: usize, captured: *std.ArrayList(u8)) !void {
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    malt.signals.armInterruptAfterForTest(polls);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    return malt.upgrade.execute(&ctx, arena.allocator(), args);
+}
+
+/// A Ctrl-C is not a failure: the run puts 1.0 back and must not exit
+/// non-zero or name box as failed.
+fn expectCtrlCUpgradeKeepsOldVersion(tag: []const u8, args: []const []const u8, polls: usize) !void {
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(tag);
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try seedBoxToBrokenDmg(io, &fx);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    runCtrlCUpgrade(&fx, io, args, polls, &captured) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "box 1.0 is back in place") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "failed to upgrade") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed") == null);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    const info = (try cask.lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("1.0", info.version());
+}
+
+test "a Ctrl-C during a named cask upgrade puts the old version back and is not a failure" {
+    // One loop-top poll, then the check after the attach.
+    try expectCtrlCUpgradeKeepsOldVersion("upgrade_irq_named", &.{ "--cask", "box" }, 2);
+}
+
+test "a Ctrl-C during an upgrade of all casks is not counted as a failed cask" {
+    // One loop-top poll, then the check after the attach.
+    try expectCtrlCUpgradeKeepsOldVersion("upgrade_irq_all", &.{"--cask"}, 2);
+}
+
+test "a Ctrl-C upgrade whose put-back fails still exits non-zero" {
+    // The old version is gone; the user must see the run failed.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init("upgrade_irq_lost");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try seedBoxToBrokenDmg(io, &fx);
+    try test_io.deleteFileAbsolute(io, fx.p("cache/Cask/box-1.0.zip"));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCtrlCUpgrade(&fx, io, &.{ "--cask", "box", "zzother" }, 2, &captured));
+    try testing.expect(std.mem.find(u8, captured.items, "box 1.0 could not be reinstalled") != null);
+    // The failed put-back is not a Ctrl-C error, so the loop-top check must stop the next name.
+    try testing.expect(std.mem.find(u8, captured.items, "zzother") == null);
+}
+
+test "a Ctrl-C upgrade does not stop the attach that puts a disk image back" {
+    // The old version is already gone; a put-back that stops at the Ctrl-C
+    // leaves no version, so the attach must run and fail for its own cause.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init("upgrade_irq_dmg_back");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try seedBoxToBrokenDmg(io, &fx);
+    try seedBrokenDmgHistory(io, &fx, "box", "1.0");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCtrlCUpgrade(&fx, io, &.{ "--cask", "box" }, 2, &captured));
+    // hdiutil's refusal, not the Ctrl-C, is the cause the user sees.
+    try testing.expect(std.mem.find(u8, captured.items, "box 1.0 could not be reinstalled (InstallFailed)") != null);
+}
+
+test "a Ctrl-C during an upgrade --dry-run of all packages writes no outdated snapshot" {
+    // The walk stopped before it saw box, so a snapshot would say box is current.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init("upgrade_irq_dry");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try seedBoxToBrokenDmg(io, &fx);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    // The loop-top check of the cask walk is the first poll.
+    runCtrlCUpgrade(&fx, io, &.{"--dry-run"}, 1, &captured) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+    try testing.expectError(error.FileNotFound, test_io.cwd().access(io, fx.p("cache/outdated.json"), .{}));
+}
+
+test "a Ctrl-C during a cask rollback says so and keeps the current version" {
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init("rollback_irq");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+
+    // 2.0 is installed; 1.0 is in history as a file that is not a disk image.
+    const app_path = fx.p("Applications/Box.app");
+    try putFile(io, fx.p("Applications/Box.app/Contents/MacOS/box"), "2.0");
+    const dmg_bytes = "not a disk image";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(dmg_bytes, &digest, .{});
+    const sha1 = std.fmt.bytesToHex(digest, .lower);
+    try putFile(io, fx.p("cache/Cask/box-1.0.dmg"), dmg_bytes);
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c2 = try cask.parseCaskWithMajor(testing.allocator,
+            \\{"token":"box","name":["Box"],"version":"2.0","url":"https://example.invalid/box-2.0.zip","sha256":"no_check","artifacts":[{"app":["Box.app"]}]}
+        , null);
+        defer c2.deinit();
+        try cask.recordInstall(&db, &c2, app_path, null);
+        try cask.recordCaskVersion(&db, "box", "1.0", "https://example.invalid/box-1.0.dmg", &sha1, "dmg", fx.p("cache/Cask/box-1.0.dmg"));
+    }
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // The check after the failed attach is the first poll.
+    malt.signals.armInterruptAfterForTest(1);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    // Exit 130, as other commands a Ctrl-C stops; the rollback did not happen.
+    try testing.expectError(error.UserInterrupted, malt.cli_rollback.execute(&ctx, testing.allocator, &.{ "box", "--to", "1.0" }));
+
+    // A Ctrl-C, not an install failure with the error's raw name.
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "failed to reinstall") == null);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    const info = (try cask.lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("2.0", info.version());
+}
+
+// The 2.0 file is cached under a .dmg name but is a zip, so the attach fails.
+const plain_dmg_rb =
+    \\cask "plain" do
+    \\  version "2.0"
+    \\  sha256 "{s}"
+    \\  url "https://example.invalid/plain-2.0.dmg"
+    \\  app "Plain.app"
+    \\end
+;
+
+test "a Ctrl-C during a tap upgrade of a keg from Casks/ is not a failed tap formula" {
+    try expectCtrlCTapFormulaUpgrade("tap_formula_irq", &.{"plain"});
+}
+
+test "a Ctrl-C during an upgrade of all formulas is not counted as a failed formula" {
+    try expectCtrlCTapFormulaUpgrade("tap_formula_irq_all", &.{});
+}
+
+/// `plain` is a keg from the tap's Casks/, so the formula side upgrades it
+/// through its cask install, which a Ctrl-C stops at the attach.
+fn expectCtrlCTapFormulaUpgrade(tag: []const u8, args: []const []const u8) !void {
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const rig = try TapUpgradeRig.init(tag, plain_dmg_rb, "Plain.app");
+    defer rig.deinit();
+    const io = rig.io();
+    var fx = &rig.fx;
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const zip = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("cache/Cask/plain-2.0.zip"), 1 << 20);
+    defer testing.allocator.free(zip);
+    try putFile(io, fx.p("cache/Cask/plain-2.0.dmg"), zip);
+    // A fresh versions index answers the bulk audit, so it asks no live API.
+    inline for (.{ .formula, .cask }) |kind| {
+        var key_buf: [64]u8 = undefined;
+        const key = malt.api.BrewApi.versionsKey(&key_buf, kind);
+        try putFile(io, try fx.arena.allocator().print("{s}/cache/api/versions_{s}.txt", .{ fx.base, key }), "zzunrelated\t1.0\t0\n");
+    }
+    {
+        // A keg installed from the tap's Casks/ at an older commit, so the
+        // upgrade takes the tap formula route and its cask side.
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_rb_subtree, tap_commit_sha)
+            \\VALUES ('plain', 'grp/tap/plain', '1.0', 'sha', '/c/plain/1.0', 'grp/tap', 'cask', 'old');
+        );
+    }
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // One loop-top poll, then the check after the failed attach.
+    malt.signals.armInterruptAfterForTest(2);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    malt.upgrade.execute(&ctx, testing.allocator, args) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to upgrade tap formula") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "failed to upgrade") == null);
+}
+
+/// Runs `install` (or `installAll` with the tap as `dep_tap`) on `alpha`
+/// then the tap's `plain`, with a Ctrl-C at the attach of the broken
+/// plain-2.0.dmg. `alpha` is queued before `plain`, so a run that left the
+/// package loop would go on to download it.
+fn expectCtrlCTapInstallStops(tag: []const u8, via_dep_tap: bool) !void {
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const rig = try TapUpgradeRig.init(tag, plain_dmg_rb, "Plain.app");
+    defer rig.deinit();
+    const fx = &rig.fx;
+    const io = rig.io();
+    try enterPrefix(fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    const zip = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("cache/Cask/plain-2.0.zip"), 1 << 20);
+    defer testing.allocator.free(zip);
+    try putFile(io, fx.p("cache/Cask/plain-2.0.dmg"), zip);
+    {
+        // Not installed yet, so the install goes as far as the attach.
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try db.exec("DELETE FROM casks WHERE token='plain';");
+    }
+    try putFile(io, fx.p("cache/api/formula_alpha.json"), alpha_json);
+    // Core misses, so the unqualified name reaches the tap sibling.
+    try putFile(io, fx.p("cache/api/formula_plain.404"), "");
+    try putFile(io, fx.p("cache/api/cask_plain.404"), "");
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // Before resolution, one loop-top check per package, then the check
+    // after the failed attach.
+    malt.signals.armInterruptAfterForTest(4);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    const run = if (via_dep_tap)
+        malt.install.installAll(&ctx, a, &.{ "alpha", "plain" }, .{ .dep_tap = "grp/tap" })
+    else
+        malt.install.execute(&ctx, a, &.{ "alpha", "grp/tap/plain" });
+    run catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Failed to install") == null);
+    // The cask's own Ctrl-C line, not the loop-top one.
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted during resolution") == null);
+    try testing.expect(std.mem.find(u8, captured.items, "Downloading") == null);
+}
+
+/// A bottle the store does not hold, so a run past the loop downloads it.
+const alpha_json =
+    \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
+    \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+    \\ "keg_only":false,"post_install_defined":false,
+    \\ "bottle":{"stable":{"root_url":"https://example.invalid/alpha","files":{
+    \\   "arm64_tahoe":{"cellar":":any","url":"https://example.invalid/a","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\   "arm64_sequoia":{"cellar":":any","url":"https://example.invalid/a","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\   "arm64_sonoma":{"cellar":":any","url":"https://example.invalid/a","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\   "tahoe":{"cellar":":any","url":"https://example.invalid/x","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+    \\   "sequoia":{"cellar":":any","url":"https://example.invalid/x","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
+    \\ }}}}
+;
+
+test "a Ctrl-C during a tap cask install stops the install" {
+    try expectCtrlCTapInstallStops("install_tap_irq", false);
+}
+
+test "a Ctrl-C during a tap sibling install stops the install" {
+    try expectCtrlCTapInstallStops("install_sibling_irq", true);
+}
+
+test "a Ctrl-C while the tap probe upgrades a cask with no recorded tap is not a failure" {
+    // A legacy row has no tap: core misses, so the probe asks each tap in turn.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const rig = try TapUpgradeRig.init("tap_probe_irq", plain_dmg_rb, "Plain.app");
+    defer rig.deinit();
+    const fx = &rig.fx;
+    const io = rig.io();
+    try enterPrefix(fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const zip = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("cache/Cask/plain-2.0.zip"), 1 << 20);
+    defer testing.allocator.free(zip);
+    try putFile(io, fx.p("cache/Cask/plain-2.0.dmg"), zip);
+    try putFile(io, fx.p("cache/api/cask_plain.404"), "");
+    // The 1.0 history row and artefact let the put-back succeed.
+    const sha1 = try seedZipArtifact(fx, io, "plain", "1.0", "Plain.app");
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try db.exec("UPDATE casks SET tap=NULL WHERE token='plain';");
+        try cask.recordCaskVersion(&db, "plain", "1.0", "https://example.invalid/plain-1.0.zip", &sha1, "zip", fx.p("cache/Cask/plain-1.0.zip"));
+    }
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // One loop-top poll, then the check after the failed attach.
+    malt.signals.armInterruptAfterForTest(2);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "plain 1.0 is back in place") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not fetch cask info") == null);
+}
+
+test "a Ctrl-C tap cask upgrade does not stop the attach that puts a disk image back" {
+    // As on the core route: the old version is gone, so the put-back runs on.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    const rig = try TapUpgradeRig.init("tap_irq_dmg_back", plain_dmg_rb, "Plain.app");
+    defer rig.deinit();
+    const fx = &rig.fx;
+    const io = rig.io();
+    try enterPrefix(fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const zip = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("cache/Cask/plain-2.0.zip"), 1 << 20);
+    defer testing.allocator.free(zip);
+    try putFile(io, fx.p("cache/Cask/plain-2.0.dmg"), zip);
+    try seedBrokenDmgHistory(io, fx, "plain", "1.0");
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // One loop-top poll, then the check after the failed 2.0 attach.
+    malt.signals.armInterruptAfterForTest(2);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    const outcome = malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" });
+    testing.expectError(error.Aborted, outcome) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+    try testing.expect(std.mem.find(u8, captured.items, "plain 1.0 could not be reinstalled (InstallFailed)") != null);
+}
+
+test "a Ctrl-C while an upgrade walks a suffix-less URL is not a failure" {
+    // The URL names no format, so the upgrade asks the server first.
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init("upgrade_irq_walk");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try seedBoxToBrokenDmg(io, &fx);
+
+    // A server that never answers keeps the walk in flight until the Ctrl-C.
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    try putFile(io, fx.p("cache/api/cask_box.json"), try fx.arena.allocator().print(
+        \\{{"token":"box","name":["Box"],"version":"2.0","url":"http://127.0.0.1:{d}/box","sha256":"no_check","artifacts":[{{"app":["Box.app"]}}]}}
+    , .{listener.socket.address.getPort()}));
+
+    const prior_cancel = malt.client.HttpClient.defaultCancel();
+    defer malt.client.HttpClient.setDefaultCancel(prior_cancel);
+    malt.client.HttpClient.setDefaultCancel(&malt.signals.isInterrupted);
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // One loop-top poll, then the first cancel poll of the walk.
+    malt.signals.armInterruptAfterForTest(2);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = false };
+    malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "box" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    try testing.expect(std.mem.find(u8, captured.items, "Interrupted.\n") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "Could not resolve the download URL") == null);
+}
