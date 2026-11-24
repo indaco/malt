@@ -1879,11 +1879,11 @@ test "driveSteps routes unsupported step types to the loud partial skip" {
     try std.Io.Dir.cwd().createDirPath(io, prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
-    // `configure_php` is defined upstream and deliberately left unimplemented —
-    // the canonical "known-shape, unsupported" case.
+    // `bootstrap_cpython` is defined upstream and deliberately left
+    // unimplemented: the canonical "known-shape, unsupported" case.
     const json =
         \\{"name":"glow","versions":{"stable":"1.2.3"},"post_install_defined":false,
-        \\ "post_install_steps":[{"type":"configure_php"}]}
+        \\ "post_install_steps":[{"type":"bootstrap_cpython"}]}
     ;
     const r = try runDriveSteps(json, prefix);
     defer testing.allocator.free(r.out);
