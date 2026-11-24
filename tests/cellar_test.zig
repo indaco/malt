@@ -161,6 +161,8 @@ const sha_binary_skip = std.mem.asBytes(&@as([32][2]u8, @splat("10".*)));
 const sha_cache_seed = std.mem.asBytes(&@as([32][2]u8, @splat("32".*)));
 const sha_absent_source = std.mem.asBytes(&@as([32][2]u8, @splat("54".*)));
 const sha_absent_sibling = std.mem.asBytes(&@as([32][2]u8, @splat("76".*)));
+const sha_serialized_lengths = std.mem.asBytes(&@as([32][2]u8, @splat("a1".*)));
+const sha_usr_local_text = std.mem.asBytes(&@as([32][2]u8, @splat("b2".*)));
 const sha_symlinked_pkg = std.mem.asBytes(&@as([32][2]u8, @splat("98".*)));
 
 // ---------------------------------------------------------------------------
@@ -2116,4 +2118,63 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
     const leaked = try testing.allocator.print("{s}/1.0/INSTALL_RECEIPT.json", .{victim});
     defer testing.allocator.free(leaked);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
+}
+
+// ---------------------------------------------------------------------------
+// Length-prefixed text (PHP-serialized pear.conf)
+// ---------------------------------------------------------------------------
+
+/// Replaces the fixture's `lib/test.pc` with `body`.
+fn overwriteFixturePc(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver: []const u8, body: []const u8) !void {
+    const path = try allocator.print("{s}/store/{s}/{s}/{s}/lib/test.pc", .{ prefix, sha, name, ver });
+    defer allocator.free(path);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+}
+
+test "relocateKegTree resizes serialized lengths for the build-time prefix of the bottle" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, sha_serialized_lengths, "php", "8.5.13");
+    // 54 = `/opt/homebrew/Cellar` + the 34-byte tail, the size brew wrote.
+    try overwriteFixturePc(
+        testing.allocator,
+        prefix,
+        sha_serialized_lengths,
+        "php",
+        "8.5.13",
+        "a:1:{s:7:\"php_dir\";s:54:\"@@HOMEBREW_CELLAR@@/php@8.5/8.5.13/share/php@8.5/pear\";}",
+    );
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        sha_serialized_lengths,
+        "php",
+        "8.5.13",
+        "/opt/homebrew/Cellar",
+        null,
+        true,
+    );
+    defer testing.allocator.free(keg.path);
+
+    const path = try testing.allocator.print("{s}/lib/test.pc", .{keg.path});
+    defer testing.allocator.free(path);
+    const got = try readFile(testing.allocator, path);
+    defer testing.allocator.free(got);
+    const tail = "/php@8.5/8.5.13/share/php@8.5/pear";
+    const want = try testing.allocator.print(
+        "a:1:{{s:7:\"php_dir\";s:{d}:\"{s}/Cellar{s}\";}}",
+        .{ prefix.len + "/Cellar".len + tail.len, prefix, tail },
+    );
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, got);
 }

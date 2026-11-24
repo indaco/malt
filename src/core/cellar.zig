@@ -774,6 +774,17 @@ fn freePaths(allocator: std.mem.Allocator, paths: []const []const u8) void {
     allocator.free(paths);
 }
 
+/// Prefix the bottle was built for: the parent of an absolute `cellar` tag,
+/// else the host default.
+fn builtPrefix(cellar_type: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, cellar_type, "/")) {
+        if (std.fs.path.dirname(cellar_type)) |parent| {
+            if (parent.len > 1) return parent;
+        }
+    }
+    return if (@import("builtin").cpu.arch == .x86_64) "/usr/local" else "/opt/homebrew";
+}
+
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -825,11 +836,21 @@ fn relocateKegTree(
     // Last on purpose: text replacements run in sequence per file, so
     // appending keeps the substituted path out of the prefix rewrites above.
     var text_reps_buf: [8]patch.Replacement = undefined;
-    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
-    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
+    // `built` is what each token was at bottle build time: length-prefixed
+    // text files were sized with it.
+    // A failed format leaves an empty value, so no declared length matches.
+    const built_prefix = builtPrefix(cellar_type);
+    // Intel Homebrew keeps its repository in a subdirectory of the prefix.
+    const built_repo = if (std.mem.eql(u8, built_prefix, "/usr/local")) "/usr/local/Homebrew" else built_prefix;
+    var built_cellar_buf: [256]u8 = undefined;
+    const built_cellar = std.mem.print(&built_cellar_buf, "{s}/Cellar", .{built_prefix}) catch "";
+    var built_library_buf: [256]u8 = undefined;
+    const built_library = std.mem.print(&built_library_buf, "{s}/Library", .{built_repo}) catch "";
+    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix, .built = built_prefix };
+    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar, .built = built_cellar };
     // malt has no separate repository checkout; shellenv reports the prefix.
-    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix };
-    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library };
+    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix, .built = built_repo };
+    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library, .built = built_library };
     text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
     text_reps_buf[5] = .{ .old = "/usr/local", .new = new_prefix };
     text_reps_buf[6] = perl;

@@ -397,6 +397,10 @@ fn recordDelete(
 pub const Replacement = struct {
     old: []const u8,
     new: []const u8,
+    /// What `old` expanded to when the bottle was built. Text formats that
+    /// store each string's length (PHP `s:N:"..."`) were sized with this
+    /// value, not with the placeholder. Mach-O passes ignore it.
+    built: ?[]const u8 = null,
 };
 
 /// Errors surfaced by the `install_name_tool` fallback driver. The
@@ -980,36 +984,111 @@ pub fn patchTextFileHead(
         if (rest < content.len - head.len) return false;
     }
 
-    // Apply each replacement in sequence. `current` always points to
-    // either `content` or a freshly allocated buffer from replaceAll;
-    // when replaceAll returns a different pointer we free the previous
-    // buffer (unless it was the immutable `content` slice).
-    var current: []const u8 = content;
-    var modified = false;
-    var patch_failed = false;
-    for (replacements) |r| {
-        const next = replaceAll(allocator, current, r.old, r.new) catch {
-            patch_failed = true;
-            break;
-        };
-        if (next.ptr != current.ptr) {
-            if (current.ptr != content.ptr) allocator.free(current);
-            current = next;
-            modified = true;
-        }
-    }
-    if (patch_failed) {
-        if (current.ptr != content.ptr) allocator.free(current);
-        return false;
-    }
-
-    if (!modified) return false;
-    defer if (current.ptr != content.ptr) allocator.free(current);
+    const rewritten = rewriteText(allocator, content, replacements) catch return false;
+    const current = rewritten orelse return false;
+    defer allocator.free(current);
     // Atomic rename keeps the file old-or-new on a mid-write
     // failure; `Replace` (not `Write`) also preserves the exec
     // bit on shebanged scripts and shell wrappers.
     atomic.atomicReplaceFile(io, abs_path, current) catch return false;
     return true;
+}
+
+/// Applies every replacement in order. Null when nothing matched, else a
+/// caller-owned buffer.
+fn applyReplacements(allocator: std.mem.Allocator, input: []const u8, replacements: []const Replacement) error{OutOfMemory}!?[]u8 {
+    var current: []const u8 = input;
+    var owned = false;
+    errdefer if (owned) allocator.free(current);
+    for (replacements) |r| {
+        const next = try replaceAll(allocator, current, r.old, r.new);
+        if (next.ptr != current.ptr) {
+            if (owned) allocator.free(current);
+            current = next;
+            owned = true;
+        }
+    }
+    return if (owned) @constCast(current) else null;
+}
+
+/// First replacement whose `old` starts `text`.
+fn needleAt(text: []const u8, replacements: []const Replacement) ?Replacement {
+    for (replacements) |r| {
+        if (r.old.len != 0 and std.mem.startsWith(u8, text, r.old)) return r;
+    }
+    return null;
+}
+
+/// Length-prefixed record found in text: `s:<len>:"<payload>";`.
+const Record = struct { header: usize, payload: usize, end: usize };
+
+/// Walks the payload in build-time bytes. A header only counts when the
+/// walk lands exactly on `";`, so prose that looks like a header is left
+/// alone. A needle with no build value makes the size unknowable: plain text.
+fn recordAt(text: []const u8, header: usize, replacements: []const Replacement) ?Record {
+    var p = header + 2;
+    var declared: usize = 0;
+    const digits = p;
+    while (p < text.len and std.ascii.isDigit(text[p])) : (p += 1) {
+        declared = std.math.mul(usize, declared, 10) catch return null;
+        declared = std.math.add(usize, declared, text[p] - '0') catch return null;
+    }
+    if (p == digits or p + 1 >= text.len or text[p] != ':' or text[p + 1] != '"') return null;
+    const payload = p + 2;
+    var at = payload;
+    var counted: usize = 0;
+    while (counted < declared) {
+        if (at >= text.len) return null;
+        if (needleAt(text[at..], replacements)) |r| {
+            counted += (r.built orelse return null).len;
+            at += r.old.len;
+        } else {
+            counted += 1;
+            at += 1;
+        }
+    }
+    if (counted != declared or !std.mem.startsWith(u8, text[at..], "\";")) return null;
+    return .{ .header = header, .payload = payload, .end = at };
+}
+
+/// Text pass over one file. Plain replacement everywhere except inside
+/// length-prefixed records, where the declared length follows the payload.
+/// Null when nothing changed, else a caller-owned buffer.
+fn rewriteText(allocator: std.mem.Allocator, content: []const u8, replacements: []const Replacement) error{OutOfMemory}!?[]u8 {
+    var any_built = false;
+    for (replacements) |r| any_built = any_built or r.built != null;
+    if (!any_built) return applyReplacements(allocator, content, replacements);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var changed = false;
+    var done: usize = 0; // content[0..done] is already in `out`
+    var scan: usize = 0;
+    while (std.mem.findPos(u8, content, scan, "s:")) |h| {
+        scan = h + 2;
+        const rec = recordAt(content, h, replacements) orelse continue;
+        changed = try appendSegment(allocator, &out, content[done..h], replacements) or changed;
+        const payload = content[rec.payload..rec.end];
+        const new_payload = try applyReplacements(allocator, payload, replacements);
+        defer if (new_payload) |b| allocator.free(b);
+        const body = new_payload orelse payload;
+        changed = changed or new_payload != null;
+        try out.print(allocator, "s:{d}:\"", .{body.len});
+        try out.appendSlice(allocator, body);
+        done = rec.end;
+        scan = rec.end;
+    }
+    changed = try appendSegment(allocator, &out, content[done..], replacements) or changed;
+    if (!changed) return null;
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Appends `segment` with the replacements applied; true when it changed.
+fn appendSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), segment: []const u8, replacements: []const Replacement) error{OutOfMemory}!bool {
+    const rewritten = try applyReplacements(allocator, segment, replacements);
+    defer if (rewritten) |b| allocator.free(b);
+    try out.appendSlice(allocator, rewritten orelse segment);
+    return rewritten != null;
 }
 
 fn hasPrefix(path: []const u8, prefix: []const u8) bool {

@@ -63,7 +63,11 @@ pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, Materiali
 /// v10: verification hashes each binary against its code signature. A v9
 /// entry's verified mark was earned without that check, so a binary the
 /// kernel refuses could sit behind it indefinitely.
-pub const RELOC_LOGIC_VERSION: u32 = 10;
+///
+/// v11: text relocation keeps each length-prefixed string's declared length
+/// in step with its new content. A v10 entry holds files with stale lengths
+/// that no reader accepts.
+pub const RELOC_LOGIC_VERSION: u32 = 11;
 
 /// Borrow the store constructor's key rule rather than keep a second copy.
 /// Its path is shorter than ours for the same prefix, so any `buf` that fits
