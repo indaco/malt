@@ -774,8 +774,8 @@ fn freePaths(allocator: std.mem.Allocator, paths: []const []const u8) void {
     allocator.free(paths);
 }
 
-/// Prefix the bottle was built for: the parent of an absolute `cellar` tag,
-/// else the host default.
+/// Prefix of the host that built the bottle: the parent of an absolute
+/// `cellar` tag, else the host default.
 fn builtPrefix(cellar_type: []const u8) []const u8 {
     if (std.mem.startsWith(u8, cellar_type, "/")) {
         if (std.fs.path.dirname(cellar_type)) |parent| {
@@ -836,8 +836,8 @@ fn relocateKegTree(
     // Last on purpose: text replacements run in sequence per file, so
     // appending keeps the substituted path out of the prefix rewrites above.
     var text_reps_buf: [8]patch.Replacement = undefined;
-    // `built` is what each token was at bottle build time: length-prefixed
-    // text files were sized with it.
+    // `built` is what each token was at bottle build time. Length-prefixed
+    // text files used that size.
     // A failed format leaves an empty value, so no declared length matches.
     const built_prefix = builtPrefix(cellar_type);
     // Intel Homebrew keeps its repository in a subdirectory of the prefix.
@@ -853,9 +853,9 @@ fn relocateKegTree(
     text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library, .built = built_library };
     text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
     var text_reps_len: usize = 5;
-    // Elsewhere built, `/usr/local` is upstream data (a configure default,
-    // a gpg path), not a build path; rewriting it corrupts length-prefixed
-    // files and changes what the bottle's tools report.
+    // In a bottle built elsewhere, `/usr/local` is upstream data (a configure
+    // default, a gpg path). Rewriting it corrupts length-prefixed files and
+    // changes what the tools report.
     if (!skip_absolute_rewrite and std.mem.eql(u8, built_prefix, "/usr/local")) {
         text_reps_buf[text_reps_len] = .{ .old = "/usr/local", .new = new_prefix };
         text_reps_len += 1;

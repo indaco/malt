@@ -1879,8 +1879,8 @@ test "driveSteps routes unsupported step types to the loud partial skip" {
     try std.Io.Dir.cwd().createDirPath(io, prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
-    // `bootstrap_cpython` is defined upstream and deliberately left
-    // unimplemented: the canonical "known-shape, unsupported" case.
+    // Upstream defines `bootstrap_cpython`. It has no native step on
+    // purpose, so it is the standard "known-shape, unsupported" case.
     const json =
         \\{"name":"glow","versions":{"stable":"1.2.3"},"post_install_defined":false,
         \\ "post_install_steps":[{"type":"bootstrap_cpython"}]}

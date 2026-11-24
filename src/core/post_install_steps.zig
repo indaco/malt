@@ -2270,9 +2270,9 @@ const pear_dir_keys = [_]struct { key: []const u8, suffix: []const u8 }{
 };
 
 /// `configure_php`: after this step `pecl install` finds a `php.ini` to
-/// enable the extension in, and the extension and PEAR tree outlive an
-/// upgrade. Upstream's `pear update-channels` is skipped: the fence denies
-/// the network.
+/// enable the extension in. The extension and PEAR tree stay after an
+/// upgrade. The step skips `pear update-channels`: the fence denies the
+/// network.
 fn stepConfigurePhp(ctx: StepsCtx) bool {
     const a = ctx.allocator;
     const mm = phpMajorMinor(ctx.version) orelse {
@@ -2318,8 +2318,8 @@ fn pearConfigSet(ctx: StepsCtx, key: []const u8, value: []const u8) bool {
     return runFormulaTool(ctx, ctx.name, "pear", &.{ "config-set", key, value, "system" });
 }
 
-/// The name PHP gives its extension API directory, read from the keg's own
-/// `php-config` so no PHP process is needed.
+/// Name of the PHP extension API directory. Read it from the keg's own
+/// `php-config`, so no PHP process runs.
 fn phpExtensionDir(ctx: StepsCtx) ?[]const u8 {
     const path = ctx.allocator.print("{s}/bin/php-config", .{ctx.keg_path}) catch return null;
     const file = openSourceNoFollow(ctx, path) catch {
@@ -2410,7 +2410,7 @@ fn mergePearTree(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
 }
 
 /// A `pear.conf` whose lengths do not match crashes every `pear` command.
-/// Only a file that fails to parse is replaced, and the old one is kept.
+/// Replace only a file that fails to parse, and keep the old one as `.bak`.
 fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     const a = ctx.allocator;
     const live = a.print("{s}/pear.conf", .{etc_php}) catch return false;
@@ -2422,7 +2422,7 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
         if (pearConfValid(text)) return true;
         break :blk text;
     } else |e| switch (e) {
-        // Nothing live: the keg's copy is placed by the pour, not here.
+        // Nothing live: the pour places the keg's copy, not this step.
         error.FileNotFound => return true,
         else => return ioFail(ctx, "configure_php", live, e),
     };
@@ -2440,8 +2440,8 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     return true;
 }
 
-/// OPcache is built in from 8.5. Older bottles ship `opcache.so`, which
-/// needs a `zend_extension` line pointing at the stable `opt` path.
+/// OPcache is part of PHP from 8.5. Older bottles ship `opcache.so`, which
+/// needs a `zend_extension` line that points at the stable `opt` path.
 fn enableOpcache(ctx: StepsCtx, etc_php: []const u8, ext_name: []const u8) bool {
     const a = ctx.allocator;
     const conf_d = a.print("{s}/conf.d", .{etc_php}) catch return false;
@@ -5278,7 +5278,7 @@ test "opcacheIni writes a fresh file or swaps only the zend_extension line" {
         "[opcache]\nzend_extension=/new/opcache.so\nopcache.enable=1\n",
         try opcacheIni(a, "[opcache]\nzend_extension=/old/opcache.so\nopcache.enable=1\n", "/new/opcache.so"),
     );
-    // A commented line is not the directive; the real one is appended.
+    // A commented line is not the directive; the code appends the real one.
     try testing.expectEqualStrings(
         ";zend_extension=/old\nopcache.enable=0\nzend_extension=/new/opcache.so\n",
         try opcacheIni(a, ";zend_extension=/old\nopcache.enable=0\n", "/new/opcache.so"),
@@ -5318,8 +5318,8 @@ fn slurp(h: *TestHarness, path: []const u8) ![]u8 {
     return fs_read.readFileAll(h.io, h.arena.allocator(), f, 1 << 20);
 }
 
-/// A php keg with a stub `pear` that appends its argv to `etc/pear-argv.log`,
-/// plus the `opt/<name>` link the step runs the tool through.
+/// A php keg with a stub `pear` that logs its argv to `etc/pear-argv.log`.
+/// It also makes the `opt/<name>` link that the step uses to run the tool.
 fn seedPhp(h: *TestHarness, threaded: *std.Io.Threaded, o: PhpOpts) !StepsCtx {
     // Spawning needs the threaded Io, as in the tool-env test.
     h.io = threaded.io();

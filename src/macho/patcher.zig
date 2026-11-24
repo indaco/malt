@@ -397,9 +397,9 @@ fn recordDelete(
 pub const Replacement = struct {
     old: []const u8,
     new: []const u8,
-    /// What `old` expanded to when the bottle was built. Text formats that
-    /// store each string's length (PHP `s:N:"..."`) were sized with this
-    /// value, not with the placeholder. Mach-O passes ignore it.
+    /// What `old` expanded to at bottle build time. Text formats that store
+    /// each string's length (PHP `s:N:"..."`) used this value, not the
+    /// placeholder. Mach-O passes ignore it.
     built: ?[]const u8 = null,
 };
 
@@ -1022,9 +1022,9 @@ fn needleAt(text: []const u8, replacements: []const Replacement) ?Replacement {
 /// Length-prefixed record found in text: `s:<len>:"<payload>";`.
 const Record = struct { header: usize, payload: usize, end: usize };
 
-/// Walks the payload in build-time bytes. A header only counts when the
-/// walk lands exactly on `";`, so prose that looks like a header is left
-/// alone. A needle with no build value makes the size unknowable: plain text.
+/// Walks the payload in build-time bytes. A header counts only when the
+/// walk ends exactly on `";`. Prose that looks like a header stays as it is.
+/// A needle with no build value has an unknown size: plain text.
 fn recordAt(text: []const u8, header: usize, replacements: []const Replacement) ?Record {
     var p = header + 2;
     var declared: usize = 0;

@@ -64,10 +64,10 @@ pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, Materiali
 /// entry's verified mark was earned without that check, so a binary the
 /// kernel refuses could sit behind it indefinitely.
 ///
-/// v11: text relocation keeps each length-prefixed string's declared length
-/// in step with its new content, and upstream `/usr/local` text is kept in
-/// bottles built elsewhere. A v10 entry holds files with stale lengths that
-/// no reader accepts.
+/// v11: text relocation updates the declared length of each length-prefixed
+/// string. It also keeps upstream `/usr/local` text in bottles built
+/// elsewhere. A v10 entry holds files with stale lengths that no reader
+/// accepts.
 pub const RELOC_LOGIC_VERSION: u32 = 11;
 
 /// Borrow the store constructor's key rule rather than keep a second copy.
