@@ -163,6 +163,9 @@ const sha_absent_source = std.mem.asBytes(&@as([32][2]u8, @splat("54".*)));
 const sha_absent_sibling = std.mem.asBytes(&@as([32][2]u8, @splat("76".*)));
 const sha_serialized_lengths = std.mem.asBytes(&@as([32][2]u8, @splat("a1".*)));
 const sha_usr_local_text = std.mem.asBytes(&@as([32][2]u8, @splat("b2".*)));
+const sha_usr_local_opt = std.mem.asBytes(&@as([32][2]u8, @splat("c3".*)));
+const sha_usr_local_intel = std.mem.asBytes(&@as([32][2]u8, @splat("d4".*)));
+const sha_literal_prefix = std.mem.asBytes(&@as([32][2]u8, @splat("e5".*)));
 const sha_symlinked_pkg = std.mem.asBytes(&@as([32][2]u8, @splat("98".*)));
 
 // ---------------------------------------------------------------------------
@@ -2177,4 +2180,72 @@ test "relocateKegTree resizes serialized lengths for the build-time prefix of th
     );
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, got);
+}
+
+// ---------------------------------------------------------------------------
+// `/usr/local` text is upstream data unless the bottle was built there
+// ---------------------------------------------------------------------------
+
+/// Materializes a one-file keg whose `lib/test.pc` holds `body` and returns
+/// the relocated bytes (caller frees).
+fn relocatePcText(sha: []const u8, cellar_type: []const u8, body: []const u8) ![]const u8 {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, sha, "pkg", "1.0");
+    try overwriteFixturePc(testing.allocator, prefix, sha, "pkg", "1.0", body);
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        sha,
+        "pkg",
+        "1.0",
+        cellar_type,
+        null,
+        true,
+    );
+    defer testing.allocator.free(keg.path);
+    const path = try testing.allocator.print("{s}/lib/test.pc", .{keg.path});
+    defer testing.allocator.free(path);
+    return readFile(testing.allocator, path);
+}
+
+test "relocateKegTree leaves /usr/local text alone in a skip-relocation bottle" {
+    const got = try relocatePcText(sha_usr_local_text, ":any_skip_relocation", "ac_default_prefix=/usr/local\n");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("ac_default_prefix=/usr/local\n", got);
+}
+
+test "relocateKegTree leaves /usr/local text alone in a bottle built under /opt/homebrew" {
+    const got = try relocatePcText(sha_usr_local_opt, "/opt/homebrew/Cellar", "sig_bin=/usr/local/bin/gpg\nroot=/opt/homebrew/x\n");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.find(u8, got, "sig_bin=/usr/local/bin/gpg\n") != null);
+    try testing.expect(std.mem.find(u8, got, "/opt/homebrew") == null);
+}
+
+test "relocateKegTree still rewrites /usr/local text in a bottle built under /usr/local" {
+    const got = try relocatePcText(sha_usr_local_intel, "/usr/local/Cellar", "root=/usr/local/bin\n");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.find(u8, got, "/usr/local") == null);
+    try testing.expect(std.mem.startsWith(u8, got, "root=/tmp/malt_cellar_test_"));
+}
+
+test "relocateKegTree resizes a record that holds the literal /opt/homebrew prefix" {
+    const got = try relocatePcText(sha_literal_prefix, "/opt/homebrew/Cellar", "a:1:{s:1:\"k\";s:15:\"/opt/homebrew/x\";}");
+    defer testing.allocator.free(got);
+    const head = "a:1:{s:1:\"k\";s:";
+    try testing.expect(std.mem.startsWith(u8, got, head));
+    const rest = got[head.len..];
+    const colon = std.mem.findScalar(u8, rest, ':') orelse return error.TestUnexpectedResult;
+    const declared = try std.fmt.parseInt(usize, rest[0..colon], 10);
+    const payload = rest[colon + 2 ..][0..declared];
+    try testing.expect(std.mem.endsWith(u8, payload, "/x"));
+    try testing.expectEqualStrings("\";}", rest[colon + 2 + declared ..]);
 }

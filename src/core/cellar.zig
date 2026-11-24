@@ -852,12 +852,19 @@ fn relocateKegTree(
     text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix, .built = built_repo };
     text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library, .built = built_library };
     text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
-    text_reps_buf[5] = .{ .old = "/usr/local", .new = new_prefix };
-    text_reps_buf[6] = perl;
-    var text_reps_len: usize = 7;
+    var text_reps_len: usize = 5;
+    // Elsewhere built, `/usr/local` is upstream data (a configure default,
+    // a gpg path), not a build path; rewriting it corrupts length-prefixed
+    // files and changes what the bottle's tools report.
+    if (!skip_absolute_rewrite and std.mem.eql(u8, built_prefix, "/usr/local")) {
+        text_reps_buf[text_reps_len] = .{ .old = "/usr/local", .new = new_prefix };
+        text_reps_len += 1;
+    }
+    text_reps_buf[text_reps_len] = perl;
+    text_reps_len += 1;
     if (extra_replacement) |r| {
-        text_reps_buf[7] = r;
-        text_reps_len = 8;
+        text_reps_buf[text_reps_len] = r;
+        text_reps_len += 1;
     }
     const text_reps = text_reps_buf[0..text_reps_len];
     const macho_reps = macho_reps_buf[0..macho_reps_len];
