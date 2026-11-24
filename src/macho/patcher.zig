@@ -1680,3 +1680,86 @@ test "patchTextFileHead patches a token beyond the head it was handed" {
     try testing.expect(std.mem.endsWith(u8, got, "\nprefix=/opt/malt\n"));
     try testing.expectEqualSlices(u8, body[0..text_head_len], got[0..text_head_len]);
 }
+
+const test_reps = [_]Replacement{
+    .{ .old = "@@P@@", .new = "/opt/malt", .built = "/opt/homebrew" },
+};
+
+test "recordAt accepts a record whose build-time length matches" {
+    const testing = std.testing;
+    // 13 build-time bytes: `/opt/homebrew` stands in for the placeholder.
+    const text = "s:13:\"@@P@@\";";
+    const rec = recordAt(text, 0, &test_reps) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 6), rec.payload);
+    try testing.expectEqual(@as(usize, 11), rec.end);
+}
+
+test "recordAt rejects headers that do not describe a record" {
+    const testing = std.testing;
+    const bad = [_][]const u8{
+        "s:12:\"@@P@@\";", // declared length is short by one
+        "s:14:\"@@P@@\";", // declared length is long by one
+        "s:13:\"@@P@@\"", // no closing `;`
+        "s:13:@@P@@\";", // no opening quote
+        "s::\"@@P@@\";", // no digits
+        "s:13:\"@@P@@", // payload runs past the end
+        "s:99999999999999999999999:\"x\";", // length overflows
+    };
+    for (bad) |t| try testing.expect(recordAt(t, 0, &test_reps) == null);
+}
+
+test "recordAt treats a needle without a build value as plain text" {
+    const testing = std.testing;
+    const reps = [_]Replacement{.{ .old = "@@P@@", .new = "/opt/malt" }};
+    try testing.expect(recordAt("s:5:\"@@P@@\";", 0, &reps) == null);
+}
+
+test "rewriteText resizes each record and leaves prose alone" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    const in = "x s:13:\"@@P@@\"; s:3:\"a\"b\"; mess:5 @@P@@ s:13:\"@@P@@\";";
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expectEqualStrings(
+        "x s:9:\"/opt/malt\"; s:3:\"a\"b\"; mess:5 /opt/malt s:9:\"/opt/malt\";",
+        out,
+    );
+}
+
+test "rewriteText resizes a record that mixes needles with other bytes" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // 13 + 4 + 13 + 2 (a two-byte character) = 32 build-time bytes.
+    const in = "s:32:\"@@P@@/bin@@P@@\xc3\xa9\";";
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    // 9 + 4 + 9 + 2 = 24 bytes after the rewrite.
+    try testing.expectEqualStrings("s:24:\"/opt/malt/bin/opt/malt\xc3\xa9\";", out);
+}
+
+test "rewriteText resizes only the outer record of a nested one" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // The inner header is payload bytes of the outer record, so it keeps its
+    // old length. PEAR files do not nest records.
+    const in = "s:21:\"s:13:\"@@P@@\";\";";
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expectEqualStrings("s:17:\"s:13:\"/opt/malt\";\";", out);
+}
+
+test "rewriteText returns null when nothing changes" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    try testing.expect(try rewriteText(a, "s:3:\"abc\";", &test_reps) == null);
+    try testing.expect(try rewriteText(a, "", &test_reps) == null);
+}
+
+test "rewriteText without build values is a plain replace" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    const reps = [_]Replacement{.{ .old = "@@P@@", .new = "/opt/malt" }};
+    const out = (try rewriteText(a, "s:5:\"@@P@@\";", &reps)).?;
+    defer a.free(out);
+    try testing.expectEqualStrings("s:5:\"/opt/malt\";", out);
+}
