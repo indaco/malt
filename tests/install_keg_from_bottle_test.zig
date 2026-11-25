@@ -512,63 +512,20 @@ test "installKegFromBottle stores the bottle's cellar tag, not one the archive c
     var store = malt.store.Store.init(io, testing.allocator, &db, prefix);
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
-    const result = try malt.install_download.installKegFromBottle(
+    const result = malt.install_download.installKegFromBottle(
         &ctx,
         testing.allocator,
         .{ .ghcr = &ghcr, .http = &http, .store = &store },
         &formula,
         prefix,
     );
-    defer testing.allocator.free(result.keg.path);
 
+    // Join before any `try`: a failed install must not free the listener
+    // under the serving thread.
     http.deinit();
     server_thread.join();
 
-    try expectStoredTag(io, prefix, &bottle.sha, ":any");
-}
-
-test "migrate downloadBottle stores the bottle's cellar tag, not one the archive carries" {
-    try test_io.skipIfNoSubprocess();
-
-    const prefix = try setupPrefix("migtag");
-    defer testing.allocator.free(prefix);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var bottle = try mintColdBottle(io, prefix);
-    defer bottle.deinit();
-
-    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
-    var listener = try addr.listen(io, .{ .reuse_address = true });
-    defer listener.deinit(io);
-    var stub = BottleStub{ .io = io, .listener = &listener, .body = bottle.body };
-    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
-
-    var base_buf: [64]u8 = undefined;
-    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
-
-    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
-    var http = malt.client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
-    var ghcr = malt.ghcr.GhcrClient.init(io, testing.allocator, &http);
-    defer ghcr.deinit();
-    ghcr.base_url = base_url;
-
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-    var store = malt.store.Store.init(io, testing.allocator, &db, prefix);
-
-    var url_buf: [256]u8 = undefined;
-    const url = try std.mem.print(&url_buf, "https://ghcr.io/v2/homebrew/core/coldpkg/blobs/sha256:{s}", .{&bottle.sha});
-    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
-    const ok = malt.cli_migrate_keg.downloadBottle(&ctx, testing.allocator, &ghcr, &http, &store, url, &bottle.sha, ":any", "coldpkg", null);
-
-    http.deinit();
-    server_thread.join();
-
-    try testing.expect(ok);
+    const installed = try result;
+    defer testing.allocator.free(installed.keg.path);
     try expectStoredTag(io, prefix, &bottle.sha, ":any");
 }

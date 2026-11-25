@@ -1,8 +1,9 @@
 //! The cellar tag a bottle declares, kept beside its store entry so a later
 //! rollback can size relocated text for the prefix the bottle was built for.
-//! The file sits in the staging directory before the entry is committed, so
-//! it is published and removed with the entry. Bottle content must not
-//! decide what it holds: `write` always replaces what the archive put there.
+//! The file holds one line, `<sha256> <tag>`. It sits in the staging
+//! directory before the entry is committed, so it is published and removed
+//! with the entry. Bottle content must not decide what it holds: `write`
+//! removes whatever the archive put at the name, then writes only a valid tag.
 
 const std = @import("std");
 
@@ -42,7 +43,7 @@ pub fn write(io: std.Io, dir_path: []const u8, sha: []const u8, tag: []const u8)
     const file = try dir.createFile(io, file_name, .{ .exclusive = true });
     defer file.close(io);
     var line: [buf_len]u8 = undefined;
-    const text = try std.fmt.bufPrint(&line, "{s} {s}\n", .{ sha, tag });
+    const text = try std.mem.print(&line, "{s} {s}\n", .{ sha, tag });
     try file.writeStreamingAll(io, text);
 }
 

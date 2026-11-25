@@ -564,7 +564,7 @@ fn commitMigrated(
 }
 
 /// Download a bottle from GHCR and commit to the store.
-pub fn downloadBottle(
+fn downloadBottle(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,

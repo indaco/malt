@@ -830,7 +830,7 @@ fn kegInstallReason(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []
     return allocator.dupe(u8, std.mem.sliceTo(r, 0));
 }
 
-test "a completed rollback sizes text by the entry's stored cellar tag" {
+test "a completed rollback saves a relocated snapshot when the entry holds a cellar tag" {
     var pbuf: [64]u8 = undefined;
     const prefix = rbPrefix(&pbuf, "tag_snapshot");
     try makeSandbox(prefix);
