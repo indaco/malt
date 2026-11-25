@@ -699,6 +699,8 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `MALT_ALLOW_UNVERIFIED`            | Skip signature + checksum verification - in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                                               | unset                           |
 | `MALT_ALLOW_UNVERIFIED_SOURCE`     | Allow `install.sh` to clone `main` when no release tag resolves                                                                                                                      | unset                           |
 
+A prefix longer than the build path in a bottle cannot relocate every embedded path. Bottles use `/opt/homebrew` (13 bytes) or `/usr/local` (10 bytes). For php, `pecl` and `pear` are not set up past this limit. On php 8.4 and older, OPcache is not enabled either. Use a shorter `MALT_PREFIX` and install again.
+
 ## Safety and security
 
 malt verifies the SHA256 of each download before extraction. It installs atomically, and each release has a cosign signature. For the full safety and supply-chain model, refer to [ARCHITECTURE.md](ARCHITECTURE.md#safety-and-security).

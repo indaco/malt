@@ -2273,12 +2273,50 @@ const pear_dir_keys = [_]struct { key: []const u8, suffix: []const u8 }{
 /// that fills it cannot be judged.
 const conf_read_cap = 1024 * 1024;
 
+/// Name of the file that relocation writes into a keg when build-prefix paths
+/// stay. A test pins it to `cellar.unrelocated_marker`: this module has no
+/// other need to import `cellar.zig`.
+const unrelocated_marker = ".malt-unrelocated";
+
+fn kegHasUnrelocatedPaths(ctx: StepsCtx) bool {
+    const path = ctx.allocator.print("{s}/{s}", .{ ctx.keg_path, unrelocated_marker }) catch return false;
+    return pathExists(ctx.io, path);
+}
+
+/// True when the keg ships `opcache.so`. The step skips its `ext-opcache.ini`
+/// then, so the note must say so.
+fn kegShipsOpcache(ctx: StepsCtx) bool {
+    const a = ctx.allocator;
+    const root = a.print("{s}/lib/php", .{ctx.keg_path}) catch return false;
+    var d = std.Io.Dir.openDirAbsolute(ctx.io, root, .{ .iterate = true }) catch return false;
+    defer d.close(ctx.io);
+    var it = d.iterate();
+    while (it.next(ctx.io) catch return false) |entry| {
+        // No kind filter: a symlinked API directory counts, and a plain file fails the open.
+        const so = a.print("{s}/{s}/opcache.so", .{ root, entry.name }) catch return false;
+        if (fileExists(ctx.io, so)) return true;
+    }
+    return false;
+}
+
 /// `configure_php`: after this step `pecl install` finds a `php.ini` to
 /// enable the extension in. The extension and PEAR tree stay after an
 /// upgrade. The step skips `pear update-channels`: the fence denies the
-/// network.
+/// network. The marker covers the whole keg, so one stale path anywhere sets it.
+/// The step cannot tell which path, so it logs one line and skips the rest.
+/// On php 8.4 and older, this also leaves out `ext-opcache.ini`.
 fn stepConfigurePhp(ctx: StepsCtx) bool {
     const a = ctx.allocator;
+    if (kegHasUnrelocatedPaths(ctx)) {
+        const skipped: []const u8 = if (kegShipsOpcache(ctx)) "pecl and pear are not set up, and opcache is not enabled" else "pecl and pear are not set up";
+        ctx.flog.note(ctx.allocator.print(
+            "configure_php: relocation left build-prefix paths in the {s} keg. {s}. Use a shorter prefix.\n",
+            .{ ctx.name, skipped },
+        ) catch "configure_php: pecl and pear are not set up. Use a shorter prefix.\n");
+        ctx.flog.log(.{ .formula = ctx.name, .reason = .prefix_too_long, .detail = skipped, .loc = null });
+        // Not handled: a step that logs an entry is not counted as done.
+        return false;
+    }
     const mm = phpMajorMinor(ctx.version) orelse {
         logUnsupported(ctx, "configure_php without a readable PHP version");
         return false;
@@ -5825,6 +5863,76 @@ test "configure_php uses the unversioned PEAR tree for the php formula" {
     const log = try slurp(&h, try a.print("{s}/etc/pear-argv.log", .{h.prefix}));
     try testing.expect(std.mem.find(u8, log, try a.print("config-set php_dir {s}/share/pear system", .{h.prefix})) != null);
     try testing.expect(dirExists(h.io, try a.print("{s}/lib/php/pecl/20250925", .{h.prefix})));
+}
+
+test "configure_php skips the PEAR setup in a keg whose build paths were not relocated" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{ .opcache = true });
+    // The php binary still reads the build prefix, so PEAR cannot lock its files there.
+    try putFile(&h, try a.print("{s}/{s}", .{ c.keg_path, unrelocated_marker }), "3\n", 0o644);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
+    try testing.expectEqual(fallback_log.FallbackReason.prefix_too_long, h.flog.entries()[0].reason);
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+
+    try testing.expect(!fileExists(h.io, try a.print("{s}/etc/pear-argv.log", .{h.prefix})));
+    try testing.expect(!dirExists(h.io, try a.print("{s}/share/pear@8.5", .{h.prefix})));
+    try testing.expect(!fileExists(h.io, try a.print("{s}/etc/php/8.5/conf.d/ext-opcache.ini", .{h.prefix})));
+    try testing.expect(!dirExists(h.io, try a.print("{s}/lib/php/pecl", .{h.prefix})));
+    var said = false;
+    for (h.flog.notes()) |n| said = said or (std.mem.find(u8, n, "pecl and pear are not set up") != null and std.mem.find(u8, n, "php@8.5") != null);
+    try testing.expect(said);
+    try testing.expect(std.mem.find(u8, h.flog.notes()[0], "opcache is not enabled") != null);
+    // --verbose and --json read the entry, not the note.
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, "opcache is not enabled") != null);
+}
+
+test "configure_php names opcache when the API directory is a symlink" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    try putFile(&h, try a.print("{s}/{s}", .{ c.keg_path, unrelocated_marker }), "3\n", 0o644);
+    try putFile(&h, try a.print("{s}/ext-store/opcache.so", .{c.keg_path}), "so\n", 0o755);
+    const api_dir = try a.print("{s}/lib/php/20250925", .{c.keg_path});
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/lib/php", .{c.keg_path}));
+    try std.Io.Dir.cwd().symLink(h.io, try a.print("{s}/ext-store", .{c.keg_path}), api_dir, .{ .is_directory = true });
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(std.mem.find(u8, h.flog.notes()[0], "opcache is not enabled") != null);
+}
+
+test "configure_php does not name opcache when the keg ships none" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    try putFile(&h, try a.print("{s}/{s}", .{ c.keg_path, unrelocated_marker }), "3\n", 0o644);
+    // An API directory with other extensions must not count as opcache.
+    try putFile(&h, try a.print("{s}/lib/php/20250925/xdebug.so", .{c.keg_path}), "so\n", 0o755);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expectEqual(@as(usize, 1), h.flog.notes().len);
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, "opcache") == null);
+    try testing.expect(std.mem.find(u8, h.flog.notes()[0], "pecl and pear are not set up") != null);
+    try testing.expect(std.mem.find(u8, h.flog.notes()[0], "opcache") == null);
+}
+
+test "unrelocated_marker names the file relocation writes" {
+    try testing.expectEqualStrings(@import("cellar.zig").unrelocated_marker, unrelocated_marker);
 }
 
 test "configure_php reports a failing pear instead of success" {

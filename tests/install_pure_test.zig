@@ -1451,7 +1451,7 @@ test "routePostInstallOutcome: surfaces the dropped_oom notice" {
     const out = try runRoute(&flog, "demo", &.{});
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.find(u8, out, "dropped an entry due to OOM") != null);
+    try testing.expect(std.mem.find(u8, out, "dropped a line due to OOM") != null);
 }
 
 // Byte-identical-envelope guard: diagnostics (notes / dropped_oom) live in
@@ -1538,6 +1538,90 @@ test "routePostInstallOutcome: --json emits one status line with escaped name" {
     defer parsed.deinit();
     try testing.expectEqualStrings("llvm@21", parsed.value.object.get("name").?.string);
     try testing.expectEqualStrings("partially_skipped", parsed.value.object.get("status").?.string);
+}
+
+test "routePostInstallOutcome: a prefix that is too long is reported as skipped, with no Ruby hint" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "php", .reason = .prefix_too_long, .detail = "pecl and pear are not set up", .loc = null });
+
+    const out = try runRoute(&flog, "php", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.find(u8, out, "php: post_install partially skipped") != null);
+    // A system-Ruby re-run cannot lengthen the paths inside the binary.
+    try testing.expect(std.mem.find(u8, out, "--use-system-ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "post_install completed") == null);
+}
+
+test "routePostInstallOutcome: --use-system-ruby does not run Ruby for a prefix that is too long" {
+    try test_io.skipIfNoSubprocess();
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "php", .reason = .prefix_too_long, .detail = "pecl and pear are not set up", .loc = null });
+
+    const scope = [_][]const u8{"php"};
+    // A synthetic body keeps the test off the live tap. If the router
+    // did run Ruby, the banner checks below would fail.
+    const body = "undefined_stub_helper \"cert.pem\"\n";
+    const out = try runRouteWithBody(&flog, "php", scope[0..], body);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.find(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "via system Ruby") == null);
+    try testing.expect(std.mem.find(u8, out, "php: post_install partially skipped") != null);
+}
+
+test "routePostInstallOutcome: a dropped log entry keeps the Ruby hint for a prefix that is too long" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "php", .reason = .prefix_too_long, .detail = "pecl and pear are not set up", .loc = null });
+    // A dropped entry may have been a different reason, so the log is not proof.
+    flog.dropped_oom = true;
+
+    const out = try runRoute(&flog, "php", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.find(u8, out, "--use-system-ruby") != null);
+}
+
+test "routePostInstallOutcome: --verbose lists a prefix_too_long entry" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "php", .reason = .prefix_too_long, .detail = "pecl and pear are not set up", .loc = null });
+
+    const prior = output_mod.isVerbose();
+    output_mod.setVerbose(true);
+    defer output_mod.setVerbose(prior);
+
+    const out = try runRoute(&flog, "php", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.find(u8, out, "php: [prefix_too_long] pecl and pear are not set up") != null);
+}
+
+test "routePostInstallOutcome: a prefix that is too long keeps the Ruby hint for other skipped steps" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "php", .reason = .prefix_too_long, .detail = "pecl and pear are not set up", .loc = null });
+    flog.log(.{ .formula = "php", .reason = .unknown_method, .detail = "x", .loc = null });
+
+    const out = try runRoute(&flog, "php", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.find(u8, out, "partially skipped (use --use-system-ruby=php") != null);
+}
+
+test "routePostInstallOutcome: --json reports a prefix that is too long as partially_skipped" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "php", .reason = .prefix_too_long, .detail = "pecl and pear are not set up", .loc = null });
+
+    const out = try runRouteCaptureStdout(&flog, "php", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.find(u8, out, "\"status\":\"partially_skipped\"") != null);
+    try testing.expect(std.mem.find(u8, out, "\"reason\":\"prefix_too_long\"") != null);
 }
 
 test "routePostInstallOutcome: --json status=completed for clean flog" {
