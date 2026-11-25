@@ -1017,7 +1017,7 @@ test "a cellar tag of an odd length survives install then rollback" {
     var store = malt.store.Store.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try malt.install_download.commitDownloaded(std.Options.debug_io, &store, bottle, staged);
 
-    var tag_buf: [malt.cellar_tag.max_len + 1]u8 = undefined;
+    var tag_buf: [malt.cellar_tag.buf_len]u8 = undefined;
     const tag = malt.cli_rollback.storedCellarTag(std.Options.debug_io, prefix, valid_test_sha, &tag_buf);
     const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", tag, null, true);
     defer testing.allocator.free(keg.path);
@@ -1045,7 +1045,7 @@ test "rollback still works for a store entry made before the tag file existed" {
     defer testing.allocator.free(entry);
     try test_io.cwd().rename(staged, test_io.cwd(), entry, std.Options.debug_io);
 
-    var tag_buf: [malt.cellar_tag.max_len + 1]u8 = undefined;
+    var tag_buf: [malt.cellar_tag.buf_len]u8 = undefined;
     const tag = malt.cli_rollback.storedCellarTag(std.Options.debug_io, prefix, valid_test_sha, &tag_buf);
     try testing.expectEqualStrings("", tag);
     const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", tag, null, true);

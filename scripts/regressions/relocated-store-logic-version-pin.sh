@@ -33,7 +33,8 @@ STORE="$ROOT/src/core/relocated_store.zig"
 # applied on the way out, and the formula reader that computes two of the
 # text replacements the walk applies (the perl and dependency placeholders -
 # their substituted values are literally the bytes on disk), plus the host
-# macOS reader the perl one depends on.
+# macOS reader the perl one depends on, and the cellar tag reader that picks
+# the build prefix a rollback relocates text for.
 # relocated_store.zig itself is deliberately absent - it carries the version
 # constant, so including it would make every bump invalidate its own pin.
 #
@@ -43,6 +44,7 @@ STORE="$ROOT/src/core/relocated_store.zig"
 SOURCES=(
   src/core/cellar.zig
   src/core/formula.zig
+  src/fs/cellar_tag.zig
   src/net/cask_variation.zig
   src/core/patch.zig
   src/macho/patcher.zig

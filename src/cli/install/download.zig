@@ -819,7 +819,7 @@ pub fn commitDownloaded(
     bottle: formula_mod.BottleFile,
     tmp_dir: []const u8,
 ) store_mod.StoreError!void {
-    cellar_tag.write(io, tmp_dir, bottle.cellar) catch |e|
+    cellar_tag.write(io, tmp_dir, bottle.sha256, bottle.cellar) catch |e|
         std.log.debug("cellar tag not recorded for {s}: {s}", .{ bottle.sha256, @errorName(e) });
     try store.commitFrom(bottle.sha256, tmp_dir);
 }
@@ -1287,17 +1287,17 @@ test "commitDownloaded records the bottle's tag and ignores one the archive plan
     try std.Io.Dir.cwd().createDirPath(io, staged);
     try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
     // A tag the bottle itself ships must lose to the one the API declared.
-    try writeTestFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag.file_name), "/evil/Cellar");
+    try writeTestFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag.file_name), sha ++ " /evil/Cellar\n");
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
 
     try commitDownloaded(io, &store, .{ .cellar = "/opt/malt-brew/Cellar", .url = "", .sha256 = sha }, staged);
-    var buf: [cellar_tag.max_len + 1]u8 = undefined;
-    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag.read(io, s.p("/store/" ++ sha), &buf).?);
+    var buf: [cellar_tag.buf_len]u8 = undefined;
+    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag.read(io, s.p("/store/" ++ sha), sha, &buf).?);
 }
 
-test "commitDownloaded still commits a bottle whose tag is unusable" {
+test "commitDownloaded still commits a bottle whose tag is unusable and drops a planted file" {
     var s = try Scratch.init("commit_tag_dl_bad");
     defer s.deinit();
     const io = std.Options.debug_io;
@@ -1305,14 +1305,16 @@ test "commitDownloaded still commits a bottle whose tag is unusable" {
     const staged = s.p("/tmp/" ++ sha);
     try std.Io.Dir.cwd().createDirPath(io, staged);
     try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    // A well-formed file the bottle ships, with a tag the API did not declare.
+    try writeTestFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag.file_name), sha ++ " /evil/Cellar\n");
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
 
     try commitDownloaded(io, &store, .{ .cellar = "", .url = "", .sha256 = sha }, staged);
     try std.testing.expect(store.exists(sha));
-    var buf: [cellar_tag.max_len + 1]u8 = undefined;
-    try std.testing.expect(cellar_tag.read(io, s.p("/store/" ++ sha), &buf) == null);
+    var buf: [cellar_tag.buf_len]u8 = undefined;
+    try std.testing.expect(cellar_tag.read(io, s.p("/store/" ++ sha), sha, &buf) == null);
 }
 
 test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across the dupe-then-deinit shape" {

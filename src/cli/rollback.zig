@@ -223,7 +223,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Materialize before touching the current install: store entries are
     // on-disk input, so a corrupt one must not cost the user a working
     // version. Nothing is destroyed yet, so failure needs no restore.
-    var tag_buf: [cellar_tag.max_len + 1]u8 = undefined;
+    var tag_buf: [cellar_tag.buf_len]u8 = undefined;
     const keg = cellar.materializeWithCellar(
         ctx.io,
         allocator,
@@ -1134,10 +1134,10 @@ fn storeKegPlaceholder(
 /// The cellar tag recorded beside the store entry when it was made. Empty
 /// when the entry predates the file or the file is unusable: relocation
 /// then guesses the build prefix and saves no snapshot.
-pub fn storedCellarTag(io: std.Io, prefix: []const u8, sha256: []const u8, buf: *[cellar_tag.max_len + 1]u8) []const u8 {
+pub fn storedCellarTag(io: std.Io, prefix: []const u8, sha256: []const u8, buf: *[cellar_tag.buf_len]u8) []const u8 {
     var entry_buf: [store_path.entry_buf_len]u8 = undefined;
     const entry = store_path.entry(&entry_buf, prefix, sha256) catch return "";
-    return cellar_tag.read(io, entry, buf) orelse "";
+    return cellar_tag.read(io, entry, sha256, buf) orelse "";
 }
 
 /// Whether the target's own shipped formula source declares it keg-only.
@@ -2037,8 +2037,8 @@ test "storedCellarTag reads the tag beside the entry" {
     defer s.deinit();
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("12".*)));
     try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store/" ++ sha));
-    try cellar_tag.write(fs_test_io, s.p("/store/" ++ sha), "/opt/malt-brew/Cellar");
-    var buf: [cellar_tag.max_len + 1]u8 = undefined;
+    try cellar_tag.write(fs_test_io, s.p("/store/" ++ sha), sha, "/opt/malt-brew/Cellar");
+    var buf: [cellar_tag.buf_len]u8 = undefined;
     try testing.expectEqualStrings("/opt/malt-brew/Cellar", storedCellarTag(fs_test_io, s.base, sha, &buf));
 }
 
@@ -2047,7 +2047,7 @@ test "storedCellarTag gives an empty tag for an entry made before the file exist
     defer s.deinit();
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("34".*)));
     try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store/" ++ sha));
-    var buf: [cellar_tag.max_len + 1]u8 = undefined;
+    var buf: [cellar_tag.buf_len]u8 = undefined;
     try testing.expectEqualStrings("", storedCellarTag(fs_test_io, s.base, sha, &buf));
 }
 
@@ -2057,10 +2057,10 @@ test "storedCellarTag refuses a linked or malformed file" {
     const sha = std.mem.asBytes(&@as([32][2]u8, @splat("56".*)));
     try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store/" ++ sha));
     const real = try std.Io.Dir.cwd().createFile(fs_test_io, s.p("/real"), .{});
-    try real.writeStreamingAll(fs_test_io, "/good/Cellar");
+    try real.writeStreamingAll(fs_test_io, sha ++ " /good/Cellar\n");
     real.close(fs_test_io);
     try std.Io.Dir.cwd().symLink(fs_test_io, s.p("/real"), s.p("/store/" ++ sha ++ "/" ++ cellar_tag.file_name), .{});
-    var buf: [cellar_tag.max_len + 1]u8 = undefined;
+    var buf: [cellar_tag.buf_len]u8 = undefined;
     try testing.expectEqualStrings("", storedCellarTag(fs_test_io, s.base, sha, &buf));
     try testing.expectEqualStrings("", storedCellarTag(fs_test_io, s.base, "not-a-sha", &buf));
 }

@@ -19,21 +19,39 @@ pub fn valid(tag: []const u8) bool {
     return true;
 }
 
-/// Write `tag` into `dir_path`. Whatever the archive left at `file_name`
-/// goes first: a link there would otherwise take the write.
-pub fn write(io: std.Io, dir_path: []const u8, tag: []const u8) !void {
-    if (!valid(tag)) return error.InvalidTag;
+/// Sha-256 in hex: the key of the store entry the file belongs to.
+const sha_len = 64;
+
+/// Room for `<sha> <tag>\n`.
+pub const buf_len = sha_len + 1 + max_len + 1;
+
+fn validSha(sha: []const u8) bool {
+    if (sha.len != sha_len) return false;
+    for (sha) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
+}
+
+/// Write `<sha> <tag>\n` into `dir_path`. Whatever the archive left at
+/// `file_name` goes first, even when the tag is refused: a planted file must
+/// not outlive the commit. A link there would otherwise take the write.
+pub fn write(io: std.Io, dir_path: []const u8, sha: []const u8, tag: []const u8) !void {
     var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
     defer dir.close(io);
     try dir.deleteTree(io, file_name);
+    if (!valid(tag) or !validSha(sha)) return error.InvalidTag;
     const file = try dir.createFile(io, file_name, .{ .exclusive = true });
     defer file.close(io);
-    try file.writeStreamingAll(io, tag);
+    var line: [buf_len]u8 = undefined;
+    const text = try std.fmt.bufPrint(&line, "{s} {s}\n", .{ sha, tag });
+    try file.writeStreamingAll(io, text);
 }
 
-/// The tag stored beside the entry at `entry_path`, or null when the file is
-/// missing, not a plain file, too long or malformed. The slice aliases `buf`.
-pub fn read(io: std.Io, entry_path: []const u8, buf: *[max_len + 1]u8) ?[]const u8 {
+/// The tag stored beside the entry at `entry_path` for `sha`, or null when the
+/// file is missing, not a plain file, too long, malformed, or written for
+/// another sha. An archive cannot contain its own digest, so a file it ships
+/// never passes. The slice aliases `buf`.
+pub fn read(io: std.Io, entry_path: []const u8, sha: []const u8, buf: *[buf_len]u8) ?[]const u8 {
+    if (!validSha(sha)) return null;
     var dir = std.Io.Dir.openDirAbsolute(io, entry_path, .{}) catch return null;
     defer dir.close(io);
     const file = dir.openFile(io, file_name, .{
@@ -43,9 +61,12 @@ pub fn read(io: std.Io, entry_path: []const u8, buf: *[max_len + 1]u8) ?[]const 
     }) catch return null;
     defer file.close(io);
     const st = file.stat(io) catch return null;
-    if (st.kind != .file or st.size > max_len) return null;
+    if (st.kind != .file or st.size > buf_len) return null;
     const n = file.readPositionalAll(io, buf, 0) catch return null;
-    const tag = buf[0..n];
+    const text = buf[0..n];
+    if (text.len < sha_len + 3 or text[text.len - 1] != '\n') return null;
+    if (!std.mem.eql(u8, text[0..sha_len], sha) or text[sha_len] != ' ') return null;
+    const tag = text[sha_len + 1 .. text.len - 1];
     return if (valid(tag)) tag else null;
 }
 
@@ -76,14 +97,44 @@ const Scratch = struct {
     }
 };
 
+const sha_a: []const u8 = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
+const sha_b: []const u8 = std.mem.asBytes(&@as([32][2]u8, @splat("cd".*)));
+
+fn putAt(path: []const u8, body: []const u8) !void {
+    std.Io.Dir.cwd().deleteFile(test_io, path) catch {};
+    const h = try std.Io.Dir.cwd().createFile(test_io, path, .{});
+    defer h.close(test_io);
+    try h.writeStreamingAll(test_io, body);
+}
+
 test "a tag survives a write and a read" {
     const s = try Scratch.init();
     defer s.deinit();
-    var buf: [max_len + 1]u8 = undefined;
-    try write(test_io, s.path, "/opt/malt-brew/Cellar");
-    try testing.expectEqualStrings("/opt/malt-brew/Cellar", read(test_io, s.path, &buf).?);
-    try write(test_io, s.path, ":any");
-    try testing.expectEqualStrings(":any", read(test_io, s.path, &buf).?);
+    var buf: [buf_len]u8 = undefined;
+    try write(test_io, s.path, sha_a, "/opt/malt-brew/Cellar");
+    try testing.expectEqualStrings("/opt/malt-brew/Cellar", read(test_io, s.path, sha_a, &buf).?);
+    try write(test_io, s.path, sha_a, ":any");
+    try testing.expectEqualStrings(":any", read(test_io, s.path, sha_a, &buf).?);
+}
+
+test "read refuses a file written for another sha" {
+    const s = try Scratch.init();
+    defer s.deinit();
+    var buf: [buf_len]u8 = undefined;
+    try write(test_io, s.path, sha_a, "/opt/malt-brew/Cellar");
+    try testing.expect(read(test_io, s.path, sha_b, &buf) == null);
+}
+
+test "read refuses a bare tag an archive could ship" {
+    const s = try Scratch.init();
+    defer s.deinit();
+    const path = try s.sub(file_name);
+    defer testing.allocator.free(path);
+    var buf: [buf_len]u8 = undefined;
+    try putAt(path, "/evil/Cellar");
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
+    try putAt(path, sha_a ++ " /evil/Cellar");
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
 }
 
 test "write replaces a file the archive planted" {
@@ -91,12 +142,20 @@ test "write replaces a file the archive planted" {
     defer s.deinit();
     const planted = try s.sub(file_name);
     defer testing.allocator.free(planted);
-    const f = try std.Io.Dir.cwd().createFile(test_io, planted, .{});
-    try f.writeStreamingAll(test_io, "/evil/Cellar");
-    f.close(test_io);
-    var buf: [max_len + 1]u8 = undefined;
-    try write(test_io, s.path, "/real/Cellar");
-    try testing.expectEqualStrings("/real/Cellar", read(test_io, s.path, &buf).?);
+    try putAt(planted, "/evil/Cellar");
+    var buf: [buf_len]u8 = undefined;
+    try write(test_io, s.path, sha_a, "/real/Cellar");
+    try testing.expectEqualStrings("/real/Cellar", read(test_io, s.path, sha_a, &buf).?);
+}
+
+test "write removes a planted file even when it refuses the tag" {
+    const s = try Scratch.init();
+    defer s.deinit();
+    const planted = try s.sub(file_name);
+    defer testing.allocator.free(planted);
+    try putAt(planted, sha_a ++ " /evil/Cellar\n");
+    try testing.expectError(error.InvalidTag, write(test_io, s.path, sha_a, ""));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(test_io, planted, .{}));
 }
 
 test "write does not follow a link the archive planted" {
@@ -104,18 +163,18 @@ test "write does not follow a link the archive planted" {
     defer s.deinit();
     const victim = try s.sub("victim");
     defer testing.allocator.free(victim);
-    const f = try std.Io.Dir.cwd().createFile(test_io, victim, .{});
-    try f.writeStreamingAll(test_io, "keep");
-    f.close(test_io);
+    try putAt(victim, "keep");
     const link = try s.sub(file_name);
     defer testing.allocator.free(link);
     try std.Io.Dir.cwd().symLink(test_io, victim, link, .{});
 
-    try write(test_io, s.path, "/real/Cellar");
-    var buf: [max_len + 1]u8 = undefined;
-    try testing.expectEqualStrings("/real/Cellar", read(test_io, s.path, &buf).?);
+    try write(test_io, s.path, sha_a, "/real/Cellar");
+    var buf: [buf_len]u8 = undefined;
+    try testing.expectEqualStrings("/real/Cellar", read(test_io, s.path, sha_a, &buf).?);
     var kept: [8]u8 = undefined;
-    const n = try (try std.Io.Dir.cwd().openFile(test_io, victim, .{})).readPositionalAll(test_io, &kept, 0);
+    const f = try std.Io.Dir.cwd().openFile(test_io, victim, .{});
+    defer f.close(test_io);
+    const n = try f.readPositionalAll(test_io, &kept, 0);
     try testing.expectEqualStrings("keep", kept[0..n]);
 }
 
@@ -125,50 +184,47 @@ test "write replaces a directory the archive planted" {
     const dir = try s.sub(file_name ++ "/inner");
     defer testing.allocator.free(dir);
     try std.Io.Dir.cwd().createDirPath(test_io, dir);
-    var buf: [max_len + 1]u8 = undefined;
-    try write(test_io, s.path, "/real/Cellar");
-    try testing.expectEqualStrings("/real/Cellar", read(test_io, s.path, &buf).?);
+    var buf: [buf_len]u8 = undefined;
+    try write(test_io, s.path, sha_a, "/real/Cellar");
+    try testing.expectEqualStrings("/real/Cellar", read(test_io, s.path, sha_a, &buf).?);
 }
 
-test "write refuses a tag that read would refuse" {
+test "write refuses a tag or sha that read would refuse" {
     const s = try Scratch.init();
     defer s.deinit();
     for ([_][]const u8{ "", "relative/Cellar", "/a\nb", "/a\x00b", "/caf\xc3\xa9" }) |bad| {
-        try testing.expectError(error.InvalidTag, write(test_io, s.path, bad));
+        try testing.expectError(error.InvalidTag, write(test_io, s.path, sha_a, bad));
     }
+    try testing.expectError(error.InvalidTag, write(test_io, s.path, "short", "/ok/Cellar"));
 }
 
 test "read gives null for a missing, linked, oversized or malformed file" {
     const s = try Scratch.init();
     defer s.deinit();
-    var buf: [max_len + 1]u8 = undefined;
-    try testing.expect(read(test_io, s.path, &buf) == null);
+    var buf: [buf_len]u8 = undefined;
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
 
     const path = try s.sub(file_name);
     defer testing.allocator.free(path);
-    const put = struct {
-        fn f(p: []const u8, body: []const u8) !void {
-            std.Io.Dir.cwd().deleteFile(test_io, p) catch {};
-            const h = try std.Io.Dir.cwd().createFile(test_io, p, .{});
-            defer h.close(test_io);
-            try h.writeStreamingAll(test_io, body);
-        }
-    }.f;
-    try put(path, "relative");
-    try testing.expect(read(test_io, s.path, &buf) == null);
-    try put(path, "/a\n");
-    try testing.expect(read(test_io, s.path, &buf) == null);
-    try put(path, "");
-    try testing.expect(read(test_io, s.path, &buf) == null);
-    var long: [max_len + 1]u8 = @splat('x');
-    long[0] = '/';
-    try put(path, &long);
-    try testing.expect(read(test_io, s.path, &buf) == null);
+    try putAt(path, sha_a ++ " relative\n");
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
+    try putAt(path, sha_a ++ " /a\n\n");
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
+    try putAt(path, sha_a ++ " /no-newline");
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
+    try putAt(path, "");
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
+    var long: [buf_len + 8]u8 = @splat('x');
+    @memcpy(long[0..sha_a.len], sha_a);
+    long[sha_a.len] = ' ';
+    long[sha_a.len + 1] = '/';
+    try putAt(path, &long);
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
 
     const real = try s.sub("real");
     defer testing.allocator.free(real);
-    try put(real, "/good/Cellar");
+    try putAt(real, sha_a ++ " /good/Cellar\n");
     try std.Io.Dir.cwd().deleteFile(test_io, path);
     try std.Io.Dir.cwd().symLink(test_io, real, path, .{});
-    try testing.expect(read(test_io, s.path, &buf) == null);
+    try testing.expect(read(test_io, s.path, sha_a, &buf) == null);
 }

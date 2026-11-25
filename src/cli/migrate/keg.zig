@@ -558,13 +558,13 @@ fn commitMigrated(
     bottle_cellar: []const u8,
     tmp_dir: []const u8,
 ) store_mod.StoreError!void {
-    cellar_tag_file.write(io, tmp_dir, bottle_cellar) catch |e|
+    cellar_tag_file.write(io, tmp_dir, sha256, bottle_cellar) catch |e|
         std.log.debug("cellar tag not recorded for {s}: {s}", .{ sha256, @errorName(e) });
     try store.commitFrom(sha256, tmp_dir);
 }
 
 /// Download a bottle from GHCR and commit to the store.
-fn downloadBottle(
+pub fn downloadBottle(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,
@@ -1207,13 +1207,34 @@ test "commitMigrated records the bottle's tag and ignores one the archive plante
     try std.Io.Dir.cwd().createDirPath(io, staged);
     try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
     const planted = try std.Io.Dir.cwd().createFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag_file.file_name), .{});
-    try planted.writeStreamingAll(io, "/evil/Cellar");
+    try planted.writeStreamingAll(io, sha ++ " /evil/Cellar\n");
     planted.close(io);
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
 
     try commitMigrated(io, &store, sha, "/opt/malt-brew/Cellar", staged);
-    var buf: [cellar_tag_file.max_len + 1]u8 = undefined;
-    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag_file.read(io, s.p("/store/" ++ sha), &buf).?);
+    var buf: [cellar_tag_file.buf_len]u8 = undefined;
+    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag_file.read(io, s.p("/store/" ++ sha), sha, &buf).?);
+}
+
+test "commitMigrated still commits a bottle whose tag is unusable and drops a planted file" {
+    var s = try Scratch.init("commit_tag_mig_bad");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("01".*)));
+    const staged = s.p("/tmp/" ++ sha);
+    try std.Io.Dir.cwd().createDirPath(io, staged);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    const planted = try std.Io.Dir.cwd().createFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag_file.file_name), .{});
+    try planted.writeStreamingAll(io, sha ++ " /evil/Cellar\n");
+    planted.close(io);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
+
+    try commitMigrated(io, &store, sha, "", staged);
+    try std.testing.expect(store.exists(sha));
+    var buf: [cellar_tag_file.buf_len]u8 = undefined;
+    try std.testing.expect(cellar_tag_file.read(io, s.p("/store/" ++ sha), sha, &buf) == null);
 }
