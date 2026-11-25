@@ -2471,6 +2471,8 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     if (!pearConfValid(body)) return true;
     const backup = pickBackup(ctx, live, broken) catch |e| switch (e) {
         error.NoFreeBackup => return ioFail(ctx, "configure_php", live, error.PathAlreadyExists),
+        // pickBackup logged the name that failed.
+        error.Reported => return false,
         else => return ioFail(ctx, "configure_php", live, e),
     };
     // Write the copy first: a failed write then never leaves `live` missing.
@@ -2496,12 +2498,19 @@ fn pickBackup(ctx: StepsCtx, live: []const u8, broken: []const u8) !Backup {
             try ctx.allocator.print("{s}.bak.{d}", .{ live, i });
         const st = std.Io.Dir.cwd().statFile(ctx.io, name, .{ .follow_symlinks = false }) catch |e| switch (e) {
             error.FileNotFound => return .{ .name = name, .holds_copy = false },
-            else => return e,
+            else => {
+                _ = ioFail(ctx, "configure_php", name, e);
+                return error.Reported;
+            },
         };
         if (st.kind != .file) continue;
         const f = openSourceNoFollow(ctx, name) catch continue;
         defer f.close(ctx.io);
-        const text = fs_read.readFileAll(ctx.io, ctx.allocator, f, conf_read_cap) catch continue;
+        // Only a read that fails for a file reason marks the name taken.
+        const text = fs_read.readFileAll(ctx.io, ctx.allocator, f, conf_read_cap) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => continue,
+        };
         if (std.mem.eql(u8, text, broken)) return .{ .name = name, .holds_copy = true };
     }
     return error.NoFreeBackup;
@@ -3184,6 +3193,7 @@ fn ioFail(ctx: StepsCtx, step: []const u8, path: []const u8, e: anyerror) bool {
 }
 
 // --- tests -----------------------------------------------------------------
+const OneShotFail = @import("../testing/one_shot_fail.zig").OneShotFail;
 // Inline because base resolution, templating, and the FS tier are pure
 // logic over a caller-supplied prefix; filesystem fixtures use `std.Io`
 // directly, mirroring `ruby/source.zig`.
@@ -5766,7 +5776,7 @@ test "configure_php reports an ext-opcache.ini it cannot read" {
 
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
-    // The first failure names the ini and a refused read, not another path.
+    // The first failure names the ini, not another path.
     try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, try a.print("{s}: ", .{ini})) != null);
 }
 
@@ -5870,7 +5880,7 @@ test "configure_php skips a backup name that is a dangling link" {
     try testing.expect(!pathExists(h.io, gone));
 }
 
-test "pickBackup returns the real error when a name cannot be checked" {
+test "pickBackup reports the backup name it cannot check" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
     defer threaded.deinit();
     var h = try TestHarness.init();
@@ -5880,7 +5890,40 @@ test "pickBackup returns the real error when a name cannot be checked" {
     // A component over NAME_MAX gives NameTooLong, not "no free name".
     const long = try a.alloc(u8, 300);
     @memset(long, 'a');
-    try testing.expectError(error.NameTooLong, pickBackup(c, try a.print("{s}/{s}/pear.conf", .{ h.prefix, long }), "x"));
+    const live = try a.print("{s}/{s}/pear.conf", .{ h.prefix, long });
+    try testing.expectError(error.Reported, pickBackup(c, live, "x"));
+    // The entry names the backup that failed, not the live file.
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, try a.print("{s}.bak: NameTooLong", .{live})) != null);
+}
+
+test "pickBackup never counts a memory failure as a taken name" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    // `.bak` holds other bytes, so the next name is free: a read that
+    // fails for memory and is skipped would wrongly return `.bak.1`.
+    try putFile(&h, try a.print("{s}.bak", .{live}), "older copy\n", 0o644);
+    var induced: usize = 0;
+    var i: usize = 0;
+    while (i < 12) : (i += 1) {
+        // One failure only: a failing allocator that keeps failing would
+        // also fail the next name and hide a skipped read.
+        var failing: OneShotFail = .{ .child = a, .at = i };
+        var c2 = c;
+        c2.allocator = failing.allocator();
+        const r = pickBackup(c2, live, pear_conf_bad);
+        if (failing.n > i) {
+            induced += 1;
+            try testing.expectError(error.OutOfMemory, r);
+        } else {
+            try testing.expect((try r).name.len > 0);
+        }
+    }
+    try testing.expect(induced > 0);
 }
 
 test "mergePearTree refuses a source that links out of the keg" {
