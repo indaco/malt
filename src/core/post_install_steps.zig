@@ -2443,7 +2443,8 @@ fn mergePearTree(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
 }
 
 /// A `pear.conf` whose lengths do not match crashes every `pear` command.
-/// Replace only a file that fails to parse, and keep the old one as `.bak`.
+/// Replace only a file that fails to parse. Keep the old one under the
+/// first free `.bak` name.
 fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     const a = ctx.allocator;
     const live = a.print("{s}/pear.conf", .{etc_php}) catch return false;
@@ -2468,31 +2469,42 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     defer file.close(ctx.io);
     const body = fs_read.readFileAll(ctx.io, a, file, conf_read_cap) catch |e| return ioFail(ctx, "configure_php", shipped, e);
     if (!pearConfValid(body)) return true;
-    const backup = freeBackupName(ctx, live) orelse
-        return ioFail(ctx, "configure_php", live, error.PathAlreadyExists);
+    const backup = pickBackup(ctx, live, broken) catch |e| switch (e) {
+        error.NoFreeBackup => return ioFail(ctx, "configure_php", live, error.PathAlreadyExists),
+        else => return ioFail(ctx, "configure_php", live, e),
+    };
     // Write the copy first: a failed write then never leaves `live` missing.
-    atomic.atomicWriteFileMode(ctx.io, backup, broken, perms) catch |e| return ioFail(ctx, "configure_php", backup, e);
+    if (!backup.holds_copy) atomic.atomicWriteFileMode(ctx.io, backup.name, broken, perms) catch |e| return ioFail(ctx, "configure_php", backup.name, e);
     atomic.atomicWriteFileMode(ctx.io, live, body, perms) catch |e| return ioFail(ctx, "configure_php", live, e);
     return true;
 }
 
 const max_backups = 8;
 
-/// The first of `<live>.bak`, `<live>.bak.1`, ... that names nothing. A link
-/// or a directory at a name counts as taken, and the check never opens it.
-fn freeBackupName(ctx: StepsCtx, live: []const u8) ?[]const u8 {
+const Backup = struct { name: []const u8, holds_copy: bool };
+
+/// The first of `<live>.bak`, `<live>.bak.1`, ... that names nothing, or
+/// that already holds the same bytes (a retry after a failed live write).
+/// A link or a directory at a name counts as taken, and the check never
+/// follows it.
+fn pickBackup(ctx: StepsCtx, live: []const u8, broken: []const u8) !Backup {
     var i: usize = 0;
     while (i < max_backups) : (i += 1) {
         const name = if (i == 0)
-            ctx.allocator.print("{s}.bak", .{live}) catch return null
+            try ctx.allocator.print("{s}.bak", .{live})
         else
-            ctx.allocator.print("{s}.bak.{d}", .{ live, i }) catch return null;
-        _ = std.Io.Dir.cwd().statFile(ctx.io, name, .{ .follow_symlinks = false }) catch |e| switch (e) {
-            error.FileNotFound => return name,
-            else => return null,
+            try ctx.allocator.print("{s}.bak.{d}", .{ live, i });
+        const st = std.Io.Dir.cwd().statFile(ctx.io, name, .{ .follow_symlinks = false }) catch |e| switch (e) {
+            error.FileNotFound => return .{ .name = name, .holds_copy = false },
+            else => return e,
         };
+        if (st.kind != .file) continue;
+        const f = openSourceNoFollow(ctx, name) catch continue;
+        defer f.close(ctx.io);
+        const text = fs_read.readFileAll(ctx.io, ctx.allocator, f, conf_read_cap) catch continue;
+        if (std.mem.eql(u8, text, broken)) return .{ .name = name, .holds_copy = true };
     }
-    return null;
+    return error.NoFreeBackup;
 }
 
 /// OPcache is part of PHP from 8.5. Older bottles ship `opcache.so`, which
@@ -5684,6 +5696,7 @@ test "configure_php reports a pecl link it cannot read" {
 
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, try a.print("{s}: ", .{link})) != null);
 }
 
 test "configure_php leaves an ext-opcache.ini larger than it can read alone" {
@@ -5753,6 +5766,8 @@ test "configure_php reports an ext-opcache.ini it cannot read" {
 
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
+    // The first failure names the ini and a refused read, not another path.
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, try a.print("{s}: ", .{ini})) != null);
 }
 
 test "configure_php keeps an older pear.conf.bak and saves the live file beside it" {
@@ -5810,6 +5825,81 @@ test "configure_php leaves pear.conf alone when no backup name is free" {
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
     try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, live));
+}
+
+test "configure_php reuses a backup that already holds the same bytes" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    const backup = try a.print("{s}.bak", .{live});
+    // What a run leaves when the copy succeeds and the live write fails.
+    try putFile(&h, live, pear_conf_bad, 0o644);
+    try putFile(&h, backup, pear_conf_bad, 0o644);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings(pear_conf_ok, try slurp(&h, live));
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, backup));
+    try testing.expect(!pathExists(h.io, try a.print("{s}.1", .{backup})));
+}
+
+test "configure_php skips a backup name that is a dangling link" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    const backup = try a.print("{s}.bak", .{live});
+    const gone = try a.print("{s}/gone", .{h.prefix});
+    try putFile(&h, live, pear_conf_bad, 0o644);
+    try std.Io.Dir.symLinkAbsolute(h.io, gone, backup, .{});
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings(pear_conf_ok, try slurp(&h, live));
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, try a.print("{s}.1", .{backup})));
+    // The link stays and nothing was written through it.
+    try testing.expect(!pathExists(h.io, gone));
+}
+
+test "pickBackup returns the real error when a name cannot be checked" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    // A component over NAME_MAX gives NameTooLong, not "no free name".
+    const long = try a.alloc(u8, 300);
+    @memset(long, 'a');
+    try testing.expectError(error.NameTooLong, pickBackup(c, try a.print("{s}/{s}/pear.conf", .{ h.prefix, long }), "x"));
+}
+
+test "mergePearTree refuses a source that links out of the keg" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const outside = try a.print("{s}_outside", .{h.prefix});
+    try putFile(&h, try a.print("{s}/secret.txt", .{outside}), "private\n", 0o600);
+    defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
+    const src = try a.print("{s}/linked-pear", .{c.keg_path});
+    try std.Io.Dir.cwd().symLink(h.io, outside, src, .{});
+    const dst = try a.print("{s}/merge-dst", .{h.prefix});
+
+    // The step checks the same source first, so only a direct call reaches this guard.
+    try testing.expect(!mergePearTree(c, src, dst));
+    try testing.expect(!pathExists(h.io, try a.print("{s}/secret.txt", .{dst})));
 }
 
 test "configure_php refuses a PEAR state file that is a link" {
