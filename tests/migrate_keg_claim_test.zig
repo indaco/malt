@@ -360,6 +360,14 @@ fn serveBottle(s: *BottleStub) void {
     }
 }
 
+// Wakes `serveBottle` if it is still parked in `accept`. Without it, a call
+// that fails before it connects leaves `join` waiting forever.
+fn knock(io: std.Io, port: u16) void {
+    var addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return;
+    const s = addr.connect(io, .{ .mode = .stream }) catch return;
+    s.close(io);
+}
+
 // `std.Options.debug_io`'s failing allocator cannot back a child spawn.
 fn tarCzf(argv: []const []const u8) !void {
     var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
@@ -432,9 +440,10 @@ test "migrateKeg stores the bottle's cellar tag for a bottle it downloads" {
     const result = migrate_keg.migrateKeg(&ctx, h.arena.allocator(), "coldpkg", h.deps(&fx));
 
     // Join before any assertion: a failure must not free the listener
-    // under the serving thread.
+    // under the serving thread. The knock ends a server that was never dialed.
     h.http.deinit();
     h.http = malt.client.HttpClient.init(io, .empty, testing.allocator);
+    knock(io, listener.socket.address.getPort());
     server_thread.join();
 
     try testing.expectEqual(migrate_keg.KegResult.migrated, result);
