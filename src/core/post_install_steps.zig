@@ -352,8 +352,8 @@ fn admitStep(ctx: StepsCtx, obj: std.json.ObjectMap) ?StepTag {
         return null;
     };
 
-    // Types with no entry above are refused here on purpose: php and the
-    // legacy python/pypy bootstrappers are whole subsystems, and the glibc
+    // Types with no entry above are refused here on purpose: the legacy
+    // python/pypy bootstrappers are whole subsystems, and the glibc
     // runtime never reaches a macOS bottle. A loud skip beats a stub.
     const tag = step_map.get(step_type) orelse {
         logUnsupported(ctx, step_type);
@@ -2269,6 +2269,10 @@ const pear_dir_keys = [_]struct { key: []const u8, suffix: []const u8 }{
     .{ .key = "www_dir", .suffix = "/htdocs" },
 };
 
+/// `readFileAll` drops the bytes past this cap without a sign, so a file
+/// that fills it cannot be judged.
+const conf_read_cap = 1024 * 1024;
+
 /// `configure_php`: after this step `pecl install` finds a `php.ini` to
 /// enable the extension in. The extension and PEAR tree stay after an
 /// upgrade. The step skips `pear update-channels`: the fence denies the
@@ -2358,6 +2362,7 @@ fn setPearModes(ctx: StepsCtx, pear: []const u8) void {
     }
 }
 
+// Best effort: a mode that stays wrong leaves a working tree.
 fn setModeIfPresent(ctx: StepsCtx, path: []const u8, mode: u32) void {
     const f = openTargetNoFollow(ctx, path, .{ .write = false }) catch return;
     defer f.close(ctx.io);
@@ -2377,7 +2382,8 @@ fn linkPeclDir(ctx: StepsCtx, pecl_root: []const u8, ext_dir: []const u8) bool {
     } else |e| switch (e) {
         error.FileNotFound => {},
         // A real file or directory is not ours to replace.
-        else => return true,
+        error.NotLink => return true,
+        else => return ioFail(ctx, "configure_php", link, e),
     }
     return placeLink(ctx, "configure_php", pecl_root, link);
 }
@@ -2392,6 +2398,8 @@ fn mergePearTree(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
         else => return ioFail(ctx, "configure_php", src, e),
     };
     defer src_dir.close(ctx.io);
+    // The keg is tap-controlled: its PEAR tree can be a link to anywhere.
+    if (!confinedSource(ctx, src)) return false;
     var dst_dir = std.Io.Dir.openDirAbsolute(ctx.io, dst, .{}) catch |e| return ioFail(ctx, "configure_php", dst, e);
     defer dst_dir.close(ctx.io);
     var walker = src_dir.walk(ctx.allocator) catch return false;
@@ -2416,10 +2424,12 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     const live = a.print("{s}/pear.conf", .{etc_php}) catch return false;
     const shipped = a.print("{s}/.bottle/etc/php/{s}/pear.conf", .{ ctx.keg_path, std.Io.Dir.path.basename(etc_php) }) catch return false;
     if (!confined(ctx, live)) return false;
+    var perms: std.Io.File.Permissions = .default_file;
     const broken = if (openSourceNoFollow(ctx, live)) |f| blk: {
         defer f.close(ctx.io);
-        const text = fs_read.readFileAll(ctx.io, a, f, 1024 * 1024) catch |e| return ioFail(ctx, "configure_php", live, e);
-        if (pearConfValid(text)) return true;
+        const text = fs_read.readFileAll(ctx.io, a, f, conf_read_cap) catch |e| return ioFail(ctx, "configure_php", live, e);
+        if (text.len >= conf_read_cap or pearConfValid(text)) return true;
+        perms = (f.stat(ctx.io) catch |e| return ioFail(ctx, "configure_php", live, e)).permissions;
         break :blk text;
     } else |e| switch (e) {
         // Nothing live: the pour places the keg's copy, not this step.
@@ -2431,12 +2441,12 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
         else => return ioFail(ctx, "configure_php", shipped, e),
     };
     defer file.close(ctx.io);
-    const body = fs_read.readFileAll(ctx.io, a, file, 1024 * 1024) catch |e| return ioFail(ctx, "configure_php", shipped, e);
+    const body = fs_read.readFileAll(ctx.io, a, file, conf_read_cap) catch |e| return ioFail(ctx, "configure_php", shipped, e);
     if (!pearConfValid(body)) return true;
     const backup = a.print("{s}.bak", .{live}) catch return false;
     // Write the copy first: a failed write then never leaves `live` missing.
-    atomic.atomicWriteFile(ctx.io, backup, broken) catch |e| return ioFail(ctx, "configure_php", backup, e);
-    atomic.atomicWriteFile(ctx.io, live, body) catch |e| return ioFail(ctx, "configure_php", live, e);
+    atomic.atomicWriteFileMode(ctx.io, backup, broken, perms) catch |e| return ioFail(ctx, "configure_php", backup, e);
+    atomic.atomicWriteFileMode(ctx.io, live, body, perms) catch |e| return ioFail(ctx, "configure_php", live, e);
     return true;
 }
 
@@ -2452,10 +2462,20 @@ fn enableOpcache(ctx: StepsCtx, etc_php: []const u8, ext_name: []const u8) bool 
     const ini = a.print("{s}/ext-opcache.ini", .{conf_d}) catch return false;
     const existing: ?[]const u8 = if (openSourceNoFollow(ctx, ini)) |f| blk: {
         defer f.close(ctx.io);
-        break :blk fs_read.readFileAll(ctx.io, a, f, 1024 * 1024) catch |e| return ioFail(ctx, "configure_php", ini, e);
-    } else |_| null;
+        const text = fs_read.readFileAll(ctx.io, a, f, conf_read_cap) catch |e| return ioFail(ctx, "configure_php", ini, e);
+        if (text.len >= conf_read_cap) return true;
+        break :blk text;
+    } else |e| switch (e) {
+        error.FileNotFound => null,
+        error.PathSandboxViolation => {
+            logViolation(ctx, ini);
+            return false;
+        },
+        else => return ioFail(ctx, "configure_php", ini, e),
+    };
     const body = opcacheIni(a, existing, so) catch return false;
-    atomic.atomicWriteFile(ctx.io, ini, body) catch |e| return ioFail(ctx, "configure_php", ini, e);
+    if (existing) |old| if (std.mem.eql(u8, old, body)) return true;
+    atomic.atomicReplaceFile(ctx.io, ini, body) catch |e| return ioFail(ctx, "configure_php", ini, e);
     return true;
 }
 
@@ -2525,7 +2545,7 @@ fn opcacheIni(allocator: std.mem.Allocator, existing: ?[]const u8, so_path: []co
     var lines = std.mem.splitScalar(u8, old, '\n');
     while (lines.next()) |l| {
         if (lines.peek() == null and l.len == 0) break;
-        if (std.mem.startsWith(u8, l, "zend_extension") and !replaced) {
+        if (!replaced and isZendExtensionLine(l)) {
             try out.appendSlice(allocator, line);
             replaced = true;
         } else {
@@ -2533,8 +2553,17 @@ fn opcacheIni(allocator: std.mem.Allocator, existing: ?[]const u8, so_path: []co
             try out.append(allocator, '\n');
         }
     }
-    if (!replaced) try out.appendSlice(allocator, line);
+    // No active directive in a file that exists: the user left it out.
+    if (!replaced) return allocator.dupe(u8, old);
     return out.items;
+}
+
+/// An active `zend_extension` directive: a comment or a longer key is not one.
+fn isZendExtensionLine(l: []const u8) bool {
+    const rest = std.mem.trimStart(u8, l, " \t");
+    if (!std.mem.startsWith(u8, rest, "zend_extension")) return false;
+    const after = std.mem.trimStart(u8, rest["zend_extension".len..], " \t");
+    return after.len != 0 and after[0] == '=';
 }
 
 /// Major component of a `kern.*` version sysctl, or null when it cannot be
@@ -5278,14 +5307,18 @@ test "opcacheIni writes a fresh file or swaps only the zend_extension line" {
         "[opcache]\nzend_extension=/new/opcache.so\nopcache.enable=1\n",
         try opcacheIni(a, "[opcache]\nzend_extension=/old/opcache.so\nopcache.enable=1\n", "/new/opcache.so"),
     );
-    // A commented line is not the directive; the code appends the real one.
-    try testing.expectEqualStrings(
-        ";zend_extension=/old\nopcache.enable=0\nzend_extension=/new/opcache.so\n",
-        try opcacheIni(a, ";zend_extension=/old\nopcache.enable=0\n", "/new/opcache.so"),
-    );
+    // A file with no active directive is the user's choice: leave it alone.
+    for ([_][]const u8{ ";zend_extension=/old\nopcache.enable=0\n", "[opcache]\nzend_extensions=1\n" }) |text| {
+        try testing.expectEqualStrings(text, try opcacheIni(a, text, "/new/opcache.so"));
+    }
     try testing.expectEqualStrings(
         "zend_extension=/new/opcache.so\n",
         try opcacheIni(a, "zend_extension = /old\n", "/new/opcache.so"),
+    );
+    // Leading blanks do not hide the directive, so it is not added twice.
+    try testing.expectEqualStrings(
+        "zend_extension=/new/opcache.so\n",
+        try opcacheIni(a, "  \tzend_extension=/old\n", "/new/opcache.so"),
     );
 }
 
@@ -5512,6 +5545,80 @@ test "configure_php refuses a PEAR tree that links out of the prefix" {
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
     try testing.expect(!pathExists(h.io, try a.print("{s}/PEAR.php", .{outside})));
+}
+
+test "configure_php refuses a PEAR source that links out of the keg" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const outside = try a.print("{s}_outside", .{h.prefix});
+    try putFile(&h, try a.print("{s}/secret.txt", .{outside}), "private\n", 0o600);
+    defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
+    const src = try a.print("{s}/share/{s}/pear", .{ c.keg_path, c.name });
+    try std.Io.Dir.cwd().deleteTree(h.io, src);
+    try std.Io.Dir.cwd().symLink(h.io, outside, src, .{});
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expect(!pathExists(h.io, try a.print("{s}/share/pear@8.5/secret.txt", .{h.prefix})));
+}
+
+test "configure_php refuses an ext-opcache.ini that is a link" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{ .opcache = true });
+    const target = try a.print("{s}/etc/mine.ini", .{h.prefix});
+    try putFile(&h, target, "[opcache]\nopcache.jit=on\n", 0o644);
+    const conf_d = try a.print("{s}/etc/php/8.5/conf.d", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, conf_d);
+    try std.Io.Dir.cwd().symLink(h.io, target, try a.print("{s}/ext-opcache.ini", .{conf_d}), .{});
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expectEqualStrings("[opcache]\nopcache.jit=on\n", try slurp(&h, target));
+}
+
+test "configure_php keeps the mode of a repaired pear.conf and its copy" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    try putFile(&h, live, pear_conf_bad, 0o600);
+
+    try testing.expect(execute(c, php_steps_json));
+    for ([_][]const u8{ live, try a.print("{s}.bak", .{live}) }) |path| {
+        const st = try std.Io.Dir.cwd().statFile(h.io, path, .{});
+        try testing.expectEqual(@as(u32, 0o600), st.permissions.toMode() & 0o777);
+    }
+}
+
+test "configure_php leaves a pear.conf larger than it can read alone" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    const big = try a.alloc(u8, conf_read_cap + 16);
+    @memset(big, 'x');
+    try putFile(&h, live, big, 0o644);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!pathExists(h.io, try a.print("{s}.bak", .{live})));
+    try testing.expectEqual(big.len, (try std.Io.Dir.cwd().statFile(h.io, live, .{})).size);
 }
 
 test "configure_php leaves a real pecl entry in the keg alone" {

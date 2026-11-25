@@ -40,7 +40,7 @@ fail() {
 #    missing entry silently reinstates the partial-skip envelope.
 for t in configure_clang_system configure_gcc_runtime warn move \
   set_permissions install_gzipped_executable change_dylib_id \
-  terminate_process; do
+  terminate_process configure_php; do
   grep -qE "\"$t\", \." "$STEPS" || fail "$t missing from step_map — its formulas will partial-skip"
   grep -qE "^test \".*$t" "$STEPS" || fail "$t registered but untested — stub risk"
 done
