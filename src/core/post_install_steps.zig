@@ -2294,6 +2294,8 @@ fn stepConfigurePhp(ctx: StepsCtx) bool {
     const ext_name = phpExtensionDir(ctx) orelse return false;
     const ext_dir = a.print("{s}/{s}", .{ pecl_root, ext_name }) catch return false;
 
+    // Before any mode change: a link in the tree must not lead `chmod` out of the keg.
+    if (pathExists(ctx.io, pkgshare_pear) and !pearSourceInKeg(ctx, pkgshare_pear)) return false;
     if (!setPearModes(ctx, pkgshare_pear)) return false;
     if (!linkPeclDir(ctx, pecl_root, ext_dir)) return false;
     if (!mergePearTree(ctx, pkgshare_pear, pear_path)) return false;
@@ -2372,6 +2374,10 @@ fn setPearModes(ctx: StepsCtx, pear: []const u8) bool {
 fn setModeIfPresent(ctx: StepsCtx, path: []const u8, mode: u32) bool {
     const f = openTargetNoFollow(ctx, path, .{ .write = false }) catch |e| switch (e) {
         error.FileNotFound => return true,
+        error.PathSandboxViolation => {
+            logViolation(ctx, path);
+            return false;
+        },
         else => return ioFail(ctx, "configure_php", path, e),
     };
     defer f.close(ctx.io);
@@ -2398,6 +2404,16 @@ fn linkPeclDir(ctx: StepsCtx, pecl_root: []const u8, ext_dir: []const u8) bool {
     return placeLink(ctx, "configure_php", pecl_root, link);
 }
 
+/// The keg is tap-controlled: its PEAR tree must stay inside the keg,
+/// not only inside the prefix.
+fn pearSourceInKeg(ctx: StepsCtx, src: []const u8) bool {
+    sandbox.validateDirTarget(ctx.io, src, ctx.keg_path, ctx.keg_path) catch {
+        logViolation(ctx, src);
+        return false;
+    };
+    return true;
+}
+
 /// Copy `src` into `dst`. Files the keg ships are replaced. Files that
 /// only `dst` holds stay: PEAR's registry holds packages the user installed later.
 fn mergePearTree(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
@@ -2408,12 +2424,7 @@ fn mergePearTree(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
         else => return ioFail(ctx, "configure_php", src, e),
     };
     defer src_dir.close(ctx.io);
-    // The keg is tap-controlled: its PEAR tree must stay inside the keg,
-    // not only inside the prefix.
-    sandbox.validateDirTarget(ctx.io, src, ctx.keg_path, ctx.keg_path) catch {
-        logViolation(ctx, src);
-        return false;
-    };
+    if (!pearSourceInKeg(ctx, src)) return false;
     var dst_dir = std.Io.Dir.openDirAbsolute(ctx.io, dst, .{}) catch |e| return ioFail(ctx, "configure_php", dst, e);
     defer dst_dir.close(ctx.io);
     var walker = src_dir.walk(ctx.allocator) catch return false;
@@ -2457,14 +2468,31 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     defer file.close(ctx.io);
     const body = fs_read.readFileAll(ctx.io, a, file, conf_read_cap) catch |e| return ioFail(ctx, "configure_php", shipped, e);
     if (!pearConfValid(body)) return true;
-    const backup = a.print("{s}.bak", .{live}) catch return false;
+    const backup = freeBackupName(ctx, live) orelse
+        return ioFail(ctx, "configure_php", live, error.PathAlreadyExists);
     // Write the copy first: a failed write then never leaves `live` missing.
-    // An older copy stays: it may hold the only good config.
-    if (!fileExists(ctx.io, backup)) {
-        atomic.atomicWriteFileMode(ctx.io, backup, broken, perms) catch |e| return ioFail(ctx, "configure_php", backup, e);
-    }
+    atomic.atomicWriteFileMode(ctx.io, backup, broken, perms) catch |e| return ioFail(ctx, "configure_php", backup, e);
     atomic.atomicWriteFileMode(ctx.io, live, body, perms) catch |e| return ioFail(ctx, "configure_php", live, e);
     return true;
+}
+
+const max_backups = 8;
+
+/// The first of `<live>.bak`, `<live>.bak.1`, ... that names nothing. A link
+/// or a directory at a name counts as taken, and the check never opens it.
+fn freeBackupName(ctx: StepsCtx, live: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < max_backups) : (i += 1) {
+        const name = if (i == 0)
+            ctx.allocator.print("{s}.bak", .{live}) catch return null
+        else
+            ctx.allocator.print("{s}.bak.{d}", .{ live, i }) catch return null;
+        _ = std.Io.Dir.cwd().statFile(ctx.io, name, .{ .follow_symlinks = false }) catch |e| switch (e) {
+            error.FileNotFound => return name,
+            else => return null,
+        };
+    }
+    return null;
 }
 
 /// OPcache is part of PHP from 8.5. Older bottles ship `opcache.so`, which
@@ -5583,21 +5611,79 @@ test "configure_php refuses a PEAR source that links out of the keg" {
     try testing.expect(!pathExists(h.io, try a.print("{s}/share/pear@8.5/secret.txt", .{h.prefix})));
 }
 
-test "configure_php refuses a PEAR source that links to the prefix root" {
+test "configure_php refuses a PEAR source that links to a prefix directory" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
     defer threaded.deinit();
     var h = try TestHarness.init();
     defer h.deinit();
     const a = h.arena.allocator();
     const c = try seedPhp(&h, &threaded, .{});
-    try putFile(&h, try a.print("{s}/private.txt", .{h.prefix}), "private\n", 0o600);
+    // The only entry, so the result does not depend on readdir order.
+    const shared = try a.print("{s}/shared", .{h.prefix});
+    try putFile(&h, try a.print("{s}/private.txt", .{shared}), "private\n", 0o600);
+    const src = try a.print("{s}/share/{s}/pear", .{ c.keg_path, c.name });
+    try std.Io.Dir.cwd().deleteTree(h.io, src);
+    try std.Io.Dir.cwd().symLink(h.io, shared, src, .{});
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expect(!pathExists(h.io, try a.print("{s}/share/pear@8.5/private.txt", .{h.prefix})));
+}
+
+test "configure_php sets no mode through a PEAR source that links to the prefix root" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const lock = try a.print("{s}/.lock", .{h.prefix});
+    try putFile(&h, lock, "", 0o600);
     const src = try a.print("{s}/share/{s}/pear", .{ c.keg_path, c.name });
     try std.Io.Dir.cwd().deleteTree(h.io, src);
     try std.Io.Dir.cwd().symLink(h.io, h.prefix, src, .{});
 
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
-    try testing.expect(!pathExists(h.io, try a.print("{s}/share/pear@8.5/private.txt", .{h.prefix})));
+    try testing.expectEqual(@as(u32, 0o600), (try std.Io.Dir.cwd().statFile(h.io, lock, .{})).permissions.toMode() & 0o777);
+}
+
+test "configure_php reports a PEAR channels entry that is not a directory" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const channels = try a.print("{s}/share/{s}/pear/.channels", .{ c.keg_path, c.name });
+    try std.Io.Dir.cwd().deleteTree(h.io, channels);
+    try putFile(&h, channels, "not a directory\n", 0o644);
+
+    try testing.expect(execute(c, php_steps_json));
+    // The first failure must come from the mode step, which runs first.
+    try testing.expect(h.flog.hasErrors());
+    // The path ends the message: a failure on `.channels/.alias` would not match.
+    try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, try a.print("{s}: ", .{channels})) != null);
+}
+
+test "configure_php reports a pecl link it cannot read" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const link = try a.print("{s}/pecl", .{c.keg_path});
+    try std.Io.Dir.symLinkAbsolute(h.io, try a.print("{s}/old-pecl", .{h.prefix}), link, .{});
+    // macOS refuses `readlink` on a mode-0 link.
+    var dir = try std.Io.Dir.openDirAbsolute(h.io, c.keg_path, .{});
+    defer dir.close(h.io);
+    if (std.c.fchmodat(dir.handle, "pecl", 0, std.c.AT.SYMLINK_NOFOLLOW) != 0) return error.SkipZigTest;
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(h.flog.hasErrors());
 }
 
 test "configure_php leaves an ext-opcache.ini larger than it can read alone" {
@@ -5609,13 +5695,17 @@ test "configure_php leaves an ext-opcache.ini larger than it can read alone" {
     const a = h.arena.allocator();
     const c = try seedPhp(&h, &threaded, .{ .opcache = true });
     const ini = try a.print("{s}/etc/php/8.5/conf.d/ext-opcache.ini", .{h.prefix});
+    // A live directive up front: without the cap check the step would rewrite it.
+    const head = "[opcache]\nzend_extension=/stale/opcache.so\n";
     const big = try a.alloc(u8, conf_read_cap + 16);
     @memset(big, 'x');
+    @memcpy(big[0..head.len], head);
     try putFile(&h, ini, big, 0o644);
 
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(!h.flog.hasErrors());
     try testing.expectEqual(big.len, (try std.Io.Dir.cwd().statFile(h.io, ini, .{})).size);
+    try testing.expect(std.mem.find(u8, try slurp(&h, ini), "/stale/") != null);
 }
 
 test "configure_php keeps the mode of an ext-opcache.ini it rewrites" {
@@ -5634,7 +5724,7 @@ test "configure_php keeps the mode of an ext-opcache.ini it rewrites" {
     try testing.expectEqual(@as(u32, 0o600), (try std.Io.Dir.cwd().statFile(h.io, ini, .{})).permissions.toMode() & 0o777);
 }
 
-test "configure_php reports an ext-opcache.ini it cannot read" {
+test "configure_php reports an ext-opcache.ini that is a directory" {
     if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
     defer threaded.deinit();
@@ -5648,7 +5738,24 @@ test "configure_php reports an ext-opcache.ini it cannot read" {
     try testing.expect(h.flog.hasErrors());
 }
 
-test "configure_php keeps an older pear.conf.bak" {
+test "configure_php reports an ext-opcache.ini it cannot read" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    // Root reads a mode-000 file.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    const c = try seedPhp(&h, &threaded, .{ .opcache = true });
+    const ini = try a.print("{s}/etc/php/8.5/conf.d/ext-opcache.ini", .{h.prefix});
+    try putFile(&h, ini, "[opcache]\nzend_extension=/stale/opcache.so\n", 0o000);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(h.flog.hasErrors());
+}
+
+test "configure_php keeps an older pear.conf.bak and saves the live file beside it" {
     if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
     defer threaded.deinit();
@@ -5662,11 +5769,50 @@ test "configure_php keeps an older pear.conf.bak" {
     try putFile(&h, backup, "older copy\n", 0o644);
 
     try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!h.flog.hasErrors());
     try testing.expectEqualStrings(pear_conf_ok, try slurp(&h, live));
     try testing.expectEqualStrings("older copy\n", try slurp(&h, backup));
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, try a.print("{s}.1", .{backup})));
 }
 
-test "configure_php reports a PEAR state file it cannot open" {
+test "configure_php skips a backup name that is a directory" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    try putFile(&h, live, pear_conf_bad, 0o644);
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}.bak", .{live}));
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings(pear_conf_ok, try slurp(&h, live));
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, try a.print("{s}.bak.1", .{live})));
+}
+
+test "configure_php leaves pear.conf alone when no backup name is free" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    try putFile(&h, live, pear_conf_bad, 0o644);
+    try putFile(&h, try a.print("{s}.bak", .{live}), "taken\n", 0o644);
+    var i: usize = 1;
+    while (i < max_backups) : (i += 1) try putFile(&h, try a.print("{s}.bak.{d}", .{ live, i }), "taken\n", 0o644);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, live));
+}
+
+test "configure_php refuses a PEAR state file that is a link" {
     if (builtin.target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
     defer threaded.deinit();
@@ -5679,6 +5825,8 @@ test "configure_php reports a PEAR state file it cannot open" {
 
     try testing.expect(execute(c, php_steps_json));
     try testing.expect(h.flog.hasErrors());
+    // A link where a file belongs is a boundary refusal, not a failed command.
+    try testing.expect(refusedSince(&h.flog, 0));
 }
 
 test "configure_php refuses an ext-opcache.ini that is a link" {
