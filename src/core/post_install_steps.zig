@@ -2468,7 +2468,8 @@ fn repairPearConf(ctx: StepsCtx, etc_php: []const u8) bool {
     };
     defer file.close(ctx.io);
     const body = fs_read.readFileAll(ctx.io, a, file, conf_read_cap) catch |e| return ioFail(ctx, "configure_php", shipped, e);
-    if (!pearConfValid(body)) return true;
+    // Copy the shipped file only when it walks whole and was read in full.
+    if (body.len >= conf_read_cap or pearConfShape(body) != .walked) return true;
     const backup = pickBackup(ctx, live, broken) catch |e| switch (e) {
         error.NoFreeBackup => return ioFail(ctx, "configure_php", live, error.PathAlreadyExists),
         // pickBackup logged the name that failed.
@@ -2576,17 +2577,42 @@ fn extensionDirName(php_config: []const u8) ?[]const u8 {
     return null;
 }
 
-/// True when the file has the PEAR header and a serialized array that walks
-/// to its end: each string length, element count and closing brace matches.
-/// A value type the walk does not know stops it and counts as valid, so a
-/// file that PHP parses is never replaced.
-fn pearConfValid(text: []const u8) bool {
-    const magic = "#PEAR_Config 0.9\n";
-    if (!std.mem.startsWith(u8, text, magic)) return false;
+/// How far the walk of a `pear.conf` got.
+const ConfShape = enum {
+    /// The text ends early or a length, count or terminator is wrong.
+    broken,
+    /// The walk reached the closing brace of the top array.
+    walked,
+    /// The walk met a value it cannot size; PHP may still read the file.
+    unwalked,
+};
+
+/// PEAR strips `^#PEAR_Config\s+(\S+)\s+` (case-insensitive) and then
+/// unserializes the rest. Mirror that rule, so a file PEAR reads is never
+/// called broken.
+fn pearConfShape(text: []const u8) ConfShape {
+    const magic = "#PEAR_Config";
+    if (text.len < magic.len or !std.ascii.eqlIgnoreCase(text[0..magic.len], magic)) return .broken;
     var at: usize = magic.len;
-    if (!std.mem.startsWith(u8, text[at..], "a:")) return false;
-    walkSerialValue(text, &at, 0) catch |e| return e == error.UnknownType;
-    return true;
+    inline for (.{ true, false, true }) |want_space| {
+        const from = at;
+        while (at < text.len and isPcreSpace(text[at]) == want_space) at += 1;
+        if (at == from) return .broken;
+    }
+    if (!std.mem.startsWith(u8, text[at..], "a:")) return .broken;
+    walkSerialValue(text, &at, 0) catch |e| return if (e == error.UnknownType) .unwalked else .broken;
+    return .walked;
+}
+
+fn pearConfValid(text: []const u8) bool {
+    return pearConfShape(text) != .broken;
+}
+
+fn isPcreSpace(c: u8) bool {
+    return switch (c) {
+        ' ', '\t', '\n', 0x0b, 0x0c, '\r' => true,
+        else => false,
+    };
 }
 
 const SerialError = error{ Broken, UnknownType };
@@ -2608,7 +2634,9 @@ fn walkSerialValue(text: []const u8, at: *usize, depth: usize) SerialError!void 
     }
     switch (kind) {
         'i', 'b', 'd', 's', 'a' => {},
-        else => return error.UnknownType,
+        // Valid PHP, but the walk cannot size them. Any other byte is no type.
+        'O', 'C', 'E', 'R', 'r', 'S', 'o' => return error.UnknownType,
+        else => return error.Broken,
     }
     if (!std.mem.startsWith(u8, text[i + 1 ..], ":")) return error.Broken;
     i += 2;
@@ -2626,8 +2654,8 @@ fn walkSerialValue(text: []const u8, at: *usize, depth: usize) SerialError!void 
             if (!std.mem.startsWith(u8, text[i..], ":{")) return error.Broken;
             i += 2;
             for (0..n) |_| {
-                // A key is a string or an integer.
-                if (i >= text.len or (text[i] != 's' and text[i] != 'i')) return error.Broken;
+                // A key is a string or an integer; `S` is the escaped string form.
+                if (i >= text.len or std.mem.findScalar(u8, "siS", text[i]) == null) return error.Broken;
                 try walkSerialValue(text, &i, depth + 1);
                 try walkSerialValue(text, &i, depth + 1);
             }
@@ -2640,6 +2668,8 @@ fn walkSerialValue(text: []const u8, at: *usize, depth: usize) SerialError!void 
             const ok = switch (kind) {
                 'i' => isSerialInt(body),
                 'b' => std.mem.eql(u8, body, "0") or std.mem.eql(u8, body, "1"),
+                // Only "not empty": PHP also accepts INF and NAN, and a loose
+                // check leaves a file alone, which is the safe side.
                 else => body.len != 0,
             };
             if (!ok) return error.Broken;
@@ -5467,7 +5497,75 @@ test "pearConfValid keeps a file that holds a type it does not know" {
     const head = "#PEAR_Config 0.9\n";
     // A user file that PHP parses is never replaced.
     try testing.expect(pearConfValid(head ++ "a:2:{s:1:\"k\";O:8:\"stdClass\":0:{}s:1:\"z\";i:1;}"));
-    try testing.expect(pearConfValid(head ++ "a:1:{s:1:\"k\";a:1:{i:0;x:5;}}"));
+    try testing.expect(pearConfValid(head ++ "a:1:{s:1:\"k\";a:1:{i:0;C:3:\"Foo\":0:{}}}"));
+    // An escaped-string key is valid PHP too.
+    try testing.expect(pearConfValid(head ++ "a:1:{S:1:\"k\";i:1;}"));
+    for ("OCERrSo") |t| {
+        const body = try std.fmt.allocPrint(testing.allocator, "{s}a:1:{{i:0;{c}:5;}}", .{ head, t });
+        defer testing.allocator.free(body);
+        try testing.expectEqual(ConfShape.unwalked, pearConfShape(body));
+    }
+}
+
+test "pearConfValid rejects a byte that is no PHP type" {
+    const head = "#PEAR_Config 0.9\n";
+    // A missing value, a stray letter and NUL padding: PHP refuses all three.
+    try testing.expect(!pearConfValid(head ++ "a:1:{s:1:\"k\";}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;x:5;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;\x00\x00\x00}"));
+    // A key of any other type is no key.
+    try testing.expect(!pearConfValid(head ++ "a:1:{O:1:\"k\":0:{}i:1;}"));
+}
+
+test "pearConfValid reads the header the way PEAR does" {
+    const value = "a:1:{s:1:\"k\";i:1;}";
+    // PEAR strips /^#PEAR_Config\s+(\S+)\s+/si: any case, any version, any space.
+    try testing.expect(pearConfValid("#PEAR_Config 0.9\n" ++ value));
+    try testing.expect(pearConfValid("#PEAR_Config 0.9\r\n" ++ value));
+    try testing.expect(pearConfValid("#pear_config 1.0\n" ++ value));
+    try testing.expect(pearConfValid("#PEAR_Config 0.9\n\n  " ++ value));
+    try testing.expect(pearConfValid("#PEAR_Config\t0.9 \t" ++ value));
+    // No space, no version or no space after it: PEAR does not strip the header.
+    try testing.expect(!pearConfValid("#PEAR_Config0.9\n" ++ value));
+    try testing.expect(!pearConfValid("#PEAR_Config \n" ++ value));
+    try testing.expect(!pearConfValid("#PEAR_Config 0.9" ++ value));
+    try testing.expect(!pearConfValid("#PEAR_Confi"));
+}
+
+test "pearConfValid stops at the depth limit and walks up to it" {
+    const head = "#PEAR_Config 0.9\n";
+    var open: std.ArrayList(u8) = .empty;
+    defer open.deinit(testing.allocator);
+    try open.appendSlice(testing.allocator, head);
+    // Each level adds one array whose value is the next level.
+    for (0..serial_max_depth) |_| try open.appendSlice(testing.allocator, "a:1:{i:0;");
+    // At the limit the cut text is still walked, and it ends early.
+    try testing.expect(!pearConfValid(open.items));
+    // One level more passes the limit: the walk stops and keeps the file.
+    try open.appendSlice(testing.allocator, "a:1:{i:0;");
+    try testing.expect(pearConfValid(open.items));
+    try testing.expectEqual(ConfShape.unwalked, pearConfShape(open.items));
+
+    // A whole file at the limit walks to its end.
+    var whole: std.ArrayList(u8) = .empty;
+    defer whole.deinit(testing.allocator);
+    try whole.appendSlice(testing.allocator, head);
+    for (0..serial_max_depth) |_| try whole.appendSlice(testing.allocator, "a:1:{i:0;");
+    try whole.appendSlice(testing.allocator, "i:1;");
+    for (0..serial_max_depth) |_| try whole.append(testing.allocator, '}');
+    try testing.expectEqual(ConfShape.walked, pearConfShape(whole.items));
+}
+
+test "pearConfValid rejects a number with no digits or with a stray byte" {
+    const head = "#PEAR_Config 0.9\n";
+    try testing.expect(pearConfValid(head ++ "a:1:{i:0;i:-7;}"));
+    try testing.expect(pearConfValid(head ++ "a:1:{i:0;d:0.5;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;i:;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;i:1x;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;i:-;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;d:;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{i:0;s::\"\";}"));
+    try testing.expect(!pearConfValid(head ++ "a::{}"));
 }
 
 test "opcacheIni writes a fresh file or swaps only the zend_extension line" {
@@ -5615,6 +5713,34 @@ test "configure_php repairs a pear.conf cut after a complete record" {
     try testing.expect(!h.flog.hasErrors());
     try testing.expectEqualStrings(pear_conf_ok, try slurp(&h, live));
     try testing.expectEqualStrings(cut, try slurp(&h, try a.print("{s}.bak", .{live})));
+}
+
+test "configure_php keeps a broken pear.conf when the shipped copy cannot be walked whole" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    const shipped = try a.print("{s}/.bottle/etc/php/8.5/pear.conf", .{c.keg_path});
+    try putFile(&h, live, pear_conf_bad, 0o644);
+
+    // A shipped value the walk cannot size: not a copy to trust.
+    try putFile(&h, shipped, "#PEAR_Config 0.9\na:1:{s:1:\"k\";O:8:\"stdClass\":0:{}}", 0o644);
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, live));
+    try testing.expect(!fileExists(h.io, try a.print("{s}.bak", .{live})));
+
+    // A shipped file at the read cap may be a cut copy.
+    const big = try a.alloc(u8, conf_read_cap);
+    @memset(big, ' ');
+    @memcpy(big[0..pear_conf_ok.len], pear_conf_ok);
+    try putFile(&h, shipped, big, 0o644);
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expectEqualStrings(pear_conf_bad, try slurp(&h, live));
+    try testing.expect(!fileExists(h.io, try a.print("{s}.bak", .{live})));
 }
 
 test "configure_php keeps a pear.conf that still parses" {
