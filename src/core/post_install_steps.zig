@@ -2576,29 +2576,96 @@ fn extensionDirName(php_config: []const u8) ?[]const u8 {
     return null;
 }
 
-/// True when the file has the PEAR header and every `s:N:"..."` record has
-/// the length it declares.
+/// True when the file has the PEAR header and a serialized array that walks
+/// to its end: each string length, element count and closing brace matches.
+/// A value type the walk does not know stops it and counts as valid, so a
+/// file that PHP parses is never replaced.
 fn pearConfValid(text: []const u8) bool {
     const magic = "#PEAR_Config 0.9\n";
     if (!std.mem.startsWith(u8, text, magic)) return false;
-    var i: usize = magic.len;
-    var records: usize = 0;
-    while (std.mem.findPos(u8, text, i, "s:")) |at| {
-        i = at + 2;
-        var p = i;
-        var n: usize = 0;
-        while (p < text.len and std.ascii.isDigit(text[p])) : (p += 1) {
-            n = std.math.mul(usize, n, 10) catch return false;
-            n = std.math.add(usize, n, text[p] - '0') catch return false;
-        }
-        if (p == i or !std.mem.startsWith(u8, text[p..], ":\"")) continue;
-        const start = p + 2;
-        const end = std.math.add(usize, start, n) catch return false;
-        if (end > text.len or !std.mem.startsWith(u8, text[end..], "\";")) return false;
-        records += 1;
-        i = end + 2;
+    var at: usize = magic.len;
+    if (!std.mem.startsWith(u8, text[at..], "a:")) return false;
+    walkSerialValue(text, &at, 0) catch |e| return e == error.UnknownType;
+    return true;
+}
+
+const SerialError = error{ Broken, UnknownType };
+
+// A deeper file is not a PEAR config; stop and keep it.
+const serial_max_depth = 16;
+
+/// Moves `at` past one serialized value. `Broken` means the text ends early or
+/// a length, count or terminator is wrong.
+fn walkSerialValue(text: []const u8, at: *usize, depth: usize) SerialError!void {
+    if (depth > serial_max_depth) return error.UnknownType;
+    var i = at.*;
+    if (i >= text.len) return error.Broken;
+    const kind = text[i];
+    if (kind == 'N') {
+        if (!std.mem.startsWith(u8, text[i + 1 ..], ";")) return error.Broken;
+        at.* = i + 2;
+        return;
     }
-    return records > 0;
+    switch (kind) {
+        'i', 'b', 'd', 's', 'a' => {},
+        else => return error.UnknownType,
+    }
+    if (!std.mem.startsWith(u8, text[i + 1 ..], ":")) return error.Broken;
+    i += 2;
+    switch (kind) {
+        's' => {
+            const n = try serialLen(text, &i);
+            if (!std.mem.startsWith(u8, text[i..], ":\"")) return error.Broken;
+            const start = i + 2;
+            const end = std.math.add(usize, start, n) catch return error.Broken;
+            if (end > text.len or !std.mem.startsWith(u8, text[end..], "\";")) return error.Broken;
+            at.* = end + 2;
+        },
+        'a' => {
+            const n = try serialLen(text, &i);
+            if (!std.mem.startsWith(u8, text[i..], ":{")) return error.Broken;
+            i += 2;
+            for (0..n) |_| {
+                // A key is a string or an integer.
+                if (i >= text.len or (text[i] != 's' and text[i] != 'i')) return error.Broken;
+                try walkSerialValue(text, &i, depth + 1);
+                try walkSerialValue(text, &i, depth + 1);
+            }
+            if (!std.mem.startsWith(u8, text[i..], "}")) return error.Broken;
+            at.* = i + 1;
+        },
+        else => {
+            const semi = std.mem.findScalarPos(u8, text, i, ';') orelse return error.Broken;
+            const body = text[i..semi];
+            const ok = switch (kind) {
+                'i' => isSerialInt(body),
+                'b' => std.mem.eql(u8, body, "0") or std.mem.eql(u8, body, "1"),
+                else => body.len != 0,
+            };
+            if (!ok) return error.Broken;
+            at.* = semi + 1;
+        },
+    }
+}
+
+/// Reads the decimal length at `at` and moves past it.
+fn serialLen(text: []const u8, at: *usize) SerialError!usize {
+    var i = at.*;
+    var n: usize = 0;
+    while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+        n = std.math.mul(usize, n, 10) catch return error.Broken;
+        n = std.math.add(usize, n, text[i] - '0') catch return error.Broken;
+    }
+    if (i == at.*) return error.Broken;
+    at.* = i;
+    return n;
+}
+
+fn isSerialInt(body: []const u8) bool {
+    const digits = if (body.len != 0 and (body[0] == '-' or body[0] == '+')) body[1..] else body;
+    if (digits.len == 0) return false;
+    for (digits) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 /// Text of `ext-opcache.ini`: new when `existing` is null, else the same
@@ -5365,6 +5432,44 @@ test "pearConfValid accepts matching lengths and rejects every other shape" {
     try testing.expect(!pearConfValid("#PEAR_Config 0.9\na:1:{s:99999999999999999999999:\"k\";}"));
 }
 
+// Nested array plus the scalar types a real file holds.
+const pear_conf_shape = "#PEAR_Config 0.9\na:6:{s:7:\"php_dir\";s:4:\"/tmp\";s:7:\"verbose\";i:1;s:5:\"umask\";i:-18;" ++
+    "s:6:\"nested\";a:2:{s:1:\"a\";b:1;i:7;N;}s:3:\"ver\";d:1.5;s:1:\"e\";s:0:\"\";}\n";
+
+test "pearConfValid rejects a file cut at any offset inside its value" {
+    try testing.expect(pearConfValid(pear_conf_shape));
+    // Only the newline after the closing brace may go.
+    const value_end = std.mem.findScalarLast(u8, pear_conf_shape, '}').? + 1;
+    for (0..pear_conf_shape.len + 1) |cut| {
+        try testing.expectEqual(cut >= value_end, pearConfValid(pear_conf_shape[0..cut]));
+    }
+}
+
+test "pearConfValid rejects a wrong element count or a missing closing brace" {
+    const head = "#PEAR_Config 0.9\n";
+    try testing.expect(pearConfValid(head ++ "a:1:{s:1:\"k\";s:1:\"v\";}"));
+    // The count is larger than the pairs the file holds.
+    try testing.expect(!pearConfValid(head ++ "a:2:{s:1:\"k\";s:1:\"v\";}"));
+    // The count is smaller than the pairs the file holds.
+    try testing.expect(!pearConfValid(head ++ "a:1:{s:1:\"k\";s:1:\"v\";s:1:\"x\";s:1:\"y\";}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{s:1:\"k\";s:1:\"v\";"));
+    // A nested array with a wrong count breaks the whole file.
+    try testing.expect(!pearConfValid(head ++ "a:1:{s:1:\"k\";a:2:{i:1;i:1;}}"));
+    // A scalar that never ends, a bad boolean and a bad key.
+    try testing.expect(!pearConfValid(head ++ "a:1:{s:1:\"k\";i:12"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{s:1:\"k\";b:2;}"));
+    try testing.expect(!pearConfValid(head ++ "a:1:{b:1;s:1:\"v\";}"));
+    // The top-level value must be an array.
+    try testing.expect(!pearConfValid(head ++ "s:1:\"k\";"));
+}
+
+test "pearConfValid keeps a file that holds a type it does not know" {
+    const head = "#PEAR_Config 0.9\n";
+    // A user file that PHP parses is never replaced.
+    try testing.expect(pearConfValid(head ++ "a:2:{s:1:\"k\";O:8:\"stdClass\":0:{}s:1:\"z\";i:1;}"));
+    try testing.expect(pearConfValid(head ++ "a:1:{s:1:\"k\";a:1:{i:0;x:5;}}"));
+}
+
 test "opcacheIni writes a fresh file or swaps only the zend_extension line" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5491,6 +5596,25 @@ test "configure_php repairs a corrupt pear.conf and records the persistent paths
     try testing.expect(dirExists(h.io, try a.print("{s}/share/pear@8.5/cfg", .{h.prefix})));
     try testing.expect(linksTo(c, try a.print("{s}/pecl", .{c.keg_path}), try a.print("{s}/lib/php/pecl", .{h.prefix})));
     try testing.expect(fileExists(h.io, try a.print("{s}/share/pear@8.5/PEAR.php", .{h.prefix})));
+}
+
+test "configure_php repairs a pear.conf cut after a complete record" {
+    if (builtin.target.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    const live = try a.print("{s}/etc/php/8.5/pear.conf", .{h.prefix});
+    // One record is whole; the cut falls inside the next length prefix.
+    const cut = pear_conf_ok[0 .. std.mem.find(u8, pear_conf_ok, ";s:4").? + ";s:4".len];
+    try putFile(&h, live, cut, 0o644);
+
+    try testing.expect(execute(c, php_steps_json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings(pear_conf_ok, try slurp(&h, live));
+    try testing.expectEqualStrings(cut, try slurp(&h, try a.print("{s}.bak", .{live})));
 }
 
 test "configure_php keeps a pear.conf that still parses" {
