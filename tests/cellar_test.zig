@@ -969,6 +969,90 @@ test "materializeWithCellar still saves a snapshot for a known cellar tag" {
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
+const length_conf = "k=s:14:\"@@HOMEBREW_PREFIX@@\";\n";
+
+/// Stage `dep/1.0/app.conf` the way a download leaves it, ready to commit.
+fn stageLengthBottle(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8) ![]const u8 {
+    const staged = try allocator.print("{s}/tmp/{s}", .{ prefix, sha });
+    const inner = try allocator.print("{s}/dep/1.0", .{staged});
+    defer allocator.free(inner);
+    try test_io.cwd().createDirPath(std.Options.debug_io, inner);
+    const conf = try allocator.print("{s}/app.conf", .{inner});
+    defer allocator.free(conf);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, conf, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, length_conf);
+    return staged;
+}
+
+fn expectSizedForPrefix(allocator: std.mem.Allocator, keg_path: []const u8, prefix: []const u8) !void {
+    const conf = try allocator.print("{s}/app.conf", .{keg_path});
+    defer allocator.free(conf);
+    const got = try readFile(allocator, conf);
+    defer allocator.free(got);
+    const want = try allocator.print("k=s:{d}:\"{s}\";\n", .{ prefix.len, prefix });
+    defer allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "a cellar tag of an odd length survives install then rollback" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const tmp_root = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{prefix});
+    defer testing.allocator.free(tmp_root);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tmp_root);
+
+    // 21 bytes: neither `/opt/homebrew/Cellar` (20) nor `/usr/local/Cellar` (17).
+    const bottle: malt.formula.BottleFile = .{ .cellar = "/opt/malt-brew/Cellar", .url = "", .sha256 = valid_test_sha };
+    const staged = try stageLengthBottle(testing.allocator, prefix, valid_test_sha);
+    defer testing.allocator.free(staged);
+    var db = try malt.sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = malt.store.Store.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try malt.install_download.commitDownloaded(std.Options.debug_io, &store, bottle, staged);
+
+    var tag_buf: [malt.cellar_tag.max_len + 1]u8 = undefined;
+    const tag = malt.cli_rollback.storedCellarTag(std.Options.debug_io, prefix, valid_test_sha, &tag_buf);
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", tag, null, true);
+    defer testing.allocator.free(keg.path);
+    try expectSizedForPrefix(testing.allocator, keg.path, prefix);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "rollback still works for a store entry made before the tag file existed" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const tmp_root = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{prefix});
+    defer testing.allocator.free(tmp_root);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tmp_root);
+
+    // An old entry: content only, committed with no tag file beside it.
+    const staged = try stageLengthBottle(testing.allocator, prefix, valid_test_sha);
+    defer testing.allocator.free(staged);
+    const entry = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, valid_test_sha });
+    defer testing.allocator.free(entry);
+    try test_io.cwd().rename(staged, test_io.cwd(), entry, std.Options.debug_io);
+
+    var tag_buf: [malt.cellar_tag.max_len + 1]u8 = undefined;
+    const tag = malt.cli_rollback.storedCellarTag(std.Options.debug_io, prefix, valid_test_sha, &tag_buf);
+    try testing.expectEqualStrings("", tag);
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", tag, null, true);
+    defer testing.allocator.free(keg.path);
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
 /// Both receipt fields must flip together, so pin the pair as one check.
 fn expectDependencyReceipt(allocator: std.mem.Allocator, keg_path: []const u8) !void {
     const receipt_path = try allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_path});

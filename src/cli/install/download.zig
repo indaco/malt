@@ -14,6 +14,7 @@ const signals = @import("../../core/signals.zig");
 const store_mod = @import("../../core/store.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
+const cellar_tag = @import("../../fs/cellar_tag.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const pool_mod = @import("../../net/client_pool.zig");
@@ -799,7 +800,7 @@ pub fn downloadBottleToStore(
     }
     if (deps.bar) |bar| bar.finish();
 
-    deps.store.commitFrom(bottle.sha256, tmp_dir) catch {
+    commitDownloaded(ctx.io, deps.store, bottle, tmp_dir) catch {
         atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);
         return InstallError.StoreFailed;
@@ -807,6 +808,20 @@ pub fn downloadBottleToStore(
     allocator.free(tmp_dir);
 
     return true;
+}
+
+/// Record the bottle's cellar tag beside the content, then publish both.
+/// A tag that cannot be written costs only a later rollback its exact
+/// build prefix, so it never fails the install.
+pub fn commitDownloaded(
+    io: std.Io,
+    store: *store_mod.Store,
+    bottle: formula_mod.BottleFile,
+    tmp_dir: []const u8,
+) store_mod.StoreError!void {
+    cellar_tag.write(io, tmp_dir, bottle.cellar) catch |e|
+        std.log.debug("cellar tag not recorded for {s}: {s}", .{ bottle.sha256, @errorName(e) });
+    try store.commitFrom(bottle.sha256, tmp_dir);
 }
 
 /// Shared state for the install-time per-keg worker pool. Each worker
@@ -1255,6 +1270,49 @@ test "downloadBottleToStore returns false when the store already holds the bottl
         bottle,
     );
     try std.testing.expect(!committed);
+}
+
+fn writeTestFile(io: std.Io, path: []const u8, body: []const u8) !void {
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, body);
+}
+
+test "commitDownloaded records the bottle's tag and ignores one the archive planted" {
+    var s = try Scratch.init("commit_tag_dl");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
+    const staged = s.p("/tmp/" ++ sha);
+    try std.Io.Dir.cwd().createDirPath(io, staged);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    // A tag the bottle itself ships must lose to the one the API declared.
+    try writeTestFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag.file_name), "/evil/Cellar");
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
+
+    try commitDownloaded(io, &store, .{ .cellar = "/opt/malt-brew/Cellar", .url = "", .sha256 = sha }, staged);
+    var buf: [cellar_tag.max_len + 1]u8 = undefined;
+    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag.read(io, s.p("/store/" ++ sha), &buf).?);
+}
+
+test "commitDownloaded still commits a bottle whose tag is unusable" {
+    var s = try Scratch.init("commit_tag_dl_bad");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("cd".*)));
+    const staged = s.p("/tmp/" ++ sha);
+    try std.Io.Dir.cwd().createDirPath(io, staged);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
+
+    try commitDownloaded(io, &store, .{ .cellar = "", .url = "", .sha256 = sha }, staged);
+    try std.testing.expect(store.exists(sha));
+    var buf: [cellar_tag.max_len + 1]u8 = undefined;
+    try std.testing.expect(cellar_tag.read(io, s.p("/store/" ++ sha), &buf) == null);
 }
 
 test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across the dupe-then-deinit shape" {

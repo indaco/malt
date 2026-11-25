@@ -14,6 +14,7 @@ const linker_mod = @import("../../core/linker.zig");
 const store_mod = @import("../../core/store.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
+const cellar_tag_file = @import("../../fs/cellar_tag.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
@@ -143,7 +144,7 @@ pub fn migrateKeg(
     if (!has_bar) output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
     if (!deps.store.exists(bottle.sha256)) {
-        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name, deps.bar)) {
+        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, bottle.cellar, keg_name, deps.bar)) {
             return .failed_download;
         }
     } else if (!has_bar) {
@@ -547,6 +548,21 @@ fn readFileToOwnedSlice(
     return allocator.realloc(buf, n);
 }
 
+/// Record the bottle's cellar tag beside the content, then publish both. A
+/// tag that cannot be written costs only a later rollback its exact build
+/// prefix, so it never fails the migrate.
+fn commitMigrated(
+    io: std.Io,
+    store: *store_mod.Store,
+    sha256: []const u8,
+    bottle_cellar: []const u8,
+    tmp_dir: []const u8,
+) store_mod.StoreError!void {
+    cellar_tag_file.write(io, tmp_dir, bottle_cellar) catch |e|
+        std.log.debug("cellar tag not recorded for {s}: {s}", .{ sha256, @errorName(e) });
+    try store.commitFrom(sha256, tmp_dir);
+}
+
 /// Download a bottle from GHCR and commit to the store.
 fn downloadBottle(
     ctx: *const AppCtx,
@@ -556,6 +572,7 @@ fn downloadBottle(
     store: *store_mod.Store,
     bottle_url: []const u8,
     sha256: []const u8,
+    bottle_cellar: []const u8,
     name: []const u8,
     bar: ?*progress_mod.ProgressBar,
 ) bool {
@@ -597,7 +614,7 @@ fn downloadBottle(
         return false;
     };
 
-    store.commitFrom(sha256, tmp_dir) catch {
+    commitMigrated(ctx.io, store, sha256, bottle_cellar, tmp_dir) catch {
         output.err("    Store commit failed: {s}", .{name});
         atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);
@@ -1179,4 +1196,24 @@ test "recordAndLink skips linking for a keg-only bottle and keeps the row" {
 
     _ = try recordAndLink(std.Options.debug_io, fx.deps, fx.fields, "wget", false);
     try std.testing.expect(isInstalled(&db, "wget"));
+}
+
+test "commitMigrated records the bottle's tag and ignores one the archive planted" {
+    var s = try Scratch.init("commit_tag_mig");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
+    const staged = s.p("/tmp/" ++ sha);
+    try std.Io.Dir.cwd().createDirPath(io, staged);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    const planted = try std.Io.Dir.cwd().createFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag_file.file_name), .{});
+    try planted.writeStreamingAll(io, "/evil/Cellar");
+    planted.close(io);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
+
+    try commitMigrated(io, &store, sha, "/opt/malt-brew/Cellar", staged);
+    var buf: [cellar_tag_file.max_len + 1]u8 = undefined;
+    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag_file.read(io, s.p("/store/" ++ sha), &buf).?);
 }

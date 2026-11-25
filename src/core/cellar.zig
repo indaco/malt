@@ -123,6 +123,9 @@ pub fn materialize(
 /// patching is skipped (relocatable bottle). Text placeholder substitution
 /// (@@HOMEBREW_PREFIX@@, @@HOMEBREW_CELLAR@@) always runs.
 ///
+/// An empty `cellar_type` means the tag is unknown. The build prefix is then
+/// a guess, and no relocated snapshot is saved.
+///
 /// `extra_replacement` carries a substitution the caller resolved from the
 /// formula (see `formula.dependencyPlaceholder`); null for most bottles.
 ///
