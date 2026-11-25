@@ -345,10 +345,10 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     var stub = BottleStub{ .io = io, .listener = &listener, .body = body };
-    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
+    const port = listener.socket.address.getPort();
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -386,6 +386,9 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
     var cellar_diag: ?malt.cellar.CellarError = null;
+    // No `try` between the spawn and the call, so a setup failure never frees
+    // the listener under a running thread.
+    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
     const result = malt.install_download.installKegFromBottle(
         &ctx,
         testing.allocator,
@@ -394,7 +397,9 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
         prefix,
     );
 
+    // Join before any `try`; the knock ends a server that was never dialed.
     http.deinit();
+    knock(io, port);
     server_thread.join();
 
     try testing.expectError(malt.install_record.InstallError.CellarFailed, result);
@@ -500,7 +505,7 @@ test "installKegFromBottle stores the bottle's cellar tag, not one the archive c
         \\  "keg_only": false,
         \\  "post_install_defined": false,
         \\  "oldnames": [],
-        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any","url": "https://ghcr.io/v2/homebrew/core/coldpkg/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
+        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/coldpkg/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
         \\}}
     ,
         .{ &bottle.sha, &bottle.sha },

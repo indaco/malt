@@ -426,7 +426,6 @@ test "migrateKeg stores the bottle's cellar tag for a bottle it downloads" {
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     var stub = BottleStub{ .io = io, .listener = &listener, .body = body };
-    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
 
     var base_buf: [64]u8 = undefined;
     const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
@@ -437,6 +436,9 @@ test "migrateKeg stores the bottle's cellar tag for a bottle it downloads" {
     h.ghcr.base_url = base_url;
 
     const ctx = h.ctx();
+    // No `try` between the spawn and the call, so a setup failure never frees
+    // the listener under a running thread.
+    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
     const result = migrate_keg.migrateKeg(&ctx, h.arena.allocator(), "coldpkg", h.deps(&fx));
 
     // Join before any assertion: a failure must not free the listener
