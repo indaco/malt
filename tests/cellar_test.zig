@@ -936,6 +936,39 @@ test "materializeWithCellar refuses a warm hit under a label the snapshot was no
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
+test "materializeWithCellar saves no snapshot when the bottle's cellar tag is unknown" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // A guessed build prefix would size text records wrongly for every later install of this sha.
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", "", null, true);
+    defer testing.allocator.free(keg.path);
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "materializeWithCellar still saves a snapshot for a known cellar tag" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", ":any", null, true);
+    defer testing.allocator.free(keg.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
 /// Both receipt fields must flip together, so pin the pair as one check.
 fn expectDependencyReceipt(allocator: std.mem.Allocator, keg_path: []const u8) !void {
     const receipt_path = try allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_path});

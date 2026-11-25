@@ -273,8 +273,11 @@ pub fn materializeWithCellar(
     // Snapshot the post-relocation keg so the next install of the same
     // bottle sha takes the cache short-circuit at the top of this
     // function. Snapshot failure is non-fatal — the user-visible install
-    // already succeeded.
-    if (relocated_store.save(io, allocator, prefix, store_sha256, name, version)) {
+    // already succeeded. An unknown tag means the build prefix was guessed,
+    // and a later install would reuse that guess.
+    if (cellar_type.len == 0) {
+        std.log.debug("relocated cache skipped for {s}: unknown cellar tag", .{store_sha256});
+    } else if (relocated_store.save(io, allocator, prefix, store_sha256, name, version)) {
         // `relocateKegTree` already checked this keg, so restores can skip it.
         relocated_store.markVerified(io, prefix, store_sha256);
     } else |e| {

@@ -1783,6 +1783,23 @@ test "rewriteText stays linear on a file of headers that never match" {
     try testing.expect(std.mem.find(u8, out, "@@P@@") == null);
 }
 
+test "rewriteText shares one walk budget across a file" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // False headers spend the budget. A record after them is then left to the
+    // plain replace: a budget that restarts at each header would size it.
+    const unit = "s:99999999:\"@@P@@ ";
+    const reps = 2000;
+    const tail = "s:13:\"@@P@@\";";
+    const in = try a.alloc(u8, unit.len * reps + tail.len);
+    defer a.free(in);
+    for (0..reps) |i| @memcpy(in[i * unit.len ..][0..unit.len], unit);
+    @memcpy(in[unit.len * reps ..], tail);
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expect(std.mem.endsWith(u8, out, "s:13:\"/opt/malt\";"));
+}
+
 test "rewriteText returns null when nothing changes" {
     const testing = std.testing;
     const a = testing.allocator;

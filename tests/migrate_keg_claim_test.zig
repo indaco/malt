@@ -50,6 +50,12 @@ const Fixture = struct {
     /// Warm store + cached formula: `migrateKeg` then reaches materialise
     /// without touching the network.
     fn seed(self: *const Fixture, name: []const u8, keg_only: bool) !void {
+        try self.seedBottle(name, keg_only, ":any", null);
+    }
+
+    /// Same as `seed`, with the bottle's `cellar` tag and an optional
+    /// `app.conf` in the store entry.
+    fn seedBottle(self: *const Fixture, name: []const u8, keg_only: bool, cellar: []const u8, conf: ?[]const u8) !void {
         const inner = try testing.allocator.print(
             "{s}/store/{s}/{s}/1.0",
             .{ self.prefix, sha, name },
@@ -57,14 +63,15 @@ const Fixture = struct {
         defer testing.allocator.free(inner);
         try test_io.cwd().createDirPath(std.Options.debug_io, inner);
         try self.writeFile(inner, "README", "warm store probe\n");
+        if (conf) |body| try self.writeFile(inner, "app.conf", body);
 
         const json = try testing.allocator.print(
             \\{{"name":"{s}","full_name":"{s}","tap":"homebrew/core","desc":"","homepage":"",
             \\ "versions":{{"stable":"1.0"}},"revision":0,"dependencies":[],"keg_only":{},
             \\ "post_install_defined":false,"oldnames":[],
-            \\ "bottle":{{"stable":{{"files":{{"all":{{"cellar":":any",
+            \\ "bottle":{{"stable":{{"files":{{"all":{{"cellar":"{s}",
             \\   "url":"https://ghcr.io/v2/homebrew/core/{s}/blobs/sha256:{s}","sha256":"{s}"}}}}}}}}}}
-        , .{ name, name, keg_only, name, sha, sha });
+        , .{ name, name, keg_only, cellar, name, sha, sha });
         defer testing.allocator.free(json);
 
         const api_dir = try testing.allocator.print("{s}/api", .{self.cache_dir});
@@ -286,4 +293,38 @@ test "a parallel-shaped migrate claims without re-taking the worker lock" {
     db_mu.unlock(h.threaded.io());
 
     try testing.expect(try claimed(&h.db));
+}
+
+// The bottle's own `cellar` tag fixes the prefix its text was written for.
+// A tag whose prefix length differs from both host defaults shows whether
+// migrate passes it on: a record sized for that prefix must be resized.
+test "a migrate sizes length-prefixed text for the prefix the bottle was built under" {
+    var fx = try Fixture.init("celltag");
+    defer fx.deinit();
+    const built = "/opt/malt-brew";
+    try testing.expect(built.len != "/opt/homebrew".len and built.len != "/usr/local".len);
+    const before = try testing.allocator.print("s:{d}:\"@@HOMEBREW_PREFIX@@\";", .{built.len});
+    defer testing.allocator.free(before);
+    try fx.seedBottle("planted", false, built ++ "/Cellar", before);
+
+    var h: Harness = undefined;
+    try initHarness(&h, &fx);
+    defer h.deinit();
+
+    const ctx = h.ctx();
+    try testing.expectEqual(
+        migrate_keg.KegResult.migrated,
+        migrate_keg.migrateKeg(&ctx, h.arena.allocator(), "planted", h.deps(&fx)),
+    );
+
+    const path = try testing.allocator.print("{s}/Cellar/planted/1.0/app.conf", .{fx.prefix});
+    defer testing.allocator.free(path);
+    const got = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, path, 4096);
+    defer testing.allocator.free(got);
+    // Relocation writes the process prefix, not the fixture's.
+    const live = test_io.getenv("MALT_PREFIX") orelse return error.SkipZigTest;
+    try testing.expect(live.len != built.len);
+    const want = try testing.allocator.print("s:{d}:\"{s}\";", .{ live.len, live });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, got);
 }
