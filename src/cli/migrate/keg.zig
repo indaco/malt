@@ -171,10 +171,9 @@ pub fn migrateKeg(
         bottle.sha256,
         formula.name,
         formula.pkg_version,
-        // Unchanged from the `materialize` wrapper this replaced: migrate has
-        // always relocated these kegs unconditionally, and the cellar type is
-        // a separate question from the placeholder.
-        "",
+        // The bottle's own tag, as install passes it: the build prefix and
+        // the relocation skip both depend on it.
+        bottle.cellar,
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
         on_request,
     ) catch |e| {
@@ -250,6 +249,12 @@ pub fn migrateKeg(
     return .migrated;
 }
 
+/// Cellar tag of a keg that Homebrew already relocated. Its parent is the
+/// prefix the text was written for. An empty tag makes the rewrite guess.
+fn localCellarTag(buf: []u8, homebrew_prefix: []const u8) []const u8 {
+    return std.mem.print(buf, "{s}/Cellar", .{homebrew_prefix}) catch "";
+}
+
 /// Copy-from-Cellar fallback for kegs the brew API can't resolve. Locates
 /// `<homebrew_prefix>/Cellar/<name>/`, picks the version subdir whose
 /// `INSTALL_RECEIPT.json` mtime is newest (matches brew's "current" version
@@ -294,6 +299,9 @@ fn migrateFromLocalCellar(
 
     if (!has_bar) output.info("  Migrating {s} {s} (from {s} tap)...", .{ keg_name, receipt.version, receipt.tap });
 
+    var tag_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cellar_tag = localCellarTag(&tag_buf, deps.homebrew_prefix);
+
     const keg = cellar_mod.materializeFromLocalCellar(
         ctx.io,
         allocator,
@@ -302,10 +310,9 @@ fn migrateFromLocalCellar(
         keg_name,
         receipt.version,
         receipt.tap,
-        // Tap kegs don't carry a Homebrew bottle cellar_type tag here;
-        // pass empty so the relocation pipeline treats it as a normal
-        // bottle (full absolute-path rewrite + placeholder substitution).
-        "",
+        // The keg was relocated to the brew prefix, so that prefix is the
+        // build prefix for the text rewrite.
+        cellar_tag,
         receipt.on_request,
     ) catch |e| {
         output.err("    {s}: failed to materialize from local Cellar ({s})", .{ keg_name, cellar_mod.describeError(e) });
@@ -697,6 +704,14 @@ const Scratch = struct {
         self.arena.deinit();
     }
 };
+
+test "localCellarTag names the Cellar of the brew prefix" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/usr/local/Cellar", localCellarTag(&buf, "/usr/local"));
+    // A prefix that cannot fit gives the empty tag, never a cut path.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("", localCellarTag(&tiny, "/opt/homebrew"));
+}
 
 test "findTapFormulaRb prefers the receipt's source.path when it exists and ends in .rb" {
     var s = try Scratch.init("taprb_src");
