@@ -2588,8 +2588,8 @@ const ConfShape = enum {
 };
 
 /// PEAR strips `^#PEAR_Config\s+(\S+)\s+` (case-insensitive) and then
-/// unserializes the rest. Mirror that rule, so a file PEAR reads is never
-/// called broken.
+/// unserializes the rest. Mirror that rule for the header. PEAR also reads a
+/// file with no header and a `b:0;` value; this check calls both broken.
 fn pearConfShape(text: []const u8) ConfShape {
     const magic = "#PEAR_Config";
     if (text.len < magic.len or !std.ascii.eqlIgnoreCase(text[0..magic.len], magic)) return .broken;
@@ -2668,8 +2668,9 @@ fn walkSerialValue(text: []const u8, at: *usize, depth: usize) SerialError!void 
             const ok = switch (kind) {
                 'i' => isSerialInt(body),
                 'b' => std.mem.eql(u8, body, "0") or std.mem.eql(u8, body, "1"),
-                // Only "not empty": PHP also accepts INF and NAN, and a loose
-                // check leaves a file alone, which is the safe side.
+                // Only "not empty": PHP also accepts INF and NAN. A loose check
+                // keeps a live file, which is safe. A shipped file with a bad
+                // decimal also passes, and no check here stops the copy.
                 else => body.len != 0,
             };
             if (!ok) return error.Broken;
@@ -5517,7 +5518,7 @@ test "pearConfValid rejects a byte that is no PHP type" {
     try testing.expect(!pearConfValid(head ++ "a:1:{O:1:\"k\":0:{}i:1;}"));
 }
 
-test "pearConfValid reads the header the way PEAR does" {
+test "pearConfValid accepts the header forms PEAR strips" {
     const value = "a:1:{s:1:\"k\";i:1;}";
     // PEAR strips /^#PEAR_Config\s+(\S+)\s+/si: any case, any version, any space.
     try testing.expect(pearConfValid("#PEAR_Config 0.9\n" ++ value));
@@ -5525,6 +5526,8 @@ test "pearConfValid reads the header the way PEAR does" {
     try testing.expect(pearConfValid("#pear_config 1.0\n" ++ value));
     try testing.expect(pearConfValid("#PEAR_Config 0.9\n\n  " ++ value));
     try testing.expect(pearConfValid("#PEAR_Config\t0.9 \t" ++ value));
+    // Vertical tab and form feed are PCRE space too.
+    try testing.expect(pearConfValid("#PEAR_Config\x0b0.9\x0c" ++ value));
     // No space, no version or no space after it: PEAR does not strip the header.
     try testing.expect(!pearConfValid("#PEAR_Config0.9\n" ++ value));
     try testing.expect(!pearConfValid("#PEAR_Config \n" ++ value));
@@ -5559,6 +5562,7 @@ test "pearConfValid stops at the depth limit and walks up to it" {
 test "pearConfValid rejects a number with no digits or with a stray byte" {
     const head = "#PEAR_Config 0.9\n";
     try testing.expect(pearConfValid(head ++ "a:1:{i:0;i:-7;}"));
+    try testing.expect(pearConfValid(head ++ "a:1:{i:0;i:+5;}"));
     try testing.expect(pearConfValid(head ++ "a:1:{i:0;d:0.5;}"));
     try testing.expect(!pearConfValid(head ++ "a:1:{i:0;i:;}"));
     try testing.expect(!pearConfValid(head ++ "a:1:{i:0;i:1x;}"));
