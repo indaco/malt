@@ -2280,7 +2280,9 @@ const unrelocated_marker = ".malt-unrelocated";
 
 fn kegHasUnrelocatedPaths(ctx: StepsCtx) bool {
     const path = ctx.allocator.print("{s}/{s}", .{ ctx.keg_path, unrelocated_marker }) catch return false;
-    return pathExists(ctx.io, path);
+    // A file only: a directory of that name is not something relocation wrote.
+    const st = std.Io.Dir.cwd().statFile(ctx.io, path, .{ .follow_symlinks = false }) catch return false;
+    return st.kind == .file;
 }
 
 /// True when the keg ships `opcache.so`. The step skips its `ext-opcache.ini`
@@ -5929,6 +5931,23 @@ test "configure_php does not name opcache when the keg ships none" {
     try testing.expect(std.mem.find(u8, h.flog.entries()[0].detail, "opcache") == null);
     try testing.expect(std.mem.find(u8, h.flog.notes()[0], "pecl and pear are not set up") != null);
     try testing.expect(std.mem.find(u8, h.flog.notes()[0], "opcache") == null);
+}
+
+test "kegHasUnrelocatedPaths ignores a directory named like the marker" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const c = try seedPhp(&h, &threaded, .{});
+    // Only relocation writes the marker, and it writes a file.
+    try std.Io.Dir.cwd().createDirPath(h.io, try a.print("{s}/{s}", .{ c.keg_path, unrelocated_marker }));
+    try testing.expect(!kegHasUnrelocatedPaths(c));
+
+    const dir_path = try a.print("{s}/{s}", .{ c.keg_path, unrelocated_marker });
+    try std.Io.Dir.cwd().deleteDir(h.io, dir_path);
+    try putFile(&h, dir_path, "3\n", 0o644);
+    try testing.expect(kegHasUnrelocatedPaths(c));
 }
 
 test "unrelocated_marker names the file relocation writes" {

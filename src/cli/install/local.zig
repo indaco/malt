@@ -927,10 +927,27 @@ fn pathExists(io: std.Io, path: []const u8) bool {
     return false;
 }
 
+/// The marker `name` stands for, or null.
+fn kegMarkerFor(name: []const u8) ?[]const u8 {
+    for (cellar_mod.keg_markers) |marker| {
+        // ASCII case only. APFS folds more, and a name that folds onto a marker
+        // another way is caught by the root collision check in the hoist. That
+        // check holds because relocation has just written the stamp there.
+        if (std.ascii.eqlIgnoreCase(name, marker)) return marker;
+    }
+    return null;
+}
+
 /// Flatten a keg whose entire payload sits in one wrapper directory. Returns
 /// false if anything was left behind: a half-flattened keg has payload nothing
 /// will link, so the caller must refuse it rather than accept what did land.
 fn hoistSingleWrapperDir(io: std.Io, keg_path: []const u8) bool {
+    return hoistWrapperReporting(io, keg_path, null);
+}
+
+/// As `hoistSingleWrapperDir`. `stuck` names the keg marker that could not be
+/// removed, so the caller does not blame the archive layout for it.
+fn hoistWrapperReporting(io: std.Io, keg_path: []const u8, stuck: ?*?[]const u8) bool {
     var wrapper_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
     const wrapper = singlePayloadDir(io, keg_path, &wrapper_buf) orelse return true;
 
@@ -944,6 +961,15 @@ fn hoistSingleWrapperDir(io: std.Io, keg_path: []const u8) bool {
         var to_buf: [1024]u8 = undefined;
         const from = std.mem.print(&from_buf, "{s}/{s}/{s}", .{ keg_path, wrapper, name }) catch return false;
         const to = std.mem.print(&to_buf, "{s}/{s}", .{ keg_path, name }) catch return false;
+        // A marker inside the wrapper would land at the keg root, where malt
+        // reads it as its own verdict. Malt's own marker stays where it is.
+        if (kegMarkerFor(name)) |marker| {
+            std.Io.Dir.cwd().deleteTree(io, from) catch {
+                if (stuck) |out| out.* = marker;
+                return false;
+            };
+            continue;
+        }
         // Extraction pre-creates an empty `bin`, and relocation drops its own
         // markers here. Clear only an empty dir; anything still standing is
         // something the archive must not be allowed to overwrite.
@@ -1347,9 +1373,6 @@ pub fn materializeRubyFormula(
         },
     }
 
-    // Strip first: a forged marker would otherwise let the archive's author
-    // drive doctor's verdict, and the stamp written below must be ours.
-    cellar_mod.stripKegMarkers(ctx.io, cellar_path);
     // Whatever malt staged is linked against its author's prefix, which malt
     // does not own — an archive is no different from a bare asset here. Left
     // alone, the binary loads the wrong libraries at runtime, or none.
@@ -1395,8 +1418,14 @@ pub fn materializeRubyFormula(
         // everything under one `<name>-<version>/` dir, which the formula DSL
         // flattens with `prefix.install Dir["*"]`. Gated so a layout the
         // promote walk already satisfied is never rearranged.
+        var stuck_marker: ?[]const u8 = null;
         const intact = kegHasLinkableContent(ctx.io, cellar_path) or
-            hoistSingleWrapperDir(ctx.io, cellar_path);
+            hoistWrapperReporting(ctx.io, cellar_path, &stuck_marker);
+        if (stuck_marker) |marker| {
+            sink.err("{s}: could not remove {s} from the archive, so the install stopped.", .{ resolved.name, marker });
+            std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
+            return InstallError.CellarFailed;
+        }
         if (!intact or !kegHasLinkableContent(ctx.io, cellar_path)) {
             sink.err("{s} ships no prebuilt files — its archive builds from source, which malt does not run.", .{resolved.name});
             sink.err("Install it with: brew install {s}", .{resolved.full_name});
@@ -2348,6 +2377,142 @@ test "hoistSingleWrapperDir flattens past malt's markers and a pre-created empty
     try std.testing.expect(kegHasLinkableContent(test_io, keg));
 }
 
+test "hoistSingleWrapperDir drops a marker the archive shipped inside the wrapper" {
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("shipped_marker", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    const nested_bin = try std.mem.print(&buf, "{s}/tool-1.0/bin", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, nested_bin);
+    var exe_buf: [512]u8 = undefined;
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&exe_buf, "{s}/tool", .{nested_bin}), .{})).close(test_io);
+    for (cellar_mod.keg_markers) |name| {
+        var m_buf: [512]u8 = undefined;
+        (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&m_buf, "{s}/tool-1.0/{s}", .{ keg, name }), .{})).close(test_io);
+    }
+
+    try std.testing.expect(hoistSingleWrapperDir(test_io, keg));
+    try std.testing.expect(kegHasLinkableContent(test_io, keg));
+    for (cellar_mod.keg_markers) |name| {
+        var m_buf: [512]u8 = undefined;
+        const marker = try std.mem.print(&m_buf, "{s}/{s}", .{ keg, name });
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(test_io, marker, .{}));
+    }
+}
+
+test "hoistSingleWrapperDir never moves a marker out of the wrapper" {
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("marker_root_dir", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    // The strip could not delete a directory of the marker's name, so it is
+    // still at the root and `pathExists` would let the rename through.
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/.malt-unrelocated", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-1.0/bin", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&buf, "{s}/tool-1.0/bin/tool", .{keg}), .{})).close(test_io);
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.mem.print(&buf, "{s}/tool-1.0/.malt-unrelocated", .{keg}), .{})).close(test_io);
+
+    try std.testing.expect(hoistSingleWrapperDir(test_io, keg));
+    const st = try std.Io.Dir.cwd().statFile(test_io, try std.mem.print(&buf, "{s}/.malt-unrelocated", .{keg}), .{ .follow_symlinks = false });
+    try std.testing.expect(st.kind != .file);
+}
+
+test "hoistSingleWrapperDir keeps malt's own stamp over one in the wrapper" {
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("marker_own_stamp", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
+    defer keg_dir.close(test_io);
+    try keg_dir.writeFile(test_io, .{ .sub_path = ".malt-reloc-version", .data = "7" });
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-1.0/bin", .{keg}));
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/bin/tool", .data = "x" });
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
+
+    try std.testing.expect(hoistSingleWrapperDir(test_io, keg));
+    var read_buf: [32]u8 = undefined;
+    var f = try std.Io.Dir.openFileAbsolute(test_io, try std.mem.print(&buf, "{s}/.malt-reloc-version", .{keg}), .{});
+    defer f.close(test_io);
+    const n = try f.readPositional(test_io, &.{&read_buf}, 0);
+    try std.testing.expectEqualStrings("7", read_buf[0..n]);
+}
+
+test "hoistSingleWrapperDir drops a marker whose case differs" {
+    // APFS folds case, so this name would land on the marker malt reads.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("marker_case", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
+    defer keg_dir.close(test_io);
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-1.0/bin", .{keg}));
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/bin/tool", .data = "x" });
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.MALT-UNRELOCATED", .data = "3\n" });
+
+    try std.testing.expect(hoistSingleWrapperDir(test_io, keg));
+    try std.testing.expectError(error.FileNotFound, keg_dir.access(test_io, ".MALT-UNRELOCATED", .{}));
+}
+
+test "hoistSingleWrapperDir names the marker it cannot remove" {
+    // Root ignores mode bits, so the delete would succeed.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("marker_stuck", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    const wrapper = try std.mem.print(&buf, "{s}/tool-1.0", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, wrapper);
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
+    defer keg_dir.close(test_io);
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-unrelocated", .data = "3\n" });
+    // A read-only wrapper refuses the delete of the marker inside it.
+    var wrapper_dir = try std.Io.Dir.openDirAbsolute(test_io, wrapper, .{});
+    defer wrapper_dir.close(test_io);
+    const handle: std.Io.File = .{ .handle = wrapper_dir.handle, .flags = .{ .nonblocking = false } };
+    handle.setPermissions(test_io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    defer handle.setPermissions(test_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    var stuck: ?[]const u8 = null;
+    try std.testing.expect(!hoistWrapperReporting(test_io, keg, &stuck));
+    try std.testing.expectEqualStrings(".malt-unrelocated", stuck.?);
+}
+
+test "hoistSingleWrapperDir refuses a name that only Unicode case folding ties to the stamp" {
+    // APFS folds more than ASCII case: U+017F resolves to `s`. `kegMarkerFor`
+    // does not know that, so the root collision check is what holds.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("marker_unicode_fold", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
+    defer keg_dir.close(test_io);
+    try keg_dir.writeFile(test_io, .{ .sub_path = ".malt-reloc-version", .data = "7" });
+    // A case-sensitive volume does not tie the two names, so there is no fold to pin.
+    keg_dir.access(test_io, ".malt-reloc-ver\u{17F}ion", .{}) catch return error.SkipZigTest;
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.mem.print(&buf, "{s}/tool-1.0/bin", .{keg}));
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/bin/tool", .data = "x" });
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-ver\u{17F}ion", .data = "attacker" });
+
+    try std.testing.expect(!hoistSingleWrapperDir(test_io, keg));
+    var read_buf: [32]u8 = undefined;
+    var f = try keg_dir.openFile(test_io, ".malt-reloc-version", .{});
+    defer f.close(test_io);
+    const n = try f.readPositional(test_io, &.{&read_buf}, 0);
+    try std.testing.expectEqualStrings("7", read_buf[0..n]);
+}
+
 test "hoistSingleWrapperDir leaves a keg whose payload is already at the root" {
     // Rearranging a working layout is the one thing this must never do.
     const allocator = std.testing.allocator;
@@ -2416,23 +2581,23 @@ test "singlePayloadDir refuses a keg with a stray file beside the wrapper" {
 }
 
 test "hoistSingleWrapperDir refuses to overwrite a file already at the keg root" {
-    // Relocation writes its markers at the keg root before the hoist runs. An
-    // archive entry of the same name must not be able to replace one.
+    // A dotfile can already sit at the keg root when the hoist runs. An
+    // archive entry of the same name must not be able to replace it.
     const allocator = std.testing.allocator;
     const keg = try hoistScratch("collide", allocator);
     defer allocator.free(keg);
     defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
 
     var buf: [512]u8 = undefined;
-    const marker = try std.mem.print(&buf, "{s}/.malt-reloc-version", .{keg});
+    const marker = try std.mem.print(&buf, "{s}/.hidden", .{keg});
     var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
     defer keg_dir.close(test_io);
-    try keg_dir.writeFile(test_io, .{ .sub_path = ".malt-reloc-version", .data = "7" });
+    try keg_dir.writeFile(test_io, .{ .sub_path = ".hidden", .data = "7" });
 
     var nest_buf: [512]u8 = undefined;
     const nested = try std.mem.print(&nest_buf, "{s}/tool-1.0", .{keg});
     try std.Io.Dir.cwd().createDirPath(test_io, nested);
-    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.hidden", .data = "attacker" });
 
     try std.testing.expect(!hoistSingleWrapperDir(test_io, keg));
 
@@ -2455,19 +2620,19 @@ test "hoistSingleWrapperDir will not replace a dangling dotfile symlink at the k
 
     var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
     defer keg_dir.close(test_io);
-    try keg_dir.symLink(test_io, "nowhere", ".malt-reloc-version", .{});
+    try keg_dir.symLink(test_io, "nowhere", ".hidden", .{});
 
     var buf: [512]u8 = undefined;
     const nested = try std.mem.print(&buf, "{s}/tool-1.0", .{keg});
     try std.Io.Dir.cwd().createDirPath(test_io, nested);
-    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.hidden", .data = "attacker" });
 
     try std.testing.expect(!hoistSingleWrapperDir(test_io, keg));
 
     // The link is still a link, not the archive's file.
     var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var target_buf: [512]u8 = undefined;
-    const link_path = try std.mem.print(&target_buf, "{s}/.malt-reloc-version", .{keg});
+    const link_path = try std.mem.print(&target_buf, "{s}/.hidden", .{keg});
     const n = try std.Io.Dir.readLinkAbsolute(test_io, link_path, &link_buf);
     try std.testing.expectEqualStrings("nowhere", link_buf[0..n]);
 }
