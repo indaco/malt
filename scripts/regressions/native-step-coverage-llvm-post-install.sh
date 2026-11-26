@@ -40,7 +40,7 @@ fail() {
 #    missing entry silently reinstates the partial-skip envelope.
 for t in configure_clang_system configure_gcc_runtime warn move \
   set_permissions install_gzipped_executable change_dylib_id \
-  terminate_process; do
+  terminate_process configure_php; do
   grep -qE "\"$t\", \." "$STEPS" || fail "$t missing from step_map — its formulas will partial-skip"
   grep -qE "^test \".*$t" "$STEPS" || fail "$t registered but untested — stub risk"
 done
@@ -62,7 +62,7 @@ grep -q 'non_recursive' "$STEPS" || fail "set_permissions ignores non_recursive 
 
 # 4. Types deliberately left as loud skips must stay unregistered, so a later
 #    drive-by cannot quietly stub them into a no-op that reports success.
-for t in configure_glibc_runtime configure_php bootstrap_cpython bootstrap_pypy; do
+for t in configure_glibc_runtime bootstrap_cpython bootstrap_pypy; do
   if grep -qE "\"$t\", \." "$STEPS"; then
     fail "$t registered — it is a deliberate loud skip, not a native step"
   fi
@@ -88,6 +88,8 @@ TESTS=(
   "terminate_process treats an absent process as success"
   "the on guard admits a macOS step and skips a Linux one silently"
   "the on guard routes an unknown platform value loudly"
+  "configure_php repairs a corrupt pear.conf and records the persistent paths"
+  "configure_php merges the PEAR tree over an existing one"
 )
 
 for t in "${TESTS[@]}"; do

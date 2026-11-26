@@ -161,6 +161,11 @@ const sha_binary_skip = std.mem.asBytes(&@as([32][2]u8, @splat("10".*)));
 const sha_cache_seed = std.mem.asBytes(&@as([32][2]u8, @splat("32".*)));
 const sha_absent_source = std.mem.asBytes(&@as([32][2]u8, @splat("54".*)));
 const sha_absent_sibling = std.mem.asBytes(&@as([32][2]u8, @splat("76".*)));
+const sha_serialized_lengths = std.mem.asBytes(&@as([32][2]u8, @splat("a1".*)));
+const sha_usr_local_text = std.mem.asBytes(&@as([32][2]u8, @splat("b2".*)));
+const sha_usr_local_opt = std.mem.asBytes(&@as([32][2]u8, @splat("c3".*)));
+const sha_usr_local_intel = std.mem.asBytes(&@as([32][2]u8, @splat("d4".*)));
+const sha_literal_prefix = std.mem.asBytes(&@as([32][2]u8, @splat("e5".*)));
 const sha_symlinked_pkg = std.mem.asBytes(&@as([32][2]u8, @splat("98".*)));
 
 // ---------------------------------------------------------------------------
@@ -929,6 +934,123 @@ test "materializeWithCellar refuses a warm hit under a label the snapshot was no
     );
     testing.allocator.free(again.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "materializeWithCellar saves no snapshot when the bottle's cellar tag is unknown" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // A guessed build prefix would size text records wrongly for every later install of this sha.
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", "", null, true);
+    defer testing.allocator.free(keg.path);
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "materializeWithCellar still saves a snapshot for a known cellar tag" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", ":any", null, true);
+    defer testing.allocator.free(keg.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+const length_conf = "k=s:14:\"@@HOMEBREW_PREFIX@@\";\n";
+
+/// Stage `dep/1.0/app.conf` the way a download leaves it, ready to commit.
+fn stageLengthBottle(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8) ![]const u8 {
+    const staged = try allocator.print("{s}/tmp/{s}", .{ prefix, sha });
+    const inner = try allocator.print("{s}/dep/1.0", .{staged});
+    defer allocator.free(inner);
+    try test_io.cwd().createDirPath(std.Options.debug_io, inner);
+    const conf = try allocator.print("{s}/app.conf", .{inner});
+    defer allocator.free(conf);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, conf, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, length_conf);
+    return staged;
+}
+
+fn expectSizedForPrefix(allocator: std.mem.Allocator, keg_path: []const u8, prefix: []const u8) !void {
+    const conf = try allocator.print("{s}/app.conf", .{keg_path});
+    defer allocator.free(conf);
+    const got = try readFile(allocator, conf);
+    defer allocator.free(got);
+    const want = try allocator.print("k=s:{d}:\"{s}\";\n", .{ prefix.len, prefix });
+    defer allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "a cellar tag of an odd length survives install then rollback" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const tmp_root = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{prefix});
+    defer testing.allocator.free(tmp_root);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tmp_root);
+
+    // 21 bytes: neither `/opt/homebrew/Cellar` (20) nor `/usr/local/Cellar` (17).
+    const bottle: malt.formula.BottleFile = .{ .cellar = "/opt/malt-brew/Cellar", .url = "", .sha256 = valid_test_sha };
+    const staged = try stageLengthBottle(testing.allocator, prefix, valid_test_sha);
+    defer testing.allocator.free(staged);
+    var db = try malt.sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = malt.store.Store.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try malt.install_download.commitDownloaded(std.Options.debug_io, &store, bottle, staged);
+
+    var tag_buf: [malt.cellar_tag.buf_len]u8 = undefined;
+    const tag = malt.cli_rollback.storedCellarTag(std.Options.debug_io, prefix, valid_test_sha, &tag_buf);
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", tag, null, true);
+    defer testing.allocator.free(keg.path);
+    try expectSizedForPrefix(testing.allocator, keg.path, prefix);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "rollback still works for a store entry made before the tag file existed" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const tmp_root = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{prefix});
+    defer testing.allocator.free(tmp_root);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tmp_root);
+
+    // An old entry: content only, committed with no tag file beside it.
+    const staged = try stageLengthBottle(testing.allocator, prefix, valid_test_sha);
+    defer testing.allocator.free(staged);
+    const entry = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, valid_test_sha });
+    defer testing.allocator.free(entry);
+    try test_io.cwd().rename(staged, test_io.cwd(), entry, std.Options.debug_io);
+
+    var tag_buf: [malt.cellar_tag.buf_len]u8 = undefined;
+    const tag = malt.cli_rollback.storedCellarTag(std.Options.debug_io, prefix, valid_test_sha, &tag_buf);
+    try testing.expectEqualStrings("", tag);
+    const keg = try cellar_mod.materializeWithCellar(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "dep", "1.0", tag, null, true);
+    defer testing.allocator.free(keg.path);
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
 /// Both receipt fields must flip together, so pin the pair as one check.
@@ -2116,4 +2238,131 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
     const leaked = try testing.allocator.print("{s}/1.0/INSTALL_RECEIPT.json", .{victim});
     defer testing.allocator.free(leaked);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
+}
+
+// ---------------------------------------------------------------------------
+// Length-prefixed text (PHP-serialized pear.conf)
+// ---------------------------------------------------------------------------
+
+/// Replaces the fixture's `lib/test.pc` with `body`.
+fn overwriteFixturePc(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver: []const u8, body: []const u8) !void {
+    const path = try allocator.print("{s}/store/{s}/{s}/{s}/lib/test.pc", .{ prefix, sha, name, ver });
+    defer allocator.free(path);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+}
+
+test "relocateKegTree resizes serialized lengths for the build-time prefix of the bottle" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, sha_serialized_lengths, "php", "8.5.13");
+    // 54 = `/opt/homebrew/Cellar` + the 34-byte tail, the size brew wrote.
+    try overwriteFixturePc(
+        testing.allocator,
+        prefix,
+        sha_serialized_lengths,
+        "php",
+        "8.5.13",
+        "a:1:{s:7:\"php_dir\";s:54:\"@@HOMEBREW_CELLAR@@/php@8.5/8.5.13/share/php@8.5/pear\";}",
+    );
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        sha_serialized_lengths,
+        "php",
+        "8.5.13",
+        "/opt/homebrew/Cellar",
+        null,
+        true,
+    );
+    defer testing.allocator.free(keg.path);
+
+    const path = try testing.allocator.print("{s}/lib/test.pc", .{keg.path});
+    defer testing.allocator.free(path);
+    const got = try readFile(testing.allocator, path);
+    defer testing.allocator.free(got);
+    const tail = "/php@8.5/8.5.13/share/php@8.5/pear";
+    const want = try testing.allocator.print(
+        "a:1:{{s:7:\"php_dir\";s:{d}:\"{s}/Cellar{s}\";}}",
+        .{ prefix.len + "/Cellar".len + tail.len, prefix, tail },
+    );
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
+
+// ---------------------------------------------------------------------------
+// `/usr/local` text is upstream data unless the bottle was built there
+// ---------------------------------------------------------------------------
+
+/// Materializes a one-file keg whose `lib/test.pc` holds `body` and returns
+/// the relocated bytes (caller frees).
+fn relocatePcText(sha: []const u8, cellar_type: []const u8, body: []const u8) ![]const u8 {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, sha, "pkg", "1.0");
+    try overwriteFixturePc(testing.allocator, prefix, sha, "pkg", "1.0", body);
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        sha,
+        "pkg",
+        "1.0",
+        cellar_type,
+        null,
+        true,
+    );
+    defer testing.allocator.free(keg.path);
+    const path = try testing.allocator.print("{s}/lib/test.pc", .{keg.path});
+    defer testing.allocator.free(path);
+    return readFile(testing.allocator, path);
+}
+
+test "relocateKegTree leaves /usr/local text alone in a skip-relocation bottle" {
+    const got = try relocatePcText(sha_usr_local_text, ":any_skip_relocation", "ac_default_prefix=/usr/local\n");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("ac_default_prefix=/usr/local\n", got);
+}
+
+test "relocateKegTree leaves /usr/local text alone in a bottle built under /opt/homebrew" {
+    const got = try relocatePcText(sha_usr_local_opt, "/opt/homebrew/Cellar", "sig_bin=/usr/local/bin/gpg\nroot=/opt/homebrew/x\n");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.find(u8, got, "sig_bin=/usr/local/bin/gpg\n") != null);
+    try testing.expect(std.mem.find(u8, got, "/opt/homebrew") == null);
+}
+
+test "relocateKegTree still rewrites /usr/local text in a bottle built under /usr/local" {
+    const got = try relocatePcText(sha_usr_local_intel, "/usr/local/Cellar", "root=/usr/local/bin\n");
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.find(u8, got, "/usr/local") == null);
+    try testing.expect(std.mem.startsWith(u8, got, "root=/tmp/malt_cellar_test_"));
+}
+
+test "relocateKegTree resizes a record that holds the literal /opt/homebrew prefix" {
+    const got = try relocatePcText(sha_literal_prefix, "/opt/homebrew/Cellar", "a:1:{s:1:\"k\";s:15:\"/opt/homebrew/x\";}");
+    defer testing.allocator.free(got);
+    const head = "a:1:{s:1:\"k\";s:";
+    try testing.expect(std.mem.startsWith(u8, got, head));
+    const rest = got[head.len..];
+    const colon = std.mem.findScalar(u8, rest, ':') orelse return error.TestUnexpectedResult;
+    const declared = try std.fmt.parseInt(usize, rest[0..colon], 10);
+    const payload = rest[colon + 2 ..][0..declared];
+    try testing.expect(std.mem.endsWith(u8, payload, "/x"));
+    try testing.expectEqualStrings("\";}", rest[colon + 2 + declared ..]);
 }

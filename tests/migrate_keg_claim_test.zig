@@ -50,6 +50,12 @@ const Fixture = struct {
     /// Warm store + cached formula: `migrateKeg` then reaches materialise
     /// without touching the network.
     fn seed(self: *const Fixture, name: []const u8, keg_only: bool) !void {
+        try self.seedBottle(name, keg_only, ":any", null);
+    }
+
+    /// Same as `seed`, with the bottle's `cellar` tag and an optional
+    /// `app.conf` in the store entry.
+    fn seedBottle(self: *const Fixture, name: []const u8, keg_only: bool, cellar: []const u8, conf: ?[]const u8) !void {
         const inner = try testing.allocator.print(
             "{s}/store/{s}/{s}/1.0",
             .{ self.prefix, sha, name },
@@ -57,14 +63,15 @@ const Fixture = struct {
         defer testing.allocator.free(inner);
         try test_io.cwd().createDirPath(std.Options.debug_io, inner);
         try self.writeFile(inner, "README", "warm store probe\n");
+        if (conf) |body| try self.writeFile(inner, "app.conf", body);
 
         const json = try testing.allocator.print(
             \\{{"name":"{s}","full_name":"{s}","tap":"homebrew/core","desc":"","homepage":"",
             \\ "versions":{{"stable":"1.0"}},"revision":0,"dependencies":[],"keg_only":{},
             \\ "post_install_defined":false,"oldnames":[],
-            \\ "bottle":{{"stable":{{"files":{{"all":{{"cellar":":any",
+            \\ "bottle":{{"stable":{{"files":{{"all":{{"cellar":"{s}",
             \\   "url":"https://ghcr.io/v2/homebrew/core/{s}/blobs/sha256:{s}","sha256":"{s}"}}}}}}}}}}
-        , .{ name, name, keg_only, name, sha, sha });
+        , .{ name, name, keg_only, cellar, name, sha, sha });
         defer testing.allocator.free(json);
 
         const api_dir = try testing.allocator.print("{s}/api", .{self.cache_dir});
@@ -286,4 +293,165 @@ test "a parallel-shaped migrate claims without re-taking the worker lock" {
     db_mu.unlock(h.threaded.io());
 
     try testing.expect(try claimed(&h.db));
+}
+
+// The bottle's own `cellar` tag fixes the prefix its text was written for.
+// A tag whose prefix length differs from both host defaults shows whether
+// migrate passes it on: a record sized for that prefix must be resized.
+test "a migrate sizes length-prefixed text for the prefix the bottle was built under" {
+    var fx = try Fixture.init("celltag");
+    defer fx.deinit();
+    const built = "/opt/malt-brew";
+    try testing.expect(built.len != "/opt/homebrew".len and built.len != "/usr/local".len);
+    const before = try testing.allocator.print("s:{d}:\"@@HOMEBREW_PREFIX@@\";", .{built.len});
+    defer testing.allocator.free(before);
+    try fx.seedBottle("planted", false, built ++ "/Cellar", before);
+
+    var h: Harness = undefined;
+    try initHarness(&h, &fx);
+    defer h.deinit();
+
+    const ctx = h.ctx();
+    try testing.expectEqual(
+        migrate_keg.KegResult.migrated,
+        migrate_keg.migrateKeg(&ctx, h.arena.allocator(), "planted", h.deps(&fx)),
+    );
+
+    const path = try testing.allocator.print("{s}/Cellar/planted/1.0/app.conf", .{fx.prefix});
+    defer testing.allocator.free(path);
+    const got = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, path, 4096);
+    defer testing.allocator.free(got);
+    // Relocation writes the process prefix, not the fixture's.
+    const live = test_io.getenv("MALT_PREFIX") orelse return error.SkipZigTest;
+    try testing.expect(live.len != built.len);
+    const want = try testing.allocator.print("s:{d}:\"{s}\";", .{ live.len, live });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
+
+// ── cold-path cellar tag ───────────────────────────────────────────────────
+//
+// Rollback sizes relocated text by the tag stored with the entry, and only
+// a cold migrate writes it. So this drives `migrateKeg` with an empty store
+// against a loopback registry. The archive carries a tag file of its own:
+// a bottle must never choose the tag that rollback trusts.
+
+const net = std.Io.net;
+
+const BottleStub = struct { io: std.Io, listener: *net.Server, body: []const u8 };
+
+fn serveBottle(s: *BottleStub) void {
+    const stream = s.listener.accept(s.io) catch return;
+    defer stream.close(s.io);
+    var rbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [16 * 1024]u8 = undefined;
+    var reader = stream.reader(s.io, &rbuf);
+    var writer = stream.writer(s.io, &wbuf);
+    var srv = std.http.Server.init(&reader.interface, &writer.interface);
+    while (true) {
+        var req = srv.receiveHead() catch return;
+        if (std.mem.find(u8, req.head.target, "/token") != null) {
+            req.respond("{\"token\":\"t1\"}", .{}) catch return;
+        } else if (std.mem.find(u8, req.head.target, "/blobs/") != null) {
+            req.respond(s.body, .{}) catch return;
+        } else {
+            req.respond("not found\n", .{ .status = .not_found }) catch return;
+        }
+    }
+}
+
+// Wakes `serveBottle` if it is still parked in `accept`. Without it, a call
+// that fails before it connects leaves `join` waiting forever.
+fn knock(io: std.Io, port: u16) void {
+    var addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return;
+    const s = addr.connect(io, .{ .mode = .stream }) catch return;
+    s.close(io);
+}
+
+// `std.Options.debug_io`'s failing allocator cannot back a child spawn.
+fn tarCzf(argv: []const []const u8) !void {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    var child = try std.process.spawn(threaded.io(), .{ .argv = argv, .stdout = .ignore, .stderr = .ignore });
+    switch (try child.wait(threaded.io())) {
+        .exited => |code| if (code != 0) return error.TarFailed,
+        else => return error.TarFailed,
+    }
+}
+
+test "migrateKeg stores the bottle's cellar tag for a bottle it downloads" {
+    try test_io.skipIfNoSubprocess();
+
+    var fx = try Fixture.init("coldtag");
+    defer fx.deinit();
+
+    var h: Harness = undefined;
+    try initHarness(&h, &fx);
+    defer h.deinit();
+    const io = h.threaded.io();
+
+    // A bottle with the layout the store commit expects, plus a tag file.
+    const work = try testing.allocator.print("{s}/work", .{fx.prefix});
+    defer testing.allocator.free(work);
+    const payload = try testing.allocator.print("{s}/coldpkg/1.0", .{work});
+    defer testing.allocator.free(payload);
+    try test_io.cwd().createDirPath(io, payload);
+    try fx.writeFile(payload, "README", "cold bottle fixture\n");
+    try fx.writeFile(work, ".malt-cellar-tag", "/evil/Cellar\n");
+    const archive = try testing.allocator.print("{s}/bottle.tar.gz", .{fx.prefix});
+    defer testing.allocator.free(archive);
+    try tarCzf(&.{ "tar", "czf", archive, "-C", work, "coldpkg", ".malt-cellar-tag" });
+
+    const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, archive, 1 << 20);
+    defer testing.allocator.free(body);
+    var raw: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &raw, .{});
+    const bottle_sha = std.fmt.bytesToHex(raw, .lower);
+
+    // The formula is cached, the store is empty: the download branch runs.
+    const tag = "/opt/malt-brew/Cellar";
+    const json = try testing.allocator.print(
+        \\{{"name":"coldpkg","full_name":"coldpkg","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{{"stable":"1.0"}},"revision":0,"dependencies":[],"keg_only":false,
+        \\ "post_install_defined":false,"oldnames":[],
+        \\ "bottle":{{"stable":{{"files":{{"all":{{"cellar":"{s}",
+        \\   "url":"https://ghcr.io/v2/homebrew/core/coldpkg/blobs/sha256:{s}","sha256":"{s}"}}}}}}}}}}
+    , .{ tag, &bottle_sha, &bottle_sha });
+    defer testing.allocator.free(json);
+    const api_dir = try testing.allocator.print("{s}/api", .{fx.cache_dir});
+    defer testing.allocator.free(api_dir);
+    try fx.writeFile(api_dir, "formula_coldpkg.json", json);
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var stub = BottleStub{ .io = io, .listener = &listener, .body = body };
+
+    var base_buf: [64]u8 = undefined;
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    // Point the harness at the stub; `ghcr` holds a pointer to `h.http`.
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    h.http.deinit();
+    h.http = malt.client.HttpClient.initWith(&inner, io, .empty, testing.allocator);
+    h.ghcr.base_url = base_url;
+
+    const ctx = h.ctx();
+    // No `try` between the spawn and the call, so a setup failure never frees
+    // the listener under a running thread.
+    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
+    const result = migrate_keg.migrateKeg(&ctx, h.arena.allocator(), "coldpkg", h.deps(&fx));
+
+    // Join before any assertion: a failure must not free the listener
+    // under the serving thread. The knock ends a server that was never dialed.
+    h.http.deinit();
+    h.http = malt.client.HttpClient.init(io, .empty, testing.allocator);
+    knock(io, listener.socket.address.getPort());
+    server_thread.join();
+
+    try testing.expectEqual(migrate_keg.KegResult.migrated, result);
+    const entry = try testing.allocator.print("{s}/store/{s}", .{ fx.prefix, &bottle_sha });
+    defer testing.allocator.free(entry);
+    var buf: [malt.cellar_tag.buf_len]u8 = undefined;
+    const got = malt.cellar_tag.read(io, entry, &bottle_sha, &buf) orelse return error.TestNoTag;
+    try testing.expectEqualStrings(tag, got);
 }

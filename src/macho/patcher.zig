@@ -397,6 +397,10 @@ fn recordDelete(
 pub const Replacement = struct {
     old: []const u8,
     new: []const u8,
+    /// What `old` expanded to at bottle build time. Text formats that store
+    /// each string's length (PHP `s:N:"..."`) used this value, not the
+    /// placeholder. Mach-O passes ignore it.
+    built: ?[]const u8 = null,
 };
 
 /// Errors surfaced by the `install_name_tool` fallback driver. The
@@ -980,36 +984,115 @@ pub fn patchTextFileHead(
         if (rest < content.len - head.len) return false;
     }
 
-    // Apply each replacement in sequence. `current` always points to
-    // either `content` or a freshly allocated buffer from replaceAll;
-    // when replaceAll returns a different pointer we free the previous
-    // buffer (unless it was the immutable `content` slice).
-    var current: []const u8 = content;
-    var modified = false;
-    var patch_failed = false;
-    for (replacements) |r| {
-        const next = replaceAll(allocator, current, r.old, r.new) catch {
-            patch_failed = true;
-            break;
-        };
-        if (next.ptr != current.ptr) {
-            if (current.ptr != content.ptr) allocator.free(current);
-            current = next;
-            modified = true;
-        }
-    }
-    if (patch_failed) {
-        if (current.ptr != content.ptr) allocator.free(current);
-        return false;
-    }
-
-    if (!modified) return false;
-    defer if (current.ptr != content.ptr) allocator.free(current);
+    const rewritten = rewriteText(allocator, content, replacements) catch return false;
+    const current = rewritten orelse return false;
+    defer allocator.free(current);
     // Atomic rename keeps the file old-or-new on a mid-write
     // failure; `Replace` (not `Write`) also preserves the exec
     // bit on shebanged scripts and shell wrappers.
     atomic.atomicReplaceFile(io, abs_path, current) catch return false;
     return true;
+}
+
+/// Applies every replacement in order. Null when nothing matched, else a
+/// caller-owned buffer.
+fn applyReplacements(allocator: std.mem.Allocator, input: []const u8, replacements: []const Replacement) error{OutOfMemory}!?[]u8 {
+    var current: []const u8 = input;
+    var owned = false;
+    errdefer if (owned) allocator.free(current);
+    for (replacements) |r| {
+        const next = try replaceAll(allocator, current, r.old, r.new);
+        if (next.ptr != current.ptr) {
+            if (owned) allocator.free(current);
+            current = next;
+            owned = true;
+        }
+    }
+    return if (owned) @constCast(current) else null;
+}
+
+/// First replacement whose `old` starts `text`.
+fn needleAt(text: []const u8, replacements: []const Replacement) ?Replacement {
+    for (replacements) |r| {
+        if (r.old.len != 0 and std.mem.startsWith(u8, text, r.old)) return r;
+    }
+    return null;
+}
+
+/// Length-prefixed record found in text: `s:<len>:"<payload>";`.
+const Record = struct { header: usize, payload: usize, end: usize };
+
+/// Walks the payload in build-time bytes. A header counts only when the
+/// walk ends exactly on `";`. Prose that looks like a header stays as it is.
+/// A needle with no build value has an unknown size: plain text. Each step of
+/// the walk spends `budget`, which the caller shares across one file, so a
+/// file of false headers cannot make the scan quadratic.
+fn recordAt(text: []const u8, header: usize, replacements: []const Replacement, budget: *usize) ?Record {
+    var p = header + 2;
+    var declared: usize = 0;
+    const digits = p;
+    while (p < text.len and std.ascii.isDigit(text[p])) : (p += 1) {
+        declared = std.math.mul(usize, declared, 10) catch return null;
+        declared = std.math.add(usize, declared, text[p] - '0') catch return null;
+    }
+    if (p == digits or p + 1 >= text.len or text[p] != ':' or text[p + 1] != '"') return null;
+    const payload = p + 2;
+    var at = payload;
+    var counted: usize = 0;
+    while (counted < declared) {
+        if (at >= text.len or budget.* == 0) return null;
+        budget.* -= 1;
+        if (needleAt(text[at..], replacements)) |r| {
+            counted += (r.built orelse return null).len;
+            at += r.old.len;
+        } else {
+            counted += 1;
+            at += 1;
+        }
+    }
+    if (counted != declared or !std.mem.startsWith(u8, text[at..], "\";")) return null;
+    return .{ .header = header, .payload = payload, .end = at };
+}
+
+/// Text pass over one file. Plain replacement everywhere except inside
+/// length-prefixed records, where the declared length follows the payload.
+/// Null when nothing changed, else a caller-owned buffer.
+fn rewriteText(allocator: std.mem.Allocator, content: []const u8, replacements: []const Replacement) error{OutOfMemory}!?[]u8 {
+    var any_built = false;
+    for (replacements) |r| any_built = any_built or r.built != null;
+    if (!any_built) return applyReplacements(allocator, content, replacements);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var changed = false;
+    var done: usize = 0; // content[0..done] is already in `out`
+    var scan: usize = 0;
+    var budget: usize = content.len * 8 + 4096;
+    while (std.mem.findPos(u8, content, scan, "s:")) |h| {
+        scan = h + 2;
+        const rec = recordAt(content, h, replacements, &budget) orelse continue;
+        changed = try appendSegment(allocator, &out, content[done..h], replacements) or changed;
+        const payload = content[rec.payload..rec.end];
+        const new_payload = try applyReplacements(allocator, payload, replacements);
+        defer if (new_payload) |b| allocator.free(b);
+        const body = new_payload orelse payload;
+        changed = changed or new_payload != null;
+        try out.print(allocator, "s:{d}:\"", .{body.len});
+        try out.appendSlice(allocator, body);
+        done = rec.end;
+        scan = rec.end;
+    }
+    changed = try appendSegment(allocator, &out, content[done..], replacements) or changed;
+    if (!changed) return null;
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Appends `segment` with the replacements applied; true when it changed.
+fn appendSegment(allocator: std.mem.Allocator, out: *std.ArrayList(u8), segment: []const u8, replacements: []const Replacement) error{OutOfMemory}!bool {
+    const rewritten = try applyReplacements(allocator, segment, replacements);
+    defer if (rewritten) |b| allocator.free(b);
+    try out.appendSlice(allocator, rewritten orelse segment);
+    return rewritten != null;
 }
 
 fn hasPrefix(path: []const u8, prefix: []const u8) bool {
@@ -1600,4 +1683,135 @@ test "patchTextFileHead patches a token beyond the head it was handed" {
     defer testing.allocator.free(got);
     try testing.expect(std.mem.endsWith(u8, got, "\nprefix=/opt/malt\n"));
     try testing.expectEqualSlices(u8, body[0..text_head_len], got[0..text_head_len]);
+}
+
+const test_reps = [_]Replacement{
+    .{ .old = "@@P@@", .new = "/opt/malt", .built = "/opt/homebrew" },
+};
+
+test "recordAt accepts a record whose build-time length matches" {
+    const testing = std.testing;
+    // 13 build-time bytes: `/opt/homebrew` stands in for the placeholder.
+    const text = "s:13:\"@@P@@\";";
+    var budget: usize = 1000;
+    const rec = recordAt(text, 0, &test_reps, &budget) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 6), rec.payload);
+    try testing.expectEqual(@as(usize, 11), rec.end);
+}
+
+test "recordAt rejects headers that do not describe a record" {
+    const testing = std.testing;
+    const bad = [_][]const u8{
+        "s:12:\"@@P@@\";", // declared length is short by one
+        "s:14:\"@@P@@\";", // declared length is long by one
+        "s:13:\"@@P@@\"", // no closing `;`
+        "s:13:@@P@@\";", // no opening quote
+        "s::\"@@P@@\";", // no digits
+        "s:13:\"@@P@@", // payload runs past the end
+        "s:99999999999999999999999:\"x\";", // length overflows
+    };
+    for (bad) |t| {
+        var budget: usize = 1000;
+        try testing.expect(recordAt(t, 0, &test_reps, &budget) == null);
+    }
+}
+
+test "recordAt treats a needle without a build value as plain text" {
+    const testing = std.testing;
+    const reps = [_]Replacement{.{ .old = "@@P@@", .new = "/opt/malt" }};
+    var budget: usize = 1000;
+    try testing.expect(recordAt("s:5:\"@@P@@\";", 0, &reps, &budget) == null);
+}
+
+test "rewriteText resizes each record and leaves prose alone" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    const in = "x s:13:\"@@P@@\"; s:3:\"a\"b\"; mess:5 @@P@@ s:13:\"@@P@@\";";
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expectEqualStrings(
+        "x s:9:\"/opt/malt\"; s:3:\"a\"b\"; mess:5 /opt/malt s:9:\"/opt/malt\";",
+        out,
+    );
+}
+
+test "rewriteText resizes a record that mixes needles with other bytes" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // 13 + 4 + 13 + 2 (a two-byte character) = 32 build-time bytes.
+    const in = "s:32:\"@@P@@/bin@@P@@\xc3\xa9\";";
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    // 9 + 4 + 9 + 2 = 24 bytes after the rewrite.
+    try testing.expectEqualStrings("s:24:\"/opt/malt/bin/opt/malt\xc3\xa9\";", out);
+}
+
+test "rewriteText resizes only the outer record of a nested one" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // The inner header is payload bytes of the outer record, so it keeps its
+    // old length. PEAR files do not nest records.
+    const in = "s:21:\"s:13:\"@@P@@\";\";";
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expectEqualStrings("s:17:\"s:13:\"/opt/malt\";\";", out);
+}
+
+test "recordAt gives up when the walk budget runs out" {
+    const testing = std.testing;
+    // One step per payload byte: ten bytes cannot fit in a budget of four.
+    const rec = "s:10:\"abcdefghij\";";
+    var budget: usize = 4;
+    try testing.expect(recordAt(rec, 0, &test_reps, &budget) == null);
+    try testing.expectEqual(@as(usize, 0), budget);
+    budget = 10;
+    try testing.expect(recordAt(rec, 0, &test_reps, &budget) != null);
+}
+
+test "rewriteText stays linear on a file of headers that never match" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // Each header declares more bytes than the file holds, so each walk
+    // would reach the end of the text.
+    const unit = "s:99999999:\"@@P@@ ";
+    const reps = 20000;
+    const in = try a.alloc(u8, unit.len * reps);
+    defer a.free(in);
+    for (0..reps) |i| @memcpy(in[i * unit.len ..][0..unit.len], unit);
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expect(std.mem.find(u8, out, "@@P@@") == null);
+}
+
+test "rewriteText shares one walk budget across a file" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // False headers spend the budget. A record after them is then left to the
+    // plain replace: a budget that restarts at each header would size it.
+    const unit = "s:99999999:\"@@P@@ ";
+    const reps = 2000;
+    const tail = "s:13:\"@@P@@\";";
+    const in = try a.alloc(u8, unit.len * reps + tail.len);
+    defer a.free(in);
+    for (0..reps) |i| @memcpy(in[i * unit.len ..][0..unit.len], unit);
+    @memcpy(in[unit.len * reps ..], tail);
+    const out = (try rewriteText(a, in, &test_reps)).?;
+    defer a.free(out);
+    try testing.expect(std.mem.endsWith(u8, out, "s:13:\"/opt/malt\";"));
+}
+
+test "rewriteText returns null when nothing changes" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    try testing.expect(try rewriteText(a, "s:3:\"abc\";", &test_reps) == null);
+    try testing.expect(try rewriteText(a, "", &test_reps) == null);
+}
+
+test "rewriteText without build values is a plain replace" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    const reps = [_]Replacement{.{ .old = "@@P@@", .new = "/opt/malt" }};
+    const out = (try rewriteText(a, "s:5:\"@@P@@\";", &reps)).?;
+    defer a.free(out);
+    try testing.expectEqualStrings("s:5:\"/opt/malt\";", out);
 }

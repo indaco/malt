@@ -14,6 +14,7 @@ const linker_mod = @import("../../core/linker.zig");
 const store_mod = @import("../../core/store.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
+const cellar_tag_file = @import("../../fs/cellar_tag.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
@@ -143,7 +144,7 @@ pub fn migrateKeg(
     if (!has_bar) output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
     if (!deps.store.exists(bottle.sha256)) {
-        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name, deps.bar)) {
+        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, bottle.cellar, keg_name, deps.bar)) {
             return .failed_download;
         }
     } else if (!has_bar) {
@@ -171,10 +172,9 @@ pub fn migrateKeg(
         bottle.sha256,
         formula.name,
         formula.pkg_version,
-        // Unchanged from the `materialize` wrapper this replaced: migrate has
-        // always relocated these kegs unconditionally, and the cellar type is
-        // a separate question from the placeholder.
-        "",
+        // The bottle's own tag, as install passes it: the build prefix and
+        // the relocation skip both depend on it.
+        bottle.cellar,
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
         on_request,
     ) catch |e| {
@@ -250,6 +250,12 @@ pub fn migrateKeg(
     return .migrated;
 }
 
+/// Cellar tag of a keg that Homebrew already relocated. Its parent is the
+/// prefix the text was written for. An empty tag makes the rewrite guess.
+fn localCellarTag(buf: []u8, homebrew_prefix: []const u8) []const u8 {
+    return std.mem.print(buf, "{s}/Cellar", .{homebrew_prefix}) catch "";
+}
+
 /// Copy-from-Cellar fallback for kegs the brew API can't resolve. Locates
 /// `<homebrew_prefix>/Cellar/<name>/`, picks the version subdir whose
 /// `INSTALL_RECEIPT.json` mtime is newest (matches brew's "current" version
@@ -294,6 +300,9 @@ fn migrateFromLocalCellar(
 
     if (!has_bar) output.info("  Migrating {s} {s} (from {s} tap)...", .{ keg_name, receipt.version, receipt.tap });
 
+    var tag_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cellar_tag = localCellarTag(&tag_buf, deps.homebrew_prefix);
+
     const keg = cellar_mod.materializeFromLocalCellar(
         ctx.io,
         allocator,
@@ -302,10 +311,9 @@ fn migrateFromLocalCellar(
         keg_name,
         receipt.version,
         receipt.tap,
-        // Tap kegs don't carry a Homebrew bottle cellar_type tag here;
-        // pass empty so the relocation pipeline treats it as a normal
-        // bottle (full absolute-path rewrite + placeholder substitution).
-        "",
+        // The keg was relocated to the brew prefix, so that prefix is the
+        // build prefix for the text rewrite.
+        cellar_tag,
         receipt.on_request,
     ) catch |e| {
         output.err("    {s}: failed to materialize from local Cellar ({s})", .{ keg_name, cellar_mod.describeError(e) });
@@ -540,6 +548,21 @@ fn readFileToOwnedSlice(
     return allocator.realloc(buf, n);
 }
 
+/// Record the bottle's cellar tag beside the content, then publish both. A
+/// tag that cannot be written costs only a later rollback its exact build
+/// prefix, so it never fails the migrate.
+fn commitMigrated(
+    io: std.Io,
+    store: *store_mod.Store,
+    sha256: []const u8,
+    bottle_cellar: []const u8,
+    tmp_dir: []const u8,
+) store_mod.StoreError!void {
+    cellar_tag_file.write(io, tmp_dir, sha256, bottle_cellar) catch |e|
+        std.log.debug("cellar tag not recorded for {s}: {s}", .{ sha256, @errorName(e) });
+    try store.commitFrom(sha256, tmp_dir);
+}
+
 /// Download a bottle from GHCR and commit to the store.
 fn downloadBottle(
     ctx: *const AppCtx,
@@ -549,6 +572,7 @@ fn downloadBottle(
     store: *store_mod.Store,
     bottle_url: []const u8,
     sha256: []const u8,
+    bottle_cellar: []const u8,
     name: []const u8,
     bar: ?*progress_mod.ProgressBar,
 ) bool {
@@ -590,7 +614,7 @@ fn downloadBottle(
         return false;
     };
 
-    store.commitFrom(sha256, tmp_dir) catch {
+    commitMigrated(ctx.io, store, sha256, bottle_cellar, tmp_dir) catch {
         output.err("    Store commit failed: {s}", .{name});
         atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);
@@ -697,6 +721,14 @@ const Scratch = struct {
         self.arena.deinit();
     }
 };
+
+test "localCellarTag names the Cellar of the brew prefix" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/usr/local/Cellar", localCellarTag(&buf, "/usr/local"));
+    // A prefix that cannot fit gives the empty tag, never a cut path.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("", localCellarTag(&tiny, "/opt/homebrew"));
+}
 
 test "findTapFormulaRb prefers the receipt's source.path when it exists and ends in .rb" {
     var s = try Scratch.init("taprb_src");
@@ -1164,4 +1196,45 @@ test "recordAndLink skips linking for a keg-only bottle and keeps the row" {
 
     _ = try recordAndLink(std.Options.debug_io, fx.deps, fx.fields, "wget", false);
     try std.testing.expect(isInstalled(&db, "wget"));
+}
+
+test "commitMigrated records the bottle's tag and ignores one the archive planted" {
+    var s = try Scratch.init("commit_tag_mig");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ef".*)));
+    const staged = s.p("/tmp/" ++ sha);
+    try std.Io.Dir.cwd().createDirPath(io, staged);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    const planted = try std.Io.Dir.cwd().createFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag_file.file_name), .{});
+    try planted.writeStreamingAll(io, sha ++ " /evil/Cellar\n");
+    planted.close(io);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
+
+    try commitMigrated(io, &store, sha, "/opt/malt-brew/Cellar", staged);
+    var buf: [cellar_tag_file.buf_len]u8 = undefined;
+    try std.testing.expectEqualStrings("/opt/malt-brew/Cellar", cellar_tag_file.read(io, s.p("/store/" ++ sha), sha, &buf).?);
+}
+
+test "commitMigrated still commits a bottle whose tag is unusable and drops a planted file" {
+    var s = try Scratch.init("commit_tag_mig_bad");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("01".*)));
+    const staged = s.p("/tmp/" ++ sha);
+    try std.Io.Dir.cwd().createDirPath(io, staged);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/store"));
+    const planted = try std.Io.Dir.cwd().createFile(io, s.p("/tmp/" ++ sha ++ "/" ++ cellar_tag_file.file_name), .{});
+    try planted.writeStreamingAll(io, sha ++ " /evil/Cellar\n");
+    planted.close(io);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, s.base);
+
+    try commitMigrated(io, &store, sha, "", staged);
+    try std.testing.expect(store.exists(sha));
+    var buf: [cellar_tag_file.buf_len]u8 = undefined;
+    try std.testing.expect(cellar_tag_file.read(io, s.p("/store/" ++ sha), sha, &buf) == null);
 }

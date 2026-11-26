@@ -96,6 +96,7 @@ pub const dirsize = @import("fs/dirsize.zig");
 pub const path_write = @import("fs/path_write.zig");
 pub const prefix_path = @import("fs/prefix_path.zig");
 pub const store_path = @import("fs/store_path.zig");
+pub const cellar_tag = @import("fs/cellar_tag.zig");
 pub const read = @import("fs/read.zig");
 pub const theme_file = @import("fs/theme_file.zig");
 pub const codesign = @import("macho/codesign.zig");

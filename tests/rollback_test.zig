@@ -830,6 +830,57 @@ fn kegInstallReason(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []
     return allocator.dupe(u8, std.mem.sliceTo(r, 0));
 }
 
+test "a completed rollback saves a relocated snapshot when the entry holds a cellar tag" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "tag_snapshot");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+    var entry_buf: [512]u8 = undefined;
+    const entry = try std.mem.print(&entry_buf, "{s}/store/{s}", .{ prefix, sha_previous });
+    // A tag of neither host default length. Without it rollback guesses the
+    // build prefix and saves no relocated snapshot.
+    try malt.cellar_tag.write(std.Options.debug_io, entry, sha_previous, "/opt/malt-brew/Cellar");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+    try testing.expect(malt.relocated_store.has(std.Options.debug_io, prefix, sha_previous));
+}
+
+test "a completed rollback saves no snapshot for an entry with no tag file" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "no_tag_snapshot");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+    try testing.expect(!malt.relocated_store.has(std.Options.debug_io, prefix, sha_previous));
+}
+
 // A keg pulled in as a dependency stays reclaimable after a rollback:
 // relabelling it 'direct' would make autoremove skip it forever.
 test "rolling back a dependency keeps it marked as a dependency" {

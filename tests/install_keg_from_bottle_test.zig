@@ -271,6 +271,14 @@ fn serveBottle(s: *BottleStub) void {
     }
 }
 
+// Wakes `serveBottle` if it is still parked in `accept`. Without it, a call
+// that fails before it connects leaves `join` waiting forever.
+fn knock(io: std.Io, port: u16) void {
+    var addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return;
+    const s = addr.connect(io, .{ .mode = .stream }) catch return;
+    s.close(io);
+}
+
 // `std.Options.debug_io`'s failing allocator cannot back a child spawn.
 fn tarCzf(argv: []const []const u8) !void {
     var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
@@ -337,10 +345,10 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     var stub = BottleStub{ .io = io, .listener = &listener, .body = body };
-    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
+    const port = listener.socket.address.getPort();
 
     var base_buf: [64]u8 = undefined;
-    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -378,6 +386,9 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
     var cellar_diag: ?malt.cellar.CellarError = null;
+    // No `try` between the spawn and the call, so a setup failure never frees
+    // the listener under a running thread.
+    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
     const result = malt.install_download.installKegFromBottle(
         &ctx,
         testing.allocator,
@@ -386,7 +397,9 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
         prefix,
     );
 
+    // Join before any `try`; the knock ends a server that was never dialed.
     http.deinit();
+    knock(io, port);
     server_thread.join();
 
     try testing.expectError(malt.install_record.InstallError.CellarFailed, result);
@@ -405,4 +418,131 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
     // deliberately invisible to it. What this pins is that a claim never
     // lies about a keg that does not exist.
     try testing.expectEqual(@as(i64, 0), try refRows(&db, &sha));
+}
+
+// ── cold-path cellar tag ───────────────────────────────────────────────────
+//
+// Rollback sizes relocated text by the tag stored with the entry. Only the
+// cold commit writes it, so these tests download a bottle over the loopback
+// registry. The archive also carries a tag file of its own: a bottle must
+// never choose the tag that rollback trusts.
+
+const ColdBottle = struct {
+    body: []u8,
+    sha: [64]u8,
+
+    fn deinit(self: *ColdBottle) void {
+        testing.allocator.free(self.body);
+    }
+};
+
+fn mintColdBottle(io: std.Io, prefix: []const u8) !ColdBottle {
+    const payload = try testing.allocator.print("{s}/work/coldpkg/1.0", .{prefix});
+    defer testing.allocator.free(payload);
+    try test_io.cwd().createDirPath(io, payload);
+    const work = try testing.allocator.print("{s}/work", .{prefix});
+    defer testing.allocator.free(work);
+    inline for (.{ "coldpkg/1.0/README", ".malt-cellar-tag" }) |rel| {
+        const path = try testing.allocator.print("{s}/{s}", .{ work, rel });
+        defer testing.allocator.free(path);
+        const f = try test_io.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, if (rel[0] == '.') "/evil/Cellar\n" else "cold bottle fixture\n");
+    }
+    const archive = try testing.allocator.print("{s}/bottle.tar.gz", .{prefix});
+    defer testing.allocator.free(archive);
+    try tarCzf(&.{ "tar", "czf", archive, "-C", work, "coldpkg", ".malt-cellar-tag" });
+
+    const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, archive, 1 << 20);
+    var raw: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &raw, .{});
+    return .{ .body = body, .sha = std.fmt.bytesToHex(raw, .lower) };
+}
+
+fn expectStoredTag(io: std.Io, prefix: []const u8, sha: []const u8, want: []const u8) !void {
+    const entry = try testing.allocator.print("{s}/store/{s}", .{ prefix, sha });
+    defer testing.allocator.free(entry);
+    var buf: [malt.cellar_tag.buf_len]u8 = undefined;
+    const got = malt.cellar_tag.read(io, entry, sha, &buf) orelse return error.TestNoTag;
+    try testing.expectEqualStrings(want, got);
+}
+
+test "installKegFromBottle stores the bottle's cellar tag, not one the archive carries" {
+    try test_io.skipIfNoSubprocess();
+
+    const prefix = try setupPrefix("coldtag");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var bottle = try mintColdBottle(io, prefix);
+    defer bottle.deinit();
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var stub = BottleStub{ .io = io, .listener = &listener, .body = bottle.body };
+    const port = listener.socket.address.getPort();
+
+    var base_buf: [64]u8 = undefined;
+    const base_url = try std.mem.print(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const formula_json = try arena.allocator().print(
+        \\{{
+        \\  "name": "coldpkg",
+        \\  "full_name": "coldpkg",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "versions": {{"stable": "1.0"}},
+        \\  "revision": 0,
+        \\  "dependencies": [],
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "oldnames": [],
+        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/coldpkg/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
+        \\}}
+    ,
+        .{ &bottle.sha, &bottle.sha },
+    );
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = malt.client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    var ghcr = malt.ghcr.GhcrClient.init(io, testing.allocator, &http);
+    defer ghcr.deinit();
+    ghcr.base_url = base_url;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var store = malt.store.Store.init(io, testing.allocator, &db, prefix);
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    // Start the server right before the call: no `try` sits between the two,
+    // so a setup failure never frees the listener under a running thread.
+    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
+    const result = malt.install_download.installKegFromBottle(
+        &ctx,
+        testing.allocator,
+        .{ .ghcr = &ghcr, .http = &http, .store = &store },
+        &formula,
+        prefix,
+    );
+
+    // Join before any `try`: a failed install must not free the listener
+    // under the serving thread. The knock ends a server that was never dialed.
+    http.deinit();
+    knock(io, port);
+    server_thread.join();
+
+    const installed = try result;
+    defer testing.allocator.free(installed.keg.path);
+    try expectStoredTag(io, prefix, &bottle.sha, ":any");
 }

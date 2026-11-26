@@ -1223,3 +1223,153 @@ test "verifyFile checks every arch slice, not just the first" {
         patcher.verifyFile(io, testing.allocator, path),
     );
 }
+
+// ---------------------------------------------------------------------------
+// patchTextFiles - length-prefixed records (PHP-serialized `s:N:"..."`)
+// ---------------------------------------------------------------------------
+
+/// True when every `s:N:"` record in `text` holds exactly N bytes followed
+/// by `";`. A stand-in for PHP's `unserialize()` length check.
+fn serializedLengthsHold(text: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.findPos(u8, text, i, "s:")) |at| {
+        var p = at + 2;
+        var n: usize = 0;
+        while (p < text.len and std.ascii.isDigit(text[p])) : (p += 1) n = n * 10 + (text[p] - '0');
+        i = at + 2;
+        if (p == at + 2 or p + 1 >= text.len or text[p] != ':' or text[p + 1] != '"') continue;
+        const start = p + 2;
+        if (start + n + 2 > text.len) return false;
+        if (!std.mem.eql(u8, text[start + n ..][0..2], "\";")) return false;
+        i = start + n + 2;
+    }
+    return true;
+}
+
+/// Writes `body` to a scratch file, runs the text pass, returns the new bytes.
+fn relocateText(io: std.Io, tag: []const u8, body: []const u8, reps: []const patcher.Replacement) ![]u8 {
+    const dir = try tmpSubdir(io, tag);
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const file_path = try testing.allocator.print("{s}/conf", .{dir});
+    defer testing.allocator.free(file_path);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, body);
+    }
+    _ = try patcher.patchTextFiles(io, testing.allocator, dir, reps);
+    const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{});
+    defer f.close(io);
+    const size = (try f.stat(io)).size;
+    const out = try testing.allocator.alloc(u8, size);
+    errdefer testing.allocator.free(out);
+    _ = try f.readPositionalAll(io, out, 0);
+    return out;
+}
+
+const pear_conf =
+    "#PEAR_Config 0.9\n" ++
+    "a:2:{s:7:\"php_dir\";s:54:\"@@HOMEBREW_CELLAR@@/php@8.5/8.5.13/share/php@8.5/pear\";" ++
+    "s:7:\"bin_dir\";s:17:\"@@HOMEBREW_PREFIX@@/bin\";}";
+
+test "patchTextFiles keeps PHP-serialized lengths correct across a prefix change" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Shorter than `/opt/homebrew`, and longer than it.
+    for ([_][]const u8{ "/opt/malt", "/Users/someone/a/much/longer/malt-prefix" }) |prefix| {
+        const cellar = try testing.allocator.print("{s}/Cellar", .{prefix});
+        defer testing.allocator.free(cellar);
+        const reps = [_]patcher.Replacement{
+            .{ .old = "@@HOMEBREW_PREFIX@@", .new = prefix, .built = "/opt/homebrew" },
+            .{ .old = "@@HOMEBREW_CELLAR@@", .new = cellar, .built = "/opt/homebrew/Cellar" },
+        };
+        const out = try relocateText(io, "ser", pear_conf, &reps);
+        defer testing.allocator.free(out);
+        errdefer std.debug.print("shape: {s}\n{s}\n", .{ prefix, out });
+
+        try testing.expect(serializedLengthsHold(out));
+        try testing.expect(std.mem.find(u8, out, "@@HOMEBREW_") == null);
+        const want = try testing.allocator.print("{s}/php@8.5/8.5.13/share/php@8.5/pear\";", .{cellar});
+        defer testing.allocator.free(want);
+        try testing.expect(std.mem.find(u8, out, want) != null);
+    }
+}
+
+test "patchTextFiles counts a quote inside a serialized payload as payload bytes" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // 3 bytes (`a"b`) + 13 build-time bytes.
+    const body = "s:16:\"a\"b@@HOMEBREW_PREFIX@@\";";
+    const reps = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt", .built = "/opt/homebrew" },
+    };
+    const out = try relocateText(io, "quote", body, &reps);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("s:12:\"a\"b/opt/malt\";", out);
+}
+
+test "patchTextFiles leaves a header whose declared length does not match" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // 5 is not the build-time length of what follows, so this is prose.
+    const body = "echo s:5:\"@@HOMEBREW_PREFIX@@/bin\";\n";
+    const reps = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt", .built = "/opt/homebrew" },
+    };
+    const out = try relocateText(io, "mismatch", body, &reps);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("echo s:5:\"/opt/malt/bin\";\n", out);
+}
+
+test "patchTextFiles keeps a record header untouched when its payload needs no rewrite" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    const body = "s:5:\"hello\";\nroot=@@HOMEBREW_PREFIX@@\n";
+    const reps = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt", .built = "/opt/homebrew" },
+    };
+    const out = try relocateText(io, "plain", body, &reps);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("s:5:\"hello\";\nroot=/opt/malt\n", out);
+}
+
+test "patchTextFiles treats a payload holding a needle without a build value as plain text" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Cannot know the build-time size of `/usr/local`, so no record logic.
+    const body = "s:16:\"/usr/local/bin/gpg\";";
+    const reps = [_]patcher.Replacement{
+        .{ .old = "/usr/local", .new = "/opt/malt" },
+    };
+    const out = try relocateText(io, "nobuilt", body, &reps);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("s:16:\"/opt/malt/bin/gpg\";", out);
+}
+
+test "patchTextFiles keeps lengths right when the new prefix contains a needle" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    const reps = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/homebrew-x", .built = "/opt/homebrew" },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/homebrew-x/Cellar", .built = "/opt/homebrew/Cellar" },
+        .{ .old = "/opt/homebrew", .new = "/opt/homebrew-x" },
+    };
+    const out = try relocateText(io, "selfneedle", pear_conf, &reps);
+    defer testing.allocator.free(out);
+    try testing.expect(serializedLengthsHold(out));
+}

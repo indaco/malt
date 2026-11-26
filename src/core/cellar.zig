@@ -123,6 +123,9 @@ pub fn materialize(
 /// patching is skipped (relocatable bottle). Text placeholder substitution
 /// (@@HOMEBREW_PREFIX@@, @@HOMEBREW_CELLAR@@) always runs.
 ///
+/// An empty `cellar_type` means the tag is unknown. The build prefix is then
+/// a guess, and no relocated snapshot is saved.
+///
 /// `extra_replacement` carries a substitution the caller resolved from the
 /// formula (see `formula.dependencyPlaceholder`); null for most bottles.
 ///
@@ -273,8 +276,11 @@ pub fn materializeWithCellar(
     // Snapshot the post-relocation keg so the next install of the same
     // bottle sha takes the cache short-circuit at the top of this
     // function. Snapshot failure is non-fatal — the user-visible install
-    // already succeeded.
-    if (relocated_store.save(io, allocator, prefix, store_sha256, name, version)) {
+    // already succeeded. An unknown tag means the build prefix was guessed,
+    // and a later install would reuse that guess.
+    if (cellar_type.len == 0) {
+        std.log.debug("relocated cache skipped for {s}: unknown cellar tag", .{store_sha256});
+    } else if (relocated_store.save(io, allocator, prefix, store_sha256, name, version)) {
         // `relocateKegTree` already checked this keg, so restores can skip it.
         relocated_store.markVerified(io, prefix, store_sha256);
     } else |e| {
@@ -774,6 +780,31 @@ fn freePaths(allocator: std.mem.Allocator, paths: []const []const u8) void {
     allocator.free(paths);
 }
 
+/// Prefix of the host that built the bottle: the parent of an absolute
+/// `cellar` tag, else the host default.
+fn builtPrefix(cellar_type: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, cellar_type, "/")) {
+        if (std.fs.path.dirname(cellar_type)) |parent| {
+            if (parent.len > 1) return parent;
+        }
+    }
+    return if (@import("builtin").cpu.arch == .x86_64) "/usr/local" else "/opt/homebrew";
+}
+
+test "builtPrefix takes the parent of an absolute cellar tag" {
+    try std.testing.expectEqualStrings("/usr/local", builtPrefix("/usr/local/Cellar"));
+    try std.testing.expectEqualStrings("/opt/homebrew", builtPrefix("/opt/homebrew/Cellar"));
+    try std.testing.expectEqualStrings("/home/linuxbrew/.linuxbrew", builtPrefix("/home/linuxbrew/.linuxbrew/Cellar"));
+}
+
+test "builtPrefix falls back to the host default for a tag with no prefix" {
+    const host: []const u8 = if (@import("builtin").cpu.arch == .x86_64) "/usr/local" else "/opt/homebrew";
+    // A parent of "/" is too short to be a prefix.
+    for ([_][]const u8{ ":any", ":any_skip_relocation", "", "/", "/Cellar" }) |tag| {
+        try std.testing.expectEqualStrings(host, builtPrefix(tag));
+    }
+}
+
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -825,18 +856,36 @@ fn relocateKegTree(
     // Last on purpose: text replacements run in sequence per file, so
     // appending keeps the substituted path out of the prefix rewrites above.
     var text_reps_buf: [8]patch.Replacement = undefined;
-    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
-    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
+    // `built` is what each token was at bottle build time. Length-prefixed
+    // text files used that size.
+    // A failed format leaves no value, so the record stays plain text.
+    const built_prefix = builtPrefix(cellar_type);
+    // Intel Homebrew keeps its repository in a subdirectory of the prefix.
+    const built_repo = if (std.mem.eql(u8, built_prefix, "/usr/local")) "/usr/local/Homebrew" else built_prefix;
+    var built_cellar_buf: [256]u8 = undefined;
+    const built_cellar = std.mem.print(&built_cellar_buf, "{s}/Cellar", .{built_prefix}) catch null;
+    var built_library_buf: [256]u8 = undefined;
+    const built_library = std.mem.print(&built_library_buf, "{s}/Library", .{built_repo}) catch null;
+    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix, .built = built_prefix };
+    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar, .built = built_cellar };
     // malt has no separate repository checkout; shellenv reports the prefix.
-    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix };
-    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library };
-    text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
-    text_reps_buf[5] = .{ .old = "/usr/local", .new = new_prefix };
-    text_reps_buf[6] = perl;
-    var text_reps_len: usize = 7;
+    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix, .built = built_repo };
+    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library, .built = built_library };
+    // A literal needle was the same bytes at build time.
+    text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix, .built = "/opt/homebrew" };
+    var text_reps_len: usize = 5;
+    // In a bottle built elsewhere, `/usr/local` is upstream data (a configure
+    // default, a gpg path). Rewriting it corrupts length-prefixed files and
+    // changes what the tools report.
+    if (!skip_absolute_rewrite and std.mem.eql(u8, built_prefix, "/usr/local")) {
+        text_reps_buf[text_reps_len] = .{ .old = "/usr/local", .new = new_prefix, .built = "/usr/local" };
+        text_reps_len += 1;
+    }
+    text_reps_buf[text_reps_len] = perl;
+    text_reps_len += 1;
     if (extra_replacement) |r| {
-        text_reps_buf[7] = r;
-        text_reps_len = 8;
+        text_reps_buf[text_reps_len] = r;
+        text_reps_len += 1;
     }
     const text_reps = text_reps_buf[0..text_reps_len];
     const macho_reps = macho_reps_buf[0..macho_reps_len];

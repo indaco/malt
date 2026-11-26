@@ -3076,6 +3076,78 @@ test "renamed homebrew/core keg migrates from the local Cellar copy" {
     try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
 }
 
+test "local Cellar migrate sizes length-prefixed text for the brew prefix" {
+    resetOutput();
+    const brew = try scratchDir("brew_lenrec");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z = try scratchDir("mt_lenrec_longer");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
+    // The check only means something when the three lengths differ.
+    try testing.expect(brew.len != mt_z.len and brew.len != "/opt/homebrew".len and brew.len != "/usr/local".len);
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const keg_dir = try testing.allocator.print("{s}/Cellar/widget/2.0", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const put = struct {
+        fn file(path: []const u8, body: []const u8) !void {
+            const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+            defer f.close(std.Options.debug_io);
+            try f.writeStreamingAll(std.Options.debug_io, body);
+        }
+    }.file;
+    const receipt_path = try testing.allocator.print("{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    try put(receipt_path,
+        \\{"source":{"tap":"homebrew/core","versions":{"stable":"2.0"}}}
+    );
+    // Brew wrote the record for its own prefix, so its length is that prefix's.
+    const conf_path = try testing.allocator.print("{s}/app.conf", .{keg_dir});
+    defer testing.allocator.free(conf_path);
+    const before = try testing.allocator.print("s:{d}:\"@@HOMEBREW_PREFIX@@\";", .{brew.len});
+    defer testing.allocator.free(before);
+    try put(conf_path, before);
+
+    const cache_api = try testing.allocator.print("{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try testing.allocator.print("{s}/formula_widget.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+
+    output.setMode(.json);
+    defer resetOutput();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    const out_path = try testing.allocator.print("{s}/Cellar/widget/2.0/app.conf", .{mt_z});
+    defer testing.allocator.free(out_path);
+    const got = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, out_path, 4096);
+    defer testing.allocator.free(got);
+    const want = try testing.allocator.print("s:{d}:\"{s}\";", .{ mt_z.len, mt_z });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
+
 test "core keg with a malformed receipt still fails after the core guard is gone" {
     resetOutput();
     const brew = try scratchDir("brew_core_bad_receipt");
