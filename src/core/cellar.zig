@@ -567,7 +567,8 @@ fn writeKegMarkerText(io: std.Io, allocator: std.mem.Allocator, cellar_path: []c
     defer allocator.free(path);
     const body = allocator.print("{s}\n", .{text}) catch return;
     defer allocator.free(body);
-    // Best-effort: a failed write costs a doctor row, never the install.
+    // Best-effort: a failed write never fails the relocation. A missing
+    // unrelocated marker costs a doctor row and the php PEAR skip.
     atomic.atomicWriteFile(io, path, body) catch {};
 }
 
@@ -603,10 +604,9 @@ pub fn readRelocStamp(io: std.Io, cellar_path: []const u8) ?RelocStamp {
     return .{ .version = std.fmt.parseInt(u32, text, 10) catch return null };
 }
 
-/// Marker names malt owns inside a keg. Relocation rewrites them last, so a
-/// bottle cannot forge one — but a path that extracts an archive without
-/// relocating must strip them, or the archive's author decides what doctor
-/// reports about the keg.
+/// Marker names malt owns inside a keg. A path that extracts an archive
+/// without relocating must strip them, or the archive's author decides what
+/// doctor reports about the keg.
 pub const keg_markers = [_][]const u8{ unrelocated_marker, reloc_version_marker };
 
 pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {

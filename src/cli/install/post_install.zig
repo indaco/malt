@@ -78,13 +78,19 @@ pub const PostInstallStatus = enum {
 /// unknown_method / unsupported_node downgrades to the same
 /// `--use-system-ruby` suggestion we show on execute-time failures so
 /// users never see "completed" when statements were silently skipped.
+/// A log with only `prefix_too_long` entries is "partially skipped" with no
+/// suggestion, and no opt-in runs Ruby: Ruby cannot lengthen the paths
+/// compiled into a binary. A log that dropped a line (`dropped_oom`) is an
+/// exception: a lost entry may have had another reason, so the usual hint
+/// and opt-in apply. A lost note sets the same flag and gets the same result.
 ///
 /// Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) only fall
 /// through to the system-Ruby re-run when the DSL handled none of the
 /// body. Their effects often already landed at brew-install time, so a
 /// blanket re-run would double-stamp non-idempotent steps (counters,
 /// timestamps, version caches). Explicit `--use-system-ruby=NAME` is
-/// a user opt-in and falls through unconditionally.
+/// a user opt-in and falls through, except for `prefix_too_long` alone
+/// in a log that dropped nothing.
 ///
 /// Under `--verbose`, the skipped entries are dumped so users can tell
 /// WHICH helpers fell through. Under `--json`, a single status line is
@@ -147,12 +153,21 @@ pub fn routePostInstallOutcomeWithBody(
             sink.info("post_install completed for {s}", .{name});
             break :blk .completed;
         }
+        // Ruby cannot lengthen the paths compiled into a binary, so neither
+        // the re-run nor its hint helps when this is the sole reason. A dropped
+        // entry may have had another reason, so a lossy log cannot prove it.
+        // A failed note copy sets the same flag, so that case keeps the hint too.
+        if (onlyReason(flog, .prefix_too_long) and !flog.dropped_oom) {
+            sink.warn("{s}: post_install partially skipped", .{name});
+            if (output.isVerbose()) renderUnknown(flog, name);
+            break :blk .partially_skipped;
+        }
         // Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) skip the
         // re-run when the DSL handled any top-level statement: their
         // post_install effects often already landed (e.g. `mt migrate`
         // after brew installed it), so a Ruby-side re-run would double-stamp
         // non-idempotent steps. Explicit `--use-system-ruby=NAME` honors the
-        // user's opt-in unconditionally.
+        // user's opt-in, except for `prefix_too_long` alone (checked above).
         const explicit_opt_in = useSystemRubyForFormula(use_system_ruby_list, name);
         const auto_self_hosting = isSelfHostingRubyKeg(name);
         if (explicit_opt_in or (auto_self_hosting and !flog.dslDidWork())) {
@@ -371,9 +386,14 @@ fn renderFatal(flog: *const dsl.FallbackLog, tag: []const u8) void {
     renderEntries(flog, tag, &.{ .sandbox_violation, .system_command_failed, .parse_error });
 }
 
+fn onlyReason(flog: *const dsl.FallbackLog, reason: dsl.FallbackReason) bool {
+    for (flog.entries()) |entry| if (entry.reason != reason) return false;
+    return true;
+}
+
 /// The log-only reasons `renderFatal` skips; shown under `--verbose`.
 fn renderUnknown(flog: *const dsl.FallbackLog, tag: []const u8) void {
-    renderEntries(flog, tag, &.{ .unknown_method, .unsupported_node });
+    renderEntries(flog, tag, &.{ .unknown_method, .unsupported_node, .prefix_too_long });
 }
 
 /// Emit the pure log's free-form diagnostics (raise messages, inreplace
@@ -400,7 +420,7 @@ fn renderNotes(flog: *const dsl.FallbackLog) void {
         }
     }
     if (flog.dropped_oom)
-        output.writeStderrAll("malt: fallback log dropped an entry due to OOM\n");
+        output.writeStderrAll("malt: fallback log dropped a line due to OOM\n");
 }
 
 /// Write one JSON line per post_install routing decision to stdout. One

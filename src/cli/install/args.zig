@@ -10,9 +10,10 @@ const path_component = @import("../../fs/path_component.zig");
 /// Upper bound on MALT_PREFIX byte length. This is a sanity cap, not a
 /// correctness gate: the Mach-O relocation pipeline (see
 /// `src/core/patch.zig`) grows overflowing load-command slots via
-/// `install_name_tool`, so realistic prefixes of any practical length
-/// work without preflight rejection. The cap just keeps pathological
-/// values from reaching the subprocess.
+/// `install_name_tool`, so load commands accept a prefix of any practical
+/// length. Fixed-size strings in a bottle do not grow: a prefix longer than
+/// the build prefix leaves some of them unrelocated. The cap just keeps
+/// pathological values from reaching the subprocess.
 pub const max_prefix_sane_len: usize = 256;
 
 pub const PrefixError = error{PrefixAbsurd};

@@ -13,6 +13,9 @@ pub const FallbackReason = enum {
     /// Parser diagnostic propagated from `Parser.diagnostics()` after a
     /// `parseBlock` failure. Carries the offending line/col in `loc`.
     parse_error,
+    /// The malt prefix is longer than the one the bottle was built for, so a
+    /// step cannot run. Not fatal: the install itself is sound.
+    prefix_too_long,
 };
 
 pub const FallbackEntry = struct {
@@ -32,6 +35,7 @@ pub const FallbackLog = struct {
     /// Set when an append fails under memory pressure. A pure log can't
     /// render, so the caller reads this at the rendering seam and warns
     /// that "post_install was partially skipped" was itself dropped.
+    /// A failed `note` sets it too, so the flag does not prove an entry was lost.
     dropped_oom: bool = false,
     /// Top-level statements the interpreter attempted to evaluate. Bumped
     /// per-node by `Interpreter.execute`; tests construct synthetic logs by
