@@ -881,6 +881,129 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
 }
 
+/// Sets every directory under `path` (and `path`) to 0755. A walk, not a list
+/// of known paths: a missed read-only directory would leak under /tmp.
+fn makeTreeWritable(path: []const u8) void {
+    var dir = test_io.openDirAbsolute(std.Options.debug_io, path, .{}) catch return;
+    const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+    dir.close(std.Options.debug_io);
+
+    var it_dir = test_io.openDirAbsolute(std.Options.debug_io, path, .{ .iterate = true }) catch return;
+    defer it_dir.close(std.Options.debug_io);
+    var it = it_dir.iterate();
+    while (it.next(std.Options.debug_io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const child = std.mem.print(&buf, "{s}/{s}", .{ path, entry.name }) catch continue;
+        makeTreeWritable(child);
+    }
+}
+
+test "materializeRubyFormula refuses an archive whose shipped marker it cannot remove, naming the marker" {
+    // A read-only `.malt-unrelocated/` with a child inside the wrapper cannot
+    // be deleted. Moving it to the keg root would let the archive set malt's
+    // verdict, so the install stops. The "builds from source" text would blame
+    // the wrong thing here.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores the mode
+    const prefix = try setupPrefix("stuckmarker");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    // Runs before the delete above: a 0555 tree cannot be removed.
+    defer makeTreeWritable(prefix);
+
+    const sha = std.mem.asBytes(&@as([32][2]u8, @splat("ab".*)));
+    const work = try testing.allocator.print("{s}/stuckwork", .{prefix});
+    defer testing.allocator.free(work);
+    const wrapper = try testing.allocator.print("{s}/tool-1.0", .{work});
+    defer testing.allocator.free(wrapper);
+    {
+        const bin = try testing.allocator.print("{s}/bin", .{wrapper});
+        defer testing.allocator.free(bin);
+        try test_io.cwd().createDirPath(std.Options.debug_io, bin);
+        const marker = try testing.allocator.print("{s}/.malt-unrelocated", .{wrapper});
+        defer testing.allocator.free(marker);
+        try test_io.cwd().createDirPath(std.Options.debug_io, marker);
+        const files = [_][]const u8{ "bin/tool", ".malt-unrelocated/child" };
+        for (files) |rel| {
+            const path = try testing.allocator.print("{s}/{s}", .{ wrapper, rel });
+            defer testing.allocator.free(path);
+            const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+            defer f.close(std.Options.debug_io);
+            try f.writeStreamingAll(std.Options.debug_io, "x\n");
+        }
+        var marker_dir = try test_io.openDirAbsolute(std.Options.debug_io, marker, .{});
+        defer marker_dir.close(std.Options.debug_io);
+        const marker_handle: std.Io.File = .{ .handle = marker_dir.handle, .flags = .{ .nonblocking = false } };
+        marker_handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    }
+
+    var cache_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.mem.print(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".zip");
+    // `unzip` keeps the archived mode of a directory; the tar extractors do not.
+    try runTar(&.{ "tar", "--format", "zip", "-cf", cache_path, "-C", work, "tool-1.0" });
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try testing.allocator.printSentinel("{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "stuckpkg",
+        .full_name = "user/repo/stuckpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-stuck-test.invalid/stuckpkg-1.0.zip",
+        .sha256 = sha,
+    };
+
+    try testing.expectError(install_record.InstallError.CellarFailed, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        try allocator.print("{s}/cache", .{prefix}),
+        false, // dry_run
+        false, // force
+        false, // download_only
+        null, // prefetch_slot
+        malt.install_sink.terminal,
+    ));
+
+    try testing.expect(std.mem.find(u8, captured.items, ".malt-unrelocated") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "builds from source") == null);
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
 /// Install a tarball holding one root executable for a formula named `mddog`,
 /// with `source` as the formula body.
 /// `sha_seed` gives each test its own cache entry. `file` is the executable in

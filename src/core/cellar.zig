@@ -593,7 +593,7 @@ pub fn writeRelocStamp(io: std.Io, allocator: std.mem.Allocator, cellar_path: []
 /// Null when the stamp is absent or unreadable — never a version, since a
 /// coerced number would read as stale and send the user to reinstall.
 pub fn readRelocStamp(io: std.Io, cellar_path: []const u8) ?RelocStamp {
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = std.mem.print(&path_buf, "{s}/{s}", .{ cellar_path, reloc_version_marker }) catch return null;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
@@ -604,18 +604,29 @@ pub fn readRelocStamp(io: std.Io, cellar_path: []const u8) ?RelocStamp {
     return .{ .version = std.fmt.parseInt(u32, text, 10) catch return null };
 }
 
-/// Marker names malt owns inside a keg. A path that extracts an archive
-/// without relocating must strip them, or the archive's author decides what
-/// doctor reports about the keg.
+/// Marker names malt owns inside a keg. Every path that puts an archive's
+/// tree into a keg must strip them before it writes its own. Relocation
+/// writes `.malt-unrelocated` only on failure, so it cannot overwrite a
+/// shipped one.
 pub const keg_markers = [_][]const u8{ unrelocated_marker, reloc_version_marker };
 
 pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
     for (keg_markers) |name| {
-        var buf: [512]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = std.mem.print(&buf, "{s}/{s}", .{ cellar_path, name }) catch continue;
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        // A tree, not a file: an archive can ship a directory of this name,
+        // and malt's own write cannot land on top of one.
+        std.Io.Dir.cwd().deleteTree(io, path) catch {
+            // A read-only tree cannot be deleted in place. Moving it needs
+            // only the keg root, and frees the name for malt's own write.
+            var aside_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const aside = std.mem.print(&aside_buf, "{s}.shipped-{d}-{d}", .{ path, std.c.getpid(), strip_seq.fetchAdd(1, .monotonic) }) catch continue;
+            std.Io.Dir.renameAbsolute(path, aside, io) catch {};
+        };
     }
 }
+
+var strip_seq: std.atomic.Value(u32) = .init(0);
 
 /// Resolve the perl shebang token from the keg's own `.brew/<name>.rb`, whose
 /// dependency list is what decides between a brewed perl and the system one.
@@ -668,6 +679,9 @@ pub fn relocateUnbottledKeg(
     allocator: std.mem.Allocator,
     cellar_path: []const u8,
 ) CellarError!void {
+    // An archive must not set the verdict that malt records below.
+    stripKegMarkers(io, cellar_path);
+
     const new_prefix = atomic.maltPrefixOrAbort();
 
     const reps = [_]patch.Replacement{
@@ -812,6 +826,9 @@ fn relocateKegTree(
     cellar_type: []const u8,
     extra_replacement: ?patch.Replacement,
 ) CellarError!void {
+    // A bottle must not set the verdict that malt records below.
+    stripKegMarkers(io, cellar_path);
+
     const new_prefix = atomic.maltPrefixOrAbort();
 
     var new_cellar_buf: [256]u8 = undefined;
@@ -1282,6 +1299,40 @@ fn buildLoadDylibMachO(allocator: std.mem.Allocator, dylib_path: []const u8, cmd
     return buf;
 }
 
+/// One `__TEXT,__cstring` section holding `blob`, so a test can put a
+/// build-prefix string in a keg that relocation cannot grow into.
+fn buildCstringMachO(allocator: std.mem.Allocator, blob: []const u8) ![]u8 {
+    const macho_mod = std.macho;
+    const header_size = @sizeOf(macho_mod.mach_header_64);
+    const seg_size = @sizeOf(macho_mod.segment_command_64);
+    const cmdsize: u32 = @intCast(seg_size + @sizeOf(macho_mod.section_64));
+    const blob_off = header_size + cmdsize;
+
+    const buf = try allocator.alloc(u8, blob_off + blob.len);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho_mod.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho_mod.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cmdsize };
+
+    const seg = std.mem.bytesAsValue(macho_mod.segment_command_64, buf[header_size..][0..seg_size]);
+    seg.* = .{ .cmd = .SEGMENT_64, .cmdsize = cmdsize, .segname = @splat(0), .nsects = 1 };
+    @memcpy(seg.segname[0.."__TEXT".len], "__TEXT");
+
+    const sect = std.mem.bytesAsValue(macho_mod.section_64, buf[header_size + seg_size ..][0..@sizeOf(macho_mod.section_64)]);
+    sect.* = .{
+        .sectname = @splat(0),
+        .segname = @splat(0),
+        .offset = @intCast(blob_off),
+        .size = blob.len,
+        .flags = macho_mod.S_CSTRING_LITERALS,
+    };
+    @memcpy(sect.sectname[0.."__cstring".len], "__cstring");
+    @memcpy(sect.segname[0.."__TEXT".len], "__TEXT");
+
+    @memcpy(buf[blob_off..], blob);
+    return buf;
+}
+
 fn relocatedDylibPath(allocator: std.mem.Allocator, io: std.Io, bin_path: []const u8) ![]u8 {
     const parser_mod = @import("../macho/parser.zig");
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, bin_path, allocator, .unlimited);
@@ -1325,6 +1376,26 @@ test "relocateUnbottledKeg rewrites a build-prefix dylib reference to the malt p
 
     // Relocation ran, so a future logic bump must be able to name this keg —
     // `not_applicable` would exempt it forever.
+    try testing.expectEqual(
+        RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
+        readRelocStamp(io, keg).?,
+    );
+}
+
+test "relocateUnbottledKeg drops markers the archive shipped" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_binary_keg_markers");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker), "7\n");
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/" ++ reloc_version_marker), "999\n");
+
+    try relocateUnbottledKeg(io, testing.allocator, keg);
+
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker), .{}));
     try testing.expectEqual(
         RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
         readRelocStamp(io, keg).?,
@@ -1564,6 +1635,27 @@ test "stripKegMarkers clears a marker the extracted archive supplied" {
     try testing.expect(readRelocStamp(io, keg) == null);
     // Idempotent: the strip runs on every such install, most with no markers.
     stripKegMarkers(io, keg);
+}
+
+test "stripKegMarkers clears a marker under a keg path longer than 512 bytes" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("strip_long_keg_path");
+    defer s.deinit();
+    const comp_bytes: [120]u8 = @splat('d');
+    const comp: []const u8 = &comp_bytes;
+    const keg = try testing.allocator.print("{s}/{s}/{s}/{s}/{s}/{s}", .{ s.p("/Cellar"), comp, comp, comp, comp, comp });
+    defer testing.allocator.free(keg);
+    try testing.expect(keg.len > 512);
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    const marker = try testing.allocator.print("{s}/{s}", .{ keg, unrelocated_marker });
+    defer testing.allocator.free(marker);
+    try atomic.atomicWriteFile(io, marker, "7\n");
+
+    stripKegMarkers(io, keg);
+
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, marker, .{}));
 }
 
 test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {
@@ -2152,6 +2244,195 @@ test "relocateKegTree rejects a list entry escaping the keg and falls back" {
     try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
     try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
     try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/b.conf")));
+}
+
+test "relocateKegTree drops a shipped unrelocated marker after a clean relocation" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_shipped_marker_clean");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    // The bottle author, not malt, wrote this file.
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker), "7\n");
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker), .{}));
+}
+
+test "relocateKegTree keeps its own unrelocated count over a shipped one" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_shipped_marker_leftover");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    // The test prefix is longer than `/opt/homebrew`, so this slot cannot grow.
+    const image = try buildCstringMachO(testing.allocator, "/opt/homebrew/etc/fonts\x00");
+    defer testing.allocator.free(image);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/c"), image);
+    const marker = s.p("/Cellar/tool/1.0/" ++ unrelocated_marker);
+    try atomic.atomicWriteFile(io, marker, "7\n");
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, marker, testing.allocator, .unlimited);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("1", std.mem.trim(u8, got, " \n"));
+}
+
+test "relocateKegTree replaces a shipped relocation stamp with its own" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_shipped_stamp");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/" ++ reloc_version_marker), "999\n");
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expectEqual(
+        RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
+        readRelocStamp(io, keg).?,
+    );
+}
+
+test "relocateKegTree still relocates when a bottle ships a directory named like the marker" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_marker_is_dir");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    // The strip must clear a directory of this name, or malt's own write cannot land.
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker));
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker), .{}));
+}
+
+test "relocateKegTree records its own count over a shipped directory of the marker's name" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_marker_dir_leftover");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    const image = try buildCstringMachO(testing.allocator, "/opt/homebrew/etc/fonts\x00");
+    defer testing.allocator.free(image);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/c"), image);
+    const marker = s.p("/Cellar/tool/1.0/" ++ unrelocated_marker);
+    try std.Io.Dir.cwd().createDirPath(io, marker);
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, marker, testing.allocator, .unlimited);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("1", std.mem.trim(u8, got, " \n"));
+}
+
+test "relocateKegTree records its own markers over read-only shipped directories" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    // Root ignores mode bits, so the delete would succeed.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var s = try Scratch.init("reloc_marker_dir_readonly");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    const image = try buildCstringMachO(testing.allocator, "/opt/homebrew/etc/fonts\x00");
+    defer testing.allocator.free(image);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/c"), image);
+    const marker = s.p("/Cellar/tool/1.0/" ++ unrelocated_marker);
+    const stamp = s.p("/Cellar/tool/1.0/" ++ reloc_version_marker);
+    // A read-only directory holding a child cannot be deleted in place.
+    for ([_][]const u8{ marker, stamp }) |dir_path| {
+        try std.Io.Dir.cwd().createDirPath(io, dir_path);
+        const child = try testing.allocator.print("{s}/child", .{dir_path});
+        defer testing.allocator.free(child);
+        try atomic.atomicWriteFile(io, child, "x");
+        var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
+        defer dir.close(io);
+        const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+        handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    }
+    // Relocation moves the read-only trees aside, so restore whatever
+    // directory is left in the keg root, or the scratch cleanup cannot run.
+    defer restore: {
+        var root = std.Io.Dir.cwd().openDir(io, keg, .{ .iterate = true }) catch break :restore;
+        defer root.close(io);
+        var it = root.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            var dir = root.openDir(io, entry.name, .{}) catch continue;
+            defer dir.close(io);
+            const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+            handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+        }
+    }
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, marker, testing.allocator, .unlimited);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("1", std.mem.trim(u8, got, " \n"));
+    try testing.expectEqual(
+        RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
+        readRelocStamp(io, keg).?,
+    );
+    // Both read-only trees were moved aside, not deleted.
+    var root = try std.Io.Dir.cwd().openDir(io, keg, .{ .iterate = true });
+    defer root.close(io);
+    var it = root.iterate();
+    var aside: usize = 0;
+    while (try it.next(io)) |entry| {
+        if (std.mem.find(u8, entry.name, ".shipped-") != null) aside += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), aside);
+}
+
+test "readRelocStamp reads a stamp under a keg path longer than 512 bytes" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("stamp_long_keg_path");
+    defer s.deinit();
+    const comp_bytes: [120]u8 = @splat('d');
+    const comp: []const u8 = &comp_bytes;
+    const keg = try testing.allocator.print("{s}/{s}/{s}/{s}/{s}/{s}", .{ s.p("/Cellar"), comp, comp, comp, comp, comp });
+    defer testing.allocator.free(keg);
+    try testing.expect(keg.len > 512);
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    writeRelocStamp(io, testing.allocator, keg, .{ .version = 5 });
+    try testing.expectEqual(RelocStamp{ .version = 5 }, readRelocStamp(io, keg).?);
+}
+
+test "relocateKegTree still relocates when the keg root refuses the marker delete" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    // Root ignores mode bits, so the delete would succeed.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var s = try Scratch.init("reloc_marker_locked");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    const marker = s.p("/Cellar/tool/1.0/" ++ unrelocated_marker);
+    try atomic.atomicWriteFile(io, marker, "7\n");
+
+    var dir = try std.Io.Dir.cwd().openDir(io, keg, .{});
+    defer dir.close(io);
+    const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    defer handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    // The strip is best effort: a failed delete must not fail the install.
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
 }
 
 test "resolveKegFiles refuses entries that leave the keg through a symlink" {
