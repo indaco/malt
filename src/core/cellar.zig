@@ -619,14 +619,16 @@ pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
         std.Io.Dir.cwd().deleteTree(io, path) catch {
             // A read-only tree cannot be deleted in place. Moving it needs
             // only the keg root, and frees the name for malt's own write.
+            // The suffix is random: the archive must not pre-ship the name.
+            var rnd: [8]u8 = undefined;
+            io.random(&rnd);
+            const hex = std.fmt.bytesToHex(rnd, .lower);
             var aside_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const aside = std.mem.print(&aside_buf, "{s}.shipped-{d}-{d}", .{ path, std.c.getpid(), strip_seq.fetchAdd(1, .monotonic) }) catch continue;
+            const aside = std.mem.print(&aside_buf, "{s}.shipped-{s}", .{ path, &hex }) catch continue;
             std.Io.Dir.renameAbsolute(path, aside, io) catch {};
         };
     }
 }
-
-var strip_seq: std.atomic.Value(u32) = .init(0);
 
 /// Resolve the perl shebang token from the keg's own `.brew/<name>.rb`, whose
 /// dependency list is what decides between a brewed perl and the system one.
@@ -1656,6 +1658,123 @@ test "stripKegMarkers clears a marker under a keg path longer than 512 bytes" {
     stripKegMarkers(io, keg);
 
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, marker, .{}));
+}
+
+test "stripKegMarkers frees the marker name when the archive pre-ships the aside names" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    // Root ignores mode bits, so the delete would succeed.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var s = try Scratch.init("strip_preshipped_aside");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    const marker = s.p("/Cellar/tool/1.0/" ++ unrelocated_marker);
+    // A read-only directory holding a child cannot be deleted in place.
+    try std.Io.Dir.cwd().createDirPath(io, marker);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/" ++ unrelocated_marker ++ "/x"), "x");
+    // Files at the pid-and-counter names for counters 0 to 15. Other tests
+    // also move markers aside, so cover more than the first two. A higher
+    // counter is not covered here; the 16-hex suffix check below guards it.
+    for (0..16) |seq| {
+        const guess = try testing.allocator.print("{s}.shipped-{d}-{d}", .{ marker, std.c.getpid(), seq });
+        defer testing.allocator.free(guess);
+        try atomic.atomicWriteFile(io, guess, "");
+    }
+    {
+        var dir = try std.Io.Dir.cwd().openDir(io, marker, .{});
+        defer dir.close(io);
+        const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+        handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    }
+    // The strip moves the read-only tree aside, so restore whatever directory
+    // is left in the keg root, or the scratch cleanup cannot run.
+    defer restore: {
+        var root = std.Io.Dir.cwd().openDir(io, keg, .{ .iterate = true }) catch break :restore;
+        defer root.close(io);
+        var it = root.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            var dir = root.openDir(io, entry.name, .{}) catch continue;
+            defer dir.close(io);
+            const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+            handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+        }
+    }
+
+    stripKegMarkers(io, keg);
+
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, marker, .{}));
+    // A short suffix is guessable again, so pin all 8 random bytes.
+    var root = try std.Io.Dir.cwd().openDir(io, keg, .{ .iterate = true });
+    defer root.close(io);
+    var it = root.iterate();
+    var moved: usize = 0;
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const prefix = unrelocated_marker ++ ".shipped-";
+        try testing.expect(std.mem.startsWith(u8, entry.name, prefix));
+        const suffix = entry.name[prefix.len..];
+        try testing.expectEqual(@as(usize, 16), suffix.len);
+        for (suffix) |c| try testing.expect(std.ascii.isHex(c));
+        moved += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), moved);
+}
+
+test "stripKegMarkers still strips the other markers when an aside name does not fit" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    // Root ignores mode bits, so the delete would succeed.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var s = try Scratch.init("strip_aside_overflow");
+    defer s.deinit();
+    // The marker path fits a path buffer, but its aside name does not.
+    const marker_len = std.Io.Dir.max_path_bytes - 10;
+    const keg = try testing.allocator.alloc(u8, marker_len - 1 - unrelocated_marker.len);
+    defer testing.allocator.free(keg);
+    const base = s.p("/Cellar");
+    @memcpy(keg[0..base.len], base);
+    for (keg[base.len..], 0..) |*c, i| c.* = if (i % 100 == 0) '/' else 'd';
+    keg[keg.len - 1] = 'd';
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+
+    var kd = try std.Io.Dir.cwd().openDir(io, keg, .{ .iterate = true });
+    defer kd.close(io);
+    try kd.createDirPath(io, unrelocated_marker);
+    try kd.writeFile(io, .{ .sub_path = unrelocated_marker ++ "/x", .data = "x" });
+    try kd.writeFile(io, .{ .sub_path = reloc_version_marker, .data = "999\n" });
+    {
+        var dir = try kd.openDir(io, unrelocated_marker, .{});
+        defer dir.close(io);
+        const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+        handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    }
+    // Restore every directory in the keg root, not only the marker: if the
+    // strip moves it aside, the scratch cleanup must still run.
+    defer {
+        var it = kd.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            var dir = kd.openDir(io, entry.name, .{}) catch continue;
+            defer dir.close(io);
+            const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+            handle.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+        }
+    }
+
+    stripKegMarkers(io, keg);
+
+    // One marker that cannot move must not stop the strip of the others.
+    try testing.expectError(error.FileNotFound, kd.access(io, reloc_version_marker, .{}));
+    try kd.access(io, unrelocated_marker, .{});
+}
+
+test "stripKegMarkers skips a keg path too long for a marker path" {
+    // The strip is best effort, so a keg path it cannot join must not abort.
+    const keg: [std.Io.Dir.max_path_bytes]u8 = @splat('d');
+    stripKegMarkers(std.Options.debug_io, &keg);
 }
 
 test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {
